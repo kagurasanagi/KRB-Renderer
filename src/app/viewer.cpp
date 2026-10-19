@@ -130,6 +130,7 @@ struct ViewState {
     bool autoExposureRequested = false;
     bool denoise = true;  // ノイズ除去した画像を表示する
     bool spectral = false;  // 分光モード（代表波長方式）
+    bool integratorChanged = false;
 
     // マウス
     bool rotating = false, panning = false;
@@ -631,6 +632,27 @@ int cmdView(const ViewOptions& vo) {
                     }
                 }
 
+                ImGui::SeparatorText("積分器");
+                {
+                    static const char* kIntegrators[] = {"pt", "bdpt", "vcm"};
+                    int cur = 0;
+                    for (int i = 0; i < 3; ++i)
+                        if (cfg.integrator == kIntegrators[i]) cur = i;
+                    int sel = cur;
+                    ImGui::RadioButton("PT", &sel, 0);
+                    ImGui::SameLine();
+                    ImGui::RadioButton("BDPT", &sel, 1);
+                    ImGui::SameLine();
+                    ImGui::RadioButton("VCM", &sel, 2);
+                    if (sel != cur) {
+                        cfg.integrator = kIntegrators[sel];
+                        st.integratorChanged = true;
+                    }
+                    ImGui::TextDisabled("%s", sel == 0   ? "単方向（速い）"
+                                              : sel == 1 ? "双方向（光源側の経路とつなぐ）"
+                                                         : "双方向＋近傍のまとめ（透明な物体越しの集光模様も収束）");
+                }
+
                 ImGui::SeparatorText("色の計算");
                 int colorMode = st.spectral ? 1 : 0;
                 ImGui::RadioButton("RGB", &colorMode, 0);
@@ -714,6 +736,19 @@ int cmdView(const ViewOptions& vo) {
                     envError = d->error;
                     log::error("environment {}: {}", d->path, d->error);
                 }
+            }
+            if (st.integratorChanged) {
+                st.integratorChanged = false;
+                vkDeviceWaitIdle(dev);
+                try {
+                    prog.setIntegrator(cfg.integrator);
+                    log::info("integrator: {}", cfg.integrator);
+                } catch (const std::exception& e) {
+                    log::error("integrator {}: {}", cfg.integrator, e.what());
+                    cfg.integrator = "pt";
+                    prog.setIntegrator("pt");
+                }
+                st.dirty = true;
             }
             if (st.materialsDirty) {
                 gpu.updateMaterials(prep->scene.materials, st.bumpIntensity);

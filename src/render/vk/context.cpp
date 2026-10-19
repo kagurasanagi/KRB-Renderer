@@ -51,9 +51,12 @@ DeviceInfo queryInfo(VkPhysicalDevice pd) {
     VkPhysicalDeviceAccelerationStructureFeaturesKHR as{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
     as.pNext = &rq;
+    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT af{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
+    rq.pNext = &af;
     VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     f2.pNext = &as;
     vkGetPhysicalDeviceFeatures2(pd, &f2);
+    info.atomicFloatAdd = hasExt(exts, VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME) && af.shaderBufferFloat32AtomicAdd;
     info.rayQuery = hasExt(exts, VK_KHR_RAY_QUERY_EXTENSION_NAME) && rq.rayQuery;
     info.accelerationStructure =
         hasExt(exts, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) && as.accelerationStructure;
@@ -212,6 +215,12 @@ void Context::init(const ContextOptions& opts) {
         devExts.push_back("VK_KHR_external_memory_win32");
         externalMemory_ = true;
     }
+    // 光源側の経路をカメラにつなぐ戦略（BDPT / VCM）で、任意の画素へ足し込むため
+    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT faf{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
+    if (info_.atomicFloatAdd) {
+        devExts.push_back(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME);
+        faf.shaderBufferFloat32AtomicAdd = VK_TRUE;
+    }
     const char* prioExt = nullptr;
     if (opts.lowQueuePriority) {
         if (hasExt(exts, VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME))
@@ -241,6 +250,7 @@ void Context::init(const ContextOptions& opts) {
     f12.pNext = &f13;
     f13.pNext = &fas;
     fas.pNext = &frq;
+    if (info_.atomicFloatAdd) frq.pNext = &faf;
 
     const float prio = 0.5f;
     VkDeviceQueueGlobalPriorityCreateInfoKHR gp{VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR};

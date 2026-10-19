@@ -27,7 +27,7 @@ void addCommonOptions(CLI::App* c, krbr::app::RenderOptions& ro) {
     c->add_option("--env-intensity", ro.envIntensity, "environment intensity multiplier");
     c->add_option("--env-rotation", ro.envRotation, "environment rotation around the vertical axis (deg)");
     c->add_option("--clamp", ro.radianceClamp, "clamp indirect radiance per sample to suppress fireflies (default 10, 0 = off)");
-    c->add_option("--integrator", ro.integrator, "integrator (pt)");
+    c->add_option("--integrator", ro.integrator, "integrator: pt (default), bdpt, vcm");
     c->add_option("--seed", ro.seed, "random seed");
     c->add_flag("--init", ro.init, "write default config files (<project>.krbr/*.toml) if missing");
     c->add_flag("--no-cache", ro.noCache, "do not read or write the mesh cache");

@@ -239,6 +239,7 @@ render::FrameParams frameParams(const ProjectConfig& cfg, const scene::Camera& c
     f.envRotationRad = glm::radians(cfg.envRotationDeg);
     f.radianceClamp = cfg.radianceClamp;
     f.spectral = cfg.spectral;
+    f.vcmRadius = cfg.vcmRadius;
     f.maxDepth = static_cast<uint32_t>(std::max(1, cfg.maxDepth));
     f.seed = seed;
     return f;

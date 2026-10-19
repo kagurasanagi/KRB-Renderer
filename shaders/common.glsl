@@ -55,6 +55,9 @@ struct InstanceInfo {
     uint materialBase;
     uint pad0;
     uint pad1;
+    vec4 w2o0;  // ワールド → オブジェクトの 3x3（列）
+    vec4 w2o1;
+    vec4 w2o2;
 };
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
@@ -89,6 +92,9 @@ layout(set = 0, binding = 14, std140) uniform Frame {
     vec4 rgbToXyz0;   // リニア sRGB → XYZ の列
     vec4 rgbToXyz1;
     vec4 rgbToXyz2;
+    vec4 lightParams; // x: 環境光を選ぶ確率, y: 発光三角形の Σ(輝度 × 面積), z: シーンを囲む球の半径, w: 発光三角形の数
+    vec4 sceneCenter;
+    vec4 vcmParams;   // x: 近傍の半径の初期値（mm）, y: α, z: 光源側の経路の数, w: 1 なら merging を使う
 } F;
 
 layout(set = 0, binding = 15, std430) readonly buffer Instances { InstanceInfo instanceInfos[]; };

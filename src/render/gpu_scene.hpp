@@ -26,6 +26,12 @@ public:
     vk::Buffer vertices, indices, triMats, meshInfos, materials, instanceInfos;
     vk::Buffer envMarginal, envConditional, envPdf;
     vk::Buffer rgb2spec, rgb2specScale;  // RGB → スペクトルの表（分光モード用）
+    vk::Buffer emitters, emitterCdf;      // 発光する三角形と、輝度 × 面積に比例して選ぶための累積分布
+    uint32_t emitterCount = 0;
+    float emitterPower = 0.0f;            // Σ(輝度 × 面積)
+    float envAverageLuminance = 0.0f;     // 環境マップの平均輝度（立体角で平均、強度 1 のとき）
+    glm::vec3 sceneCenter{0.0f};
+    float sceneRadius = 1.0f;
     vk::Image envImage, boardImage;
     VkSampler envSampler = VK_NULL_HANDLE, boardSampler = VK_NULL_HANDLE;
     VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
@@ -39,6 +45,7 @@ public:
 private:
     void buildGeometry(const scene::Scene& sc, float bumpIntensity);
     void buildSpectralTable();
+    void buildEmitters(const scene::Scene& sc);
     void buildBoardTexture(const scene::Scene& sc);
     void destroyGeometry();
     void updateSdfTiles(const scene::Scene& sc);

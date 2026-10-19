@@ -38,7 +38,8 @@ set(SHADER_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
 set(SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/shaders")
 file(GLOB SHADER_INCLUDES CONFIGURE_DEPENDS "${SHADER_SRC_DIR}/*.glsl")
 set(SHADER_SOURCES "${SHADER_SRC_DIR}/pathtrace.comp" "${SHADER_SRC_DIR}/tonemap.comp"
-                   "${SHADER_SRC_DIR}/denoise_prep.comp")
+                   "${SHADER_SRC_DIR}/denoise_prep.comp" "${SHADER_SRC_DIR}/vcm_light.comp"
+                   "${SHADER_SRC_DIR}/vcm_camera.comp")
 set(SHADER_OUTPUTS)
 foreach(src ${SHADER_SOURCES})
   get_filename_component(name ${src} NAME)

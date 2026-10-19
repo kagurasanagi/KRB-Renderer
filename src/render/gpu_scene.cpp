@@ -1,6 +1,7 @@
 #include "render/gpu_scene.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include "core/log.hpp"
@@ -188,7 +189,10 @@ void GpuScene::buildGeometry(const scene::Scene& sc, float bumpIntensity) {
     std::vector<VkAccelerationStructureInstanceKHR> inst;
     std::vector<GpuInstanceInfo> instInfo;
     for (const auto& in : sc.instances) {
-        instInfo.push_back({in.mesh, in.materialBase, 0, 0});
+        GpuInstanceInfo ii{in.mesh, in.materialBase, 0, 0, {}};
+        const glm::mat3 w2o = glm::inverse(glm::mat3(in.xform));
+        for (int c = 0; c < 3; ++c) ii.w2o[c] = {w2o[c], 0.0f};
+        instInfo.push_back(ii);
         VkAccelerationStructureInstanceKHR v{};
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 4; ++c) v.transform.matrix[r][c] = in.xform[c][r];
@@ -256,6 +260,51 @@ void GpuScene::buildGeometry(const scene::Scene& sc, float bumpIntensity) {
                           VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
     });
     ctx.destroyBuffer(scratch);
+    buildEmitters(sc);
+}
+
+void GpuScene::buildEmitters(const scene::Scene& sc) {
+    // シーンを囲む球（環境光を、この球を覆う円盤から入る光として扱う）と、発光する三角形の一覧
+    glm::vec3 lo(1e30f), hi(-1e30f);
+    std::vector<GpuEmitter> em;
+    std::vector<float> cdf{0.0f};
+    double power = 0.0;
+    for (const auto& in : sc.instances) {
+        const auto& m = sc.meshes[in.mesh].mesh;
+        for (const auto& p : m.positions) {
+            const glm::vec3 w = glm::vec3(in.xform * glm::vec4(p, 1.0f));
+            lo = glm::min(lo, w);
+            hi = glm::max(hi, w);
+        }
+        for (size_t t = 0; t < m.triMaterial.size(); ++t) {
+            const uint32_t mat = in.materialBase + m.triMaterial[t];
+            if (mat >= sc.materials.size()) continue;
+            const scene::Material& mm = sc.materials[mat];
+            const glm::vec3 e = mm.emission_color * (mm.emission_luminance * kEmissionScale);
+            const float Y = 0.2126f * e.r + 0.7152f * e.g + 0.0722f * e.b;
+            if (Y <= 0.0f) continue;
+            glm::vec3 v[3];
+            for (int k = 0; k < 3; ++k) v[k] = glm::vec3(in.xform * glm::vec4(m.positions[m.indices[t * 3 + k]], 1.0f));
+            const float area = 0.5f * glm::length(glm::cross(v[1] - v[0], v[2] - v[0]));
+            if (area <= 0.0f) continue;
+            em.push_back({{v[0], glm::uintBitsToFloat(mat)}, {v[1], area}, {v[2], 0.0f}});
+            power += static_cast<double>(Y) * area;
+            cdf.push_back(static_cast<float>(power));
+        }
+    }
+    if (lo.x > hi.x) lo = hi = glm::vec3(0.0f);
+    sceneCenter = 0.5f * (lo + hi);
+    sceneRadius = std::max(0.5f * glm::length(hi - lo), 1.0f);
+    emitterCount = static_cast<uint32_t>(em.size());
+    emitterPower = static_cast<float>(power);
+    for (float& c : cdf) c = power > 0 ? static_cast<float>(c / power) : 0.0f;
+    if (em.empty()) {  // 空のバッファは作れないので 1 つ置いておく（数は 0）
+        em.push_back({});
+        cdf.push_back(1.0f);
+    }
+    emitters = ctx_->createDeviceBuffer(em.data(), em.size() * sizeof(GpuEmitter), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    emitterCdf = ctx_->createDeviceBuffer(cdf.data(), cdf.size() * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    if (emitterCount) log::info("GPU scene: {} emissive triangles", emitterCount);
 }
 
 void GpuScene::buildBoardTexture(const scene::Scene& sc) {
@@ -329,6 +378,17 @@ void GpuScene::setEnvironment(const io::ImageF& env, const EnvDistribution& dist
     envDistH = dist.height;
     envWidth = static_cast<uint32_t>(env.width);
     envHeight = static_cast<uint32_t>(env.height);
+    // 平均輝度（立体角で重みづけ）。光源の選び方（環境光か発光面か）に使う
+    double sum = 0, wsum = 0;
+    for (int y = 0; y < env.height; y += 2) {
+        const double s = std::sin((y + 0.5) / env.height * 3.14159265358979);
+        for (int x = 0; x < env.width; x += 2) {
+            const float* p = &env.rgba[(static_cast<size_t>(y) * env.width + x) * 4];
+            sum += s * (0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]);
+            wsum += s;
+        }
+    }
+    envAverageLuminance = wsum > 0 ? static_cast<float>(sum / wsum) : 0.0f;
 }
 
 void GpuScene::buildSpectralTable() {
@@ -356,7 +416,7 @@ void GpuScene::destroyGeometry() {
     for (auto& b : blasBuffers_) ctx_->destroyBuffer(b);
     blasBuffers_.clear();
     for (vk::Buffer* b : {&vertices, &indices, &triMats, &meshInfos, &materials, &instanceInfos, &tlasBuffer_,
-                          &instanceBuffer_})
+                          &instanceBuffer_, &emitters, &emitterCdf})
         ctx_->destroyBuffer(*b);
 }
 

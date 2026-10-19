@@ -26,6 +26,8 @@ struct FrameParams {
     uint32_t rrStartDepth = 3;
     uint32_t seed = 0;
     bool spectral = false;  // 分光モード（代表波長方式。累積は CIE XYZ）
+    float vcmRadius = 0.0f;  // VCM の近傍の半径の初期値（mm）。0 ならシーンの大きさから決める
+    float vcmAlpha = 0.75f;  // 繰り返すたびに半径を縮める割合（r_i = r_0 · i^((α−1)/2)）
 };
 
 class Integrator {
@@ -41,7 +43,7 @@ public:
     virtual void destroy() = 0;
 };
 
-// "pt"（パストレーサー）。将来 "bdpt", "vcm" を追加する
+// "pt"（パストレーサー）、"bdpt"（双方向パストレーシング）、"vcm"（vertex connection and merging）
 std::unique_ptr<Integrator> createIntegrator(const std::string& name);
 
 }  // namespace krbr::render

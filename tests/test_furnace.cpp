@@ -1,4 +1,4 @@
-// 白い炉テスト（white furnace test）：一様な白い環境光（放射輝度 1）の中に球を置き、オフスクリーンで描く。
+﻿// 白い炉テスト（white furnace test）：一様な白い環境光（放射輝度 1）の中に球を置き、オフスクリーンで描く。
 // 吸収のない材質なら、球の画素の値は 1 になる。1 を超えたらエネルギーが増えている（誤り）。
 // 単一散乱のマイクロファセット（多重散乱の補償なし）や、層の重ね方の近似による損失は、許容範囲として記録する。
 #include <doctest/doctest.h>
@@ -29,8 +29,8 @@ geom::Mesh uvSphere(float r, int segU, int segV) {
     for (int j = 0; j < segV; ++j)
         for (int i = 0; i < segU; ++i) {
             const uint32_t a = j * (segU + 1) + i, b = a + 1, c = a + segU + 1, d = c + 1;
-            m.addTriangle(a, c, b, 0);
-            m.addTriangle(b, c, d, 0);
+            m.addTriangle(a, b, c, 0);
+            m.addTriangle(b, d, c, 0);
         }
     return m;
 }
@@ -40,7 +40,8 @@ struct FurnaceResult {
     glm::dvec3 meanRgb{0.0};
 };
 
-FurnaceResult furnace(vk::Context& ctx, const scene::Material& mat, uint32_t spp, bool spectral = false) {
+FurnaceResult furnace(vk::Context& ctx, const scene::Material& mat, uint32_t spp, bool spectral = false,
+                      const char* integrator = "pt") {
     scene::Scene s;
     s.materials.push_back(mat);
     s.meshes.push_back({"sphere", uvSphere(10.0f, 96, 48)});
@@ -64,6 +65,7 @@ FurnaceResult furnace(vk::Context& ctx, const scene::Material& mat, uint32_t spp
     rs.frame.maxDepth = 64;
     rs.frame.radianceClamp = 0.0f;  // 偏りのない結果で比べる
     rs.frame.spectral = spectral;
+    rs.integrator = integrator;
     const auto out = render::renderOffscreen(ctx, gpu, rs);
     gpu.destroy();
 
@@ -189,4 +191,54 @@ TEST_CASE("spectral color constancy in a white furnace") {
             CHECK_MESSAGE(std::abs(spec.meanRgb[k] - rgb.meanRgb[k]) < 0.02 + 0.03 * rgb.meanRgb[k],
                           "channel " << k << ": spectral " << spec.meanRgb[k] << " vs RGB " << rgb.meanRgb[k]);
     }
+}
+
+// 双方向の積分器（BDPT / VCM）でも、白い炉の中で 1 になる（MIS の重みの和が 1 であることの確かめにもなる）
+TEST_CASE("white furnace test: bdpt and vcm") {
+    vk::Context ctx;
+    ctx.init({});
+    struct Case {
+        const char* name;
+        scene::Material m;
+        double lo, hi;
+        bool spectral;
+    };
+    std::vector<Case> cases;
+    auto add = [&](const char* name, auto setup, double lo, double hi, bool spectral = false) {
+        scene::Material m;
+        m.base_color = glm::vec3(1.0f);
+        setup(m);
+        cases.push_back({name, m, lo, hi, spectral});
+    };
+    add("lambert", [](scene::Material& m) { m.specular_weight = 0.0f; }, 0.98, 1.02);
+    add("metal_r0.3", [](scene::Material& m) {
+        m.base_metalness = 1.0f;
+        m.specular_roughness = 0.3f;
+    }, 0.90, 1.02);
+    add("dielectric_r0.3", [](scene::Material&) {}, 0.80, 1.02);
+    add("translucent", [](scene::Material& m) {
+        m.specular_weight = 0.0f;
+        m.subsurface_weight = 0.3f;
+        m.subsurface_color = glm::vec3(1.0f);
+        m.subsurface_radius = 1000.0f;
+    }, 0.98, 1.02);
+    add("glass", [](scene::Material& m) {
+        m.specular_roughness = 0.0f;
+        m.transmission_weight = 1.0f;
+    }, 0.98, 1.02);
+    add("acrylic (spec)", [](scene::Material& m) {
+        m.specular_roughness = 0.0f;
+        m.specular_ior = 1.491f;
+        m.transmission_weight = 1.0f;
+        m.transmission_dispersion_scale = 1.0f;
+        m.transmission_dispersion_abbe_number = 57.0f;
+    }, 0.97, 1.03, true);
+    std::printf("white furnace test, bidirectional (mean radiance on the sphere, ideal = 1):\n");
+    for (const char* integ : {"bdpt", "vcm"})
+        for (const auto& c : cases) {
+            const FurnaceResult r = furnace(ctx, c.m, 128, c.spectral, integ);
+            std::printf("  %-5s %-16s mean %.4f  (allowed %.3f .. %.3f)\n", integ, c.name, r.mean, c.lo, c.hi);
+            CHECK_MESSAGE(r.mean >= c.lo, integ << " " << c.name << " mean " << r.mean);
+            CHECK_MESSAGE(r.mean <= c.hi, integ << " " << c.name << " gains energy: mean " << r.mean);
+        }
 }

@@ -31,6 +31,7 @@ struct ProjectConfig {
     float radianceClamp = 10.0f;  // 間接光だけに効く上限（ホタル対策）
     bool spectral = false;        // 分光モード（代表波長方式、4 波長）
     std::string integrator = "pt";
+    float vcmRadius = 0.0f;  // VCM の近傍の半径の初期値（mm）。0 で自動
 
     std::vector<fs::path> loadedFiles;
 };

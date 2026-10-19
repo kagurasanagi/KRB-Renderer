@@ -43,6 +43,14 @@ constexpr float kEmissionScale = 1.0f / 1000.0f;
 
 struct GpuInstanceInfo {
     uint32_t mesh, materialBase, pad0, pad1;
+    glm::vec4 w2o[3];  // ワールド → オブジェクトの 3x3（列。光源側の頂点で交点を作り直すため）
+};
+
+// 発光する三角形（ワールド座標）。光源として直接サンプリングする
+struct GpuEmitter {
+    glm::vec4 p0;  // w: 材質の番号（float に詰めたビット）
+    glm::vec4 p1;  // w: 面積（mm²）
+    glm::vec4 p2;
 };
 
 // spec: RGB → スペクトルの表（nullptr なら分光用の係数は 0 のまま）
@@ -98,6 +106,9 @@ struct FrameUBO {
     glm::vec4 maskParams2;  // x: 壁ぎわのたまり, y: その距離, z: 銅の厚み, w: 1 なら距離場が使える
     glm::vec4 spectral;     // x: 1 なら分光モード（累積は XYZ）, y: 1 / ∫ȳ dλ
     glm::vec4 rgbToXyz[3];  // リニア sRGB → XYZ（列ごと。アルベドを XYZ で書くため）
+    glm::vec4 lightParams;  // x: 環境光を選ぶ確率, y: 発光三角形の Σ(輝度 × 面積), z: シーンを囲む球の半径, w: 発光三角形の数
+    glm::vec4 sceneCenter;  // xyz: シーンを囲む球の中心
+    glm::vec4 vcmParams;    // x: 近傍の半径（初期値、mm）, y: 半径を縮める α, z: 光源側の経路の数, w: 1 なら merging を使う
 };
 
 struct PushConstants {

@@ -1,0 +1,302 @@
+#version 460
+// BDPT / VCM のカメラ側：画素ごとにカメラ側の経路を作り、各頂点で
+//   s = 0：光源に当たった、s = 1：光源への直接サンプリング、s > 1：同じ番号の光源側の経路の頂点への接続、
+//   merging（VCM のみ）：近くの光源側の頂点とのまとめ
+// を MIS で組み合わせる。最後に、光源側からカメラへつないだ寄与（画面のバッファ）を足して累積する
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#include "common.glsl"
+#include "spectral.glsl"
+#include "sampling.glsl"
+#include "noise.glsl"
+#include "bsdf.glsl"
+#include "env.glsl"
+#include "scene.glsl"
+#include "lights.glsl"
+#include "ptcore.glsl"
+#include "bidir.glsl"
+
+// カメラ側の頂点の情報
+struct CamVertex {
+    vec3 pos;
+    vec3 ng, ns;
+    vec3 t, b;
+    vec3 v;  // 局所座標での、前の頂点への方向
+    float contProb;
+};
+
+// 光源の直接サンプリング（s = 1）
+vec4 directIllumination(SubPath cam, Shade s, CamVertex cv, VcmConst vc, inout Rng rng) {
+    vec3 p = offsetRay(cv.pos, cv.ng);
+    LightSample ls;
+    if (!sampleDirectLight(p, rng, ls)) return vec4(0.0);
+    if (dot(ls.wi, cv.ng) <= 0.0) return vec4(0.0);
+    vec3 l = toLocal(ls.wi, cv.t, cv.b, cv.ns);
+    if (l.z <= 0.0) return vec4(0.0);
+    vec4 f = bsdfEval(s, cv.v, l);
+    if (f.x + f.y + f.z + f.w <= 0.0) return vec4(0.0);
+    float dirPdfW = bsdfPdf(s, cv.v, l) * cv.contProb;
+    float revPdfW = bsdfPdf(s, l, cv.v) * cv.contProb;
+    float wLight = Mis(dirPdfW / ls.directPdfW);
+    float wCamera = Mis(ls.emissionPdfW * l.z / (ls.directPdfW * ls.cosAtLight)) *
+                    (vc.vmWeight + cam.dVCM + cam.dVC * Mis(revPdfW));
+    float w = 1.0 / (wLight + 1.0 + wCamera);
+    if (ls.isEnv ? occluded(p, ls.wi) : occludedDist(p, ls.wi, ls.dist * (1.0 - 1e-4))) return vec4(0.0);
+    return ls.Le * f * (w * l.z / ls.directPdfW);
+}
+
+// 光源側の頂点を作り直す（材質は保存した乱数の状態から）
+struct LightVertexShade {
+    Shade s;
+    vec3 pos, ng, ns, wo;
+};
+
+LightVertexShade shadeLightVertex(LightVertex lv) {
+    LightVertexShade o;
+    o.pos = lv.posInst.xyz;
+    o.ng = octDecode(lv.dirs.x);
+    vec3 nsBase = octDecode(lv.dirs.y);
+    o.wo = octDecode(lv.dirs.z);
+    Hit h = rebuildHit(o.pos, lv.pObjMat.xyz, o.ng, nsBase, floatBitsToUint(lv.posInst.w), floatBitsToUint(lv.pObjMat.w));
+    Rng srng;
+    srng.state = lv.dirs.w;
+    o.ns = nsBase;
+    o.s = surfaceAt(h, o.ns, srng);
+    if (dot(o.ns, o.wo) <= 0.0) o.ns = nsBase;
+    return o;
+}
+
+// カメラ側の頂点と光源側の頂点をつなぐ（s > 1）。カメラ側の throughput もかけ、波長の打ち切りは両側を合わせて 1 回だけ扱う
+vec4 connectVertices(LightVertex lv, SubPath cam, Shade cs, CamVertex cv, VcmConst vc) {
+    LightVertexShade lvs = shadeLightVertex(lv);
+    vec3 d = lvs.pos - cv.pos;
+    float dist2 = dot(d, d);
+    if (dist2 <= 1e-12) return vec4(0.0);
+    float dist = sqrt(dist2);
+    d /= dist;
+    if (dot(d, cv.ng) <= 0.0 || dot(-d, lvs.ng) <= 0.0) return vec4(0.0);
+    vec3 lc = toLocal(d, cv.t, cv.b, cv.ns);
+    if (lc.z <= 0.0) return vec4(0.0);
+    vec4 fc = bsdfEval(cs, cv.v, lc);
+    if (fc.x + fc.y + fc.z + fc.w <= 0.0) return vec4(0.0);
+    vec3 lt, lb;
+    basis(lvs.ns, lt, lb);
+    vec3 lv_v = toLocal(lvs.wo, lt, lb, lvs.ns), ll = toLocal(-d, lt, lb, lvs.ns);
+    if (lv_v.z <= 0.0 || ll.z <= 0.0) return vec4(0.0);
+    vec4 fl = bsdfEval(lvs.s, lv_v, ll) * shadingCorrection(lvs.wo, -d, lvs.ns, lvs.ng);
+    if (fl.x + fl.y + fl.z + fl.w <= 0.0) return vec4(0.0);
+    float camDirPdfW = bsdfPdf(cs, cv.v, lc) * cv.contProb;
+    float camRevPdfW = bsdfPdf(cs, lc, cv.v) * cv.contProb;
+    float lightDirPdfW = bsdfPdf(lvs.s, lv_v, ll) * lv.mis.w;
+    float lightRevPdfW = bsdfPdf(lvs.s, ll, lv_v) * lv.mis.w;
+    float cosCam = lc.z, cosLight = ll.z;
+    float G = cosCam * cosLight / dist2;
+    float camDirPdfA = camDirPdfW * cosLight / dist2;
+    float lightDirPdfA = lightDirPdfW * cosCam / dist2;
+    float wLight = Mis(camDirPdfA) * (vc.vmWeight + lv.mis.x + lv.mis.y * Mis(lightRevPdfW));
+    float wCamera = Mis(lightDirPdfA) * (vc.vmWeight + cam.dVCM + cam.dVC * Mis(camRevPdfW));
+    float w = 1.0 / (wLight + 1.0 + wCamera);
+    vec3 p0 = offsetRay(cv.pos, cv.ng), p1 = offsetRay(lvs.pos, lvs.ng);
+    vec3 dd = p1 - p0;
+    float dl = length(dd);
+    if (occludedDist(p0, dd / dl, dl)) return vec4(0.0);
+    return maskTerminated(cam.throughput * w * G * fc * fl * lv.throughput, cam.terminated || lv.links.w != 0u);
+}
+
+// 近くの光源側の頂点とまとめる（merging）。カメラ側の throughput と正規化の係数もかける
+vec4 mergeVertices(SubPath cam, Shade cs, CamVertex cv, VcmConst vc) {
+    vec4 acc = vec4(0.0);
+    float cellSize = 2.0 * vc.radius;
+    vec3 c = cv.pos / cellSize;
+    ivec3 base = ivec3(floor(c));
+    vec3 fr = c - vec3(base);
+    ivec3 o = ivec3(fr.x < 0.5 ? -1 : 1, fr.y < 0.5 ? -1 : 1, fr.z < 0.5 ? -1 : 1);
+    uint visited[8];
+    for (int k = 0; k < 8; ++k) {
+        ivec3 cell = base + ivec3((k & 1) != 0 ? o.x : 0, (k & 2) != 0 ? o.y : 0, (k & 4) != 0 ? o.z : 0);
+        uint h = cellHash(cell);
+        bool dup = false;
+        for (int j = 0; j < k; ++j) dup = dup || visited[j] == h;
+        visited[k] = h;
+        if (dup) continue;
+        uint guard = 0u;
+        for (uint idx = cellHead[h]; idx != NO_VERTEX && guard < 4096u; ++guard) {
+            LightVertex lv = lightVerts[idx];
+            idx = lv.links.y;
+            vec3 d = lv.posInst.xyz - cv.pos;
+            if (dot(d, d) > vc.radius2) continue;
+            if (lv.links.z + cam.pathLength > maxPathLength()) continue;
+            if (dot(octDecode(lv.dirs.x), cv.ng) < 0.7) continue;  // 向きの違う面（角の向こう側など）とはまとめない
+            vec3 l = toLocal(octDecode(lv.dirs.z), cv.t, cv.b, cv.ns);
+            if (l.z <= 0.0) continue;
+            vec4 f = bsdfEval(cs, cv.v, l);
+            if (f.x + f.y + f.z + f.w <= 0.0) continue;
+            float camDirPdfW = bsdfPdf(cs, cv.v, l) * cv.contProb;
+            float camRevPdfW = bsdfPdf(cs, l, cv.v) * lv.mis.w;
+            float wLight = lv.mis.x * vc.vcWeight + lv.mis.z * Mis(camDirPdfW);
+            float wCamera = cam.dVCM * vc.vcWeight + cam.dVM * Mis(camRevPdfW);
+            float w = 1.0 / (wLight + 1.0 + wCamera);
+            acc += maskTerminated(cam.throughput * w * f * lv.throughput, cam.terminated || lv.links.w != 0u);
+        }
+    }
+    return acc * vc.vmNorm;
+}
+
+void main() {
+    uvec2 px = gl_GlobalInvocationID.xy;
+    if (px.x >= F.dims.x || px.y >= F.dims.y) return;
+    uint pathIdx = px.y * F.dims.x + px.x;
+    Rng rng = rngInit(px, pc.sampleIndex, pc.seed);
+    bidirWavelengths(pathIdx);
+    VcmConst vc = vcmConst();
+    bool spectral = spectralMode();
+
+    vec2 jitter = rnd2(rng);
+    vec2 ndc = (vec2(px) + jitter) / vec2(F.dims.xy) * 2.0 - 1.0;
+    vec3 dir = normalize(F.camForward.xyz + ndc.x * F.camRight.xyz - ndc.y * F.camUp.xyz);
+    float cosAtCamera = dot(F.camForward.xyz, dir);
+    float imagePointToCameraDist = imagePlaneDist() / cosAtCamera;
+    float cameraPdfW = imagePointToCameraDist * imagePointToCameraDist / cosAtCamera;
+
+    SubPath cam;
+    cam.origin = F.camPos.xyz;
+    cam.dir = dir;
+    cam.throughput = spectral ? vec4(1.0) : vec4(1.0, 1.0, 1.0, 0.0);
+    cam.pathLength = 1u;
+    cam.dVCM = Mis(lightPathCount() / cameraPdfW);
+    cam.dVC = 0.0;
+    cam.dVM = 0.0;
+    cam.terminated = false;
+    cam.finiteLight = false;
+    cam.mediumSigma = vec4(0.0);
+
+    vec4 L = vec4(0.0);
+    vec3 albedo = vec3(0.0), normal = vec3(0.0);
+    for (;;) {
+        Hit hit;
+        if (!traceClosest(cam.origin, cam.dir, hit)) {
+            // 環境光に当たった（s = 0）
+            vec4 Le = envSpectrum(cam.dir);
+            if (cam.pathLength == 1u) {
+                L += Le;
+                albedo = clamp(envRadiance(cam.dir), 0.0, 1.0);
+            } else {
+                float directPdfA = envLightPdfW(cam.dir);
+                float emissionPdfW = directPdfA / (PI * sceneRadius() * sceneRadius());
+                float wCamera = Mis(directPdfA) * cam.dVCM + Mis(emissionPdfW) * cam.dVC;
+                vec4 c = maskTerminated(cam.throughput * Le / (1.0 + wCamera), cam.terminated);
+                L += cam.pathLength >= 3u ? clampRadiance(c) : c;
+            }
+            break;
+        }
+        if (any(greaterThan(cam.mediumSigma, vec4(0.0)))) cam.throughput *= exp(-cam.mediumSigma * hit.t);
+        vec3 wo = -cam.dir;
+        bool frontFace = dot(hit.ng, wo) > 0.0;
+        vec3 ng = frontFace ? hit.ng : -hit.ng;
+        vec3 ns = dot(hit.ns, ng) < 0.0 ? -hit.ns : hit.ns;
+        if (dot(ns, wo) <= 0.0) ns = ng;
+        vec3 nsBase = ns;
+        Shade s = surfaceAt(hit, ns, rng);
+        if (dot(ns, wo) <= 0.0) ns = nsBase;
+        Material hm = materials[hit.material];
+        if (s.transWeight > 0.0) {
+            float n = iorOf(hm);
+            s.ior = frontFace ? n : 1.0 / n;
+            if (spectral && hm.params3.w > 0.5) cam.terminated = true;
+        }
+        misOnHit(cam, hit.t, dot(ns, wo), false);
+
+        // 発光面に当たった（s = 0、片面）
+        if (frontFace && luminanceOf(hm.emission.rgb) > 0.0) {
+            vec4 Le = specUnbounded(hm.emission.rgb, hm.specEmission);
+            if (cam.pathLength == 1u) {
+                L += Le;
+            } else {
+                float directPdfA = emitterPdfA(hm.emission.rgb);
+                float emissionPdfW = directPdfA * max(dot(hit.ng, wo), 0.0) * INV_PI;
+                float wCamera = Mis(directPdfA) * cam.dVCM + Mis(emissionPdfW) * cam.dVC;
+                vec4 c = maskTerminated(cam.throughput * Le / (1.0 + wCamera), cam.terminated);
+                L += cam.pathLength >= 3u ? clampRadiance(c) : c;
+            }
+        }
+        if (cam.pathLength == 1u) {
+            albedo = shadeAlbedoRgb(s);
+            normal = ns;
+        }
+        if (cam.pathLength >= maxPathLength()) break;
+
+        // 基材の中へ入る（subsurface）：ここから先は単方向のパストレーシングで続ける
+        if (s.sssWeight > 0.0 && rnd(rng) < s.sssWeight) {
+            PtState st;
+            st.beta = maskTerminated(cam.throughput, cam.terminated);
+            st.terminated = cam.terminated;
+            vec4 tint = s.coatWeight > 0.0 ? sqrt(coatTransmittance(s, max(dot(ns, wo), 1e-3), 1.0)) : vec4(1.0);
+            st.beta *= tint;
+            vec3 nIn = -ng;
+            vec3 t, b;
+            basis(nIn, t, b);
+            st.dir = toWorld(sampleCosineHemisphere(rnd2(rng)), t, b, nIn);
+            st.origin = offsetRay(hit.pos, nIn);
+            st.inside = true;
+            st.insideSigma = s.sssSigma;
+            st.mediumSigma = vec4(0.0);
+            st.prevPdf = 0.0;
+            vec3 a2 = vec3(0.0), n2 = vec3(0.0);
+            L += ptTrace(st, cam.pathLength, rng, a2, n2);
+            break;
+        }
+
+        bool delta = isDeltaLike(s);
+        CamVertex cv;
+        cv.pos = hit.pos;
+        cv.ng = ng;
+        cv.ns = ns;
+        basis(ns, cv.t, cv.b);
+        cv.v = toLocal(wo, cv.t, cv.b, ns);
+        cv.contProb = continuationProb(s);
+        if (cv.v.z <= 1e-6) break;
+
+        if (!delta) {
+            // s = 1：光源への直接サンプリング
+            if (cam.pathLength + 1u <= maxPathLength()) {
+                vec4 c = maskTerminated(cam.throughput * directIllumination(cam, s, cv, vc, rng), cam.terminated);
+                L += cam.pathLength + 1u >= 3u ? clampRadiance(c) : c;
+            }
+            // s > 1：同じ番号の光源側の経路の頂点へつなぐ
+            for (uint idx = pathHead[pathIdx]; idx != NO_VERTEX;) {
+                LightVertex lv = lightVerts[idx];
+                idx = lv.links.x;
+                if (lv.links.z + 1u + cam.pathLength > maxPathLength()) continue;
+                L += clampRadiance(connectVertices(lv, cam, s, cv, vc));
+            }
+            // merging（VCM）
+            if (useMerging()) {
+                L += clampRadiance(mergeVertices(cam, s, cv, vc));
+            }
+        }
+
+        if (!scatterSubPath(cam, s, hit.pos, ng, ns, wo, frontFace, delta, cv.contProb, false, vc, rng)) break;
+        ++cam.pathLength;
+    }
+
+    vec3 color = toOutputColor(L);
+    if (any(isnan(color)) || any(isinf(color))) color = vec3(0.0);
+    // 光源側からカメラへつないだ寄与（すでに表示の色）
+    uint si = pathIdx * 4u;
+    color += vec3(splat[si], splat[si + 1u], splat[si + 2u]);
+    if (spectral) albedo = rgbToXyz(albedo);
+
+    ivec2 ip = ivec2(px);
+    if (pc.sampleIndex == 0u) {
+        imageStore(accumColor, ip, vec4(color, 1.0));
+        imageStore(accumAlbedo, ip, vec4(albedo, 1.0));
+        imageStore(accumNormal, ip, vec4(normal, 1.0));
+    } else {
+        imageStore(accumColor, ip, imageLoad(accumColor, ip) + vec4(color, 1.0));
+        imageStore(accumAlbedo, ip, imageLoad(accumAlbedo, ip) + vec4(albedo, 1.0));
+        imageStore(accumNormal, ip, imageLoad(accumNormal, ip) + vec4(normal, 1.0));
+    }
+}

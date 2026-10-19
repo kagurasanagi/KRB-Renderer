@@ -69,8 +69,15 @@ void Progressive::rebuildIntegrator() {
     vkDeviceWaitIdle(ctx_->device());
     integrator_->destroy();
     integrator_ = createIntegrator(integratorName_);
+    if (!integrator_) throw std::runtime_error("unknown integrator: " + integratorName_);
     integrator_->setup(*ctx_, *scene_, targets_, frame_);
     samples_ = 0;
+}
+
+void Progressive::setIntegrator(const std::string& name) {
+    if (name == integratorName_) return;
+    integratorName_ = name;
+    rebuildIntegrator();
 }
 
 void Progressive::setFrame(const FrameParams& frame) {

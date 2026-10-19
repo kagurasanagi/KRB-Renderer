@@ -46,6 +46,7 @@ struct DeviceInfo {
     bool globalPriority = false;
     uint64_t deviceLocalBytes = 0;
     bool externalMemoryWin32 = false;  // VK_KHR_external_memory_win32（OIDN との共有）
+    bool atomicFloatAdd = false;       // VK_EXT_shader_atomic_float（バッファへの float の不可分加算）
     uint8_t deviceUUID[16] = {};
 };
 
