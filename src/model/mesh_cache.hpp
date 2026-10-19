@@ -10,6 +10,7 @@
 #include <memory>
 #include <vector>
 
+#include "model/mesh_file.hpp"
 #include "model/model_mesh.hpp"
 
 namespace krbr::model {
@@ -57,8 +58,5 @@ private:
     size_t completed_ = 0;
     Stats stats_;
 };
-
-bool writeMeshFile(const std::filesystem::path& p, const ModelMesh& m);
-std::shared_ptr<ModelMesh> readMeshFile(const std::filesystem::path& p);
 
 }  // namespace krbr::model

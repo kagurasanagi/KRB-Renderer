@@ -115,7 +115,7 @@ release だけをビルドする独自トリプレット `triplets/x64-windows-r
 | GLFW 3.4 | リアルタイム表示のウィンドウと入力 |
 | Intel Open Image Denoise 2.5.1 | ノイズ除去。公式のビルド済みバイナリ（Apache-2.0）を `third_party/oidn` に置く（`scripts/get_oidn.ps1`、git には含めない） |
 | Dear ImGui 1.92 | ビューアの操作パネル。バックエンド（GLFW / Vulkan）は volk を使うよう `third_party/imgui_backends` を自前でビルド（MIT） |
-| OpenCASCADE 8.0（TKDESTEP / TKXCAF / TKMesh / TKRWMesh） | STEP の読み込みと三角形分割（面の色つき） |
+| OpenCASCADE 8.0（TKDESTEP / TKXCAF / TKMesh / TKRWMesh） | STEP の読み込みと三角形分割（面の色つき）。**変換器 DLL `step\krbr_step.dll` の中だけで使い**、本体はリンクしない。OpenCASCADE の DLL 一式も `step\` にまとめる |
 | Clipper2, earcut.hpp | 多角形の和・差・オフセット、三角形分割 |
 | tinyexr, stb | EXR/HDR の入出力、PNG 出力 |
 | toml++, nlohmann-json, CLI11, glm | 設定・レポート・コマンドライン・数学 |
@@ -165,6 +165,16 @@ GTX 1060 での実測（kachkojir_RK3506G2、135 万三角形、PT、深さ 8）
 白い炉テスト・積分器の一致・プリズムの分散などの GPU のテストは、ray tracing pipeline 版でも ray query 版と同じ値で通ります（25 件すべて合格）。watch テストの「保存から 1 秒以内」は、`ray_query` を持つ GPU が無い PC では 30 秒に緩めています（仕組みの検証が目的のため）。
 
 そのほか、この PC では OIDN の CUDA デバイス（Volta 以降が必要）が使えないので、ノイズ除去は CPU（Xeon E3-1290 V2、AVX2 なし）で行われ、1080p の high で 6〜8 秒かかります。VRAM が 6 GB なので、環境マップは 8k ではなく 4k を使ってください。
+
+## STEP 変換器 DLL（`step\krbr_step.dll`）
+
+STEP の読み込み・三角形分割だけが OpenCASCADE を必要とするので、その部分を C の API 1 つの DLL に切り出しています。
+
+- `src/step_dll/krbr_step.cpp`：`krbr_step_to_mesh_file(step, 弦の許容誤差, 角度の許容誤差, 出力.krbm, err, len)`。OpenCASCADE に触るのはこのファイルだけ
+- 出力は `.krbm`（`src/model/mesh_file.hpp`。頂点・法線・添字・三角形ごとの部位番号・部位の名前と色）。メッシュキャッシュと同じ形式
+- 本体（`model/step_loader.cpp`）は、exe と同じフォルダの `step\krbr_step.dll` を必要になったときに読み込み、無ければ STEP を「読めない」扱い（代替の箱）で動きます。API と形式の版を照合します
+- `build\release\` には本体と OIDN・GLFW などの DLL だけが残り、OpenCASCADE の 24 本の DLL は `build\release\step\` に入ります
+- Rust 版もこの DLL を同じ API で呼びます
 
 ## 作業中の PC への配慮
 
@@ -250,7 +260,8 @@ bump_scale = 0.1
 ```
 cd rust
 cargo build --release
-targetelease\krbr.exe info E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --models
+target
+elease\krbr.exe info E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --models
 cargo test
 ```
 

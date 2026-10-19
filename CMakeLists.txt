@@ -28,7 +28,8 @@ find_package(imgui CONFIG REQUIRED)
 find_path(STB_INCLUDE_DIRS "stb_image.h" REQUIRED)
 find_path(EARCUT_HPP_INCLUDE_DIRS "mapbox/earcut.hpp" REQUIRED)
 
-# STEP 読み込み（OpenCASCADE）。見つからない場合は STEP を「読めない」扱いにして代替表示で動く
+# STEP 読み込み：OpenCASCADE は変換器 DLL（krbr_step、build/release/step/）の中だけで使う。
+# 見つからない場合は DLL を作らず、本体は STEP を「読めない」扱いにして代替表示で動く
 find_package(OpenCASCADE CONFIG QUIET)
 
 find_program(GLSLC glslc HINTS "$ENV{VULKAN_SDK}/Bin" REQUIRED)
@@ -75,7 +76,16 @@ add_custom_target(krbr_shaders DEPENDS ${SHADER_OUTPUTS})
 
 # ---------------------------------------------------------------- krbr_core（本体とテストで共有）
 file(GLOB_RECURSE KRBR_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
-list(REMOVE_ITEM KRBR_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
+list(REMOVE_ITEM KRBR_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp"
+                              "${CMAKE_CURRENT_SOURCE_DIR}/src/model/mesh_file.cpp"
+                              "${CMAKE_CURRENT_SOURCE_DIR}/src/step_dll/krbr_step.cpp")
+# .krbm の読み書き（本体と変換器 DLL で共有。他に依存しない）
+add_library(krbr_meshfile STATIC src/model/mesh_file.cpp)
+target_include_directories(krbr_meshfile PUBLIC src)
+target_link_libraries(krbr_meshfile PUBLIC glm::glm)
+if(MSVC)
+  target_compile_options(krbr_meshfile PUBLIC /utf-8 /W3 /permissive- /EHsc /Zc:__cplusplus)
+endif()
 # ImGui のバックエンドは volk を使うよう自前でビルドする（vcpkg 版は Vulkan ローダーを直接リンクするため）
 set(IMGUI_BACKEND_SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui_backends/imgui_impl_glfw.cpp"
@@ -84,7 +94,7 @@ add_library(krbr_core STATIC ${KRBR_SOURCES} ${IMGUI_BACKEND_SOURCES})
 add_dependencies(krbr_core krbr_shaders)
 target_include_directories(krbr_core PUBLIC src third_party/imgui_backends ${STB_INCLUDE_DIRS} ${EARCUT_HPP_INCLUDE_DIRS})
 target_link_libraries(krbr_core PUBLIC
-  Vulkan::Headers volk::volk GPUOpen::VulkanMemoryAllocator
+  krbr_meshfile Vulkan::Headers volk::volk GPUOpen::VulkanMemoryAllocator
   tomlplusplus::tomlplusplus nlohmann_json::nlohmann_json
   unofficial::tinyexr::tinyexr Clipper2::Clipper2 CLI11::CLI11 glm::glm glfw imgui::imgui)
 target_compile_definitions(krbr_core PUBLIC VK_NO_PROTOTYPES GLM_FORCE_DEPTH_ZERO_TO_ONE IMGUI_IMPL_VULKAN_USE_VOLK)
@@ -96,13 +106,20 @@ if(MSVC)
   target_compile_options(krbr_core PUBLIC /utf-8 /W3 /permissive- /EHsc /Zc:__cplusplus)
 endif()
 
+# ---------------------------------------------------------------- krbr_step（STEP 変換器 DLL）
+# 本体は OpenCASCADE をリンクしない。DLL と OpenCASCADE の DLL 一式は build/release/step/ にまとめ、
+# 本体は実行時に exe と同じフォルダの step/krbr_step.dll を探して読み込む
 if(OpenCASCADE_FOUND)
-  message(STATUS "OpenCASCADE ${OpenCASCADE_VERSION}: STEP support enabled")
-  target_compile_definitions(krbr_core PUBLIC KRBR_HAVE_OCCT=1)
-  target_include_directories(krbr_core PUBLIC ${OpenCASCADE_INCLUDE_DIR})
-  target_link_libraries(krbr_core PUBLIC TKDESTEP TKXCAF TKLCAF TKCAF TKRWMesh TKMesh TKBRep TKTopAlgo TKMath TKernel TKDE TKXSBase TKG3d TKGeomBase)
+  message(STATUS "OpenCASCADE ${OpenCASCADE_VERSION}: building STEP converter DLL (step/krbr_step.dll)")
+  add_library(krbr_step SHARED src/step_dll/krbr_step.cpp)
+  target_include_directories(krbr_step PRIVATE src ${OpenCASCADE_INCLUDE_DIR})
+  target_compile_definitions(krbr_step PRIVATE KRBR_STEP_EXPORTS NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+  target_link_libraries(krbr_step PRIVATE krbr_meshfile TKDESTEP TKXCAF TKLCAF TKCAF TKRWMesh TKMesh TKBRep TKTopAlgo TKMath TKernel TKDE TKXSBase TKG3d TKGeomBase)
+  set_target_properties(krbr_step PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/step"
+                                             LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/step")
+  add_dependencies(krbr_core krbr_step)
 else()
-  message(WARNING "OpenCASCADE not found: STEP models will fall back to placeholder boxes")
+  message(WARNING "OpenCASCADE not found: STEP converter DLL is not built; STEP models will fall back to placeholder boxes")
 endif()
 
 # ノイズ除去（OIDN の公式ビルド済みバイナリを third_party/oidn に置く。無ければノイズ除去なしで動く）

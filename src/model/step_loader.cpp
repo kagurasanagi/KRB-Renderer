@@ -1,34 +1,20 @@
-// STEP 読み込み（OpenCASCADE / XCAF）。面ごとの色も取り出す
+// STEP 読み込み：変換器 DLL（step\krbr_step.dll、中で OpenCASCADE を使う）を必要になったときだけ読み込んで呼ぶ。
+// 本体は OpenCASCADE に依存しない。DLL が無ければ STEP は「読めない」扱い（代替の箱で表示）
 #include <algorithm>
+#include <atomic>
 #include <chrono>
-#include <cmath>
+#include <format>
+#include <mutex>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "core/log.hpp"
 #include "core/platform.hpp"
+#include "model/mesh_file.hpp"
 #include "model/model_mesh.hpp"
-
-#ifdef KRBR_HAVE_OCCT
-#include <BRepMesh_IncrementalMesh.hxx>
-#include <IFSelect_ReturnStatus.hxx>
-#include <Interface_Static.hxx>
-#include <Message.hxx>
-#include <Message_Messenger.hxx>
-#include <Poly_Triangle.hxx>
-#include <Quantity_ColorRGBA.hxx>
-#include <RWMesh_FaceIterator.hxx>
-#include <TCollection_AsciiString.hxx>
-#include <TDataStd_Name.hxx>
-#include <STEPCAFControl_Reader.hxx>
-#include <NCollection_Sequence.hxx>
-#include <TDF_Label.hxx>
-#include <TDocStd_Document.hxx>
-#include <TopoDS_Shape.hxx>
-#include <XCAFApp_Application.hxx>
-#include <XCAFDoc_DocumentTool.hxx>
-#include <XCAFDoc_ShapeTool.hxx>
-#include <XCAFPrs_DocumentExplorer.hxx>
-#include <mutex>
-#endif
+#include "step_dll/krbr_step.h"
 
 namespace krbr::model {
 
@@ -40,6 +26,56 @@ std::string lowerExt(const std::filesystem::path& p) {
     return e;
 }
 
+using ToMeshFileFn = int (*)(const char*, double, double, const char*, char*, size_t);
+using VersionFn = int (*)();
+
+// DLL は 1 回だけ読み込む（見つからなければ以後は呼ばない）
+struct StepDll {
+    ToMeshFileFn toMeshFile = nullptr;
+    std::string error;
+
+    static const StepDll& get() {
+        static StepDll dll;
+        static std::once_flag once;
+        std::call_once(once, [] { dll.load(); });
+        return dll;
+    }
+
+private:
+    void load() {
+#ifdef _WIN32
+        const std::filesystem::path path = platform::exeDir() / "step" / "krbr_step.dll";
+        if (!std::filesystem::exists(path)) {
+            error = "not found: " + platform::pathToUtf8(path);
+            return;
+        }
+        // DLL と同じフォルダから OpenCASCADE の DLL を探す
+        HMODULE h = LoadLibraryExW(path.wstring().c_str(), nullptr,
+                                   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+        if (!h) {
+            error = std::format("LoadLibrary failed ({}) for {}", GetLastError(), platform::pathToUtf8(path));
+            return;
+        }
+        auto apiVersion = reinterpret_cast<VersionFn>(GetProcAddress(h, "krbr_step_api_version"));
+        auto fileVersion = reinterpret_cast<VersionFn>(GetProcAddress(h, "krbr_step_mesh_file_version"));
+        auto fn = reinterpret_cast<ToMeshFileFn>(GetProcAddress(h, "krbr_step_to_mesh_file"));
+        if (!apiVersion || !fileVersion || !fn) {
+            error = "krbr_step.dll does not export the expected functions";
+            return;
+        }
+        if (apiVersion() != KRBR_STEP_API_VERSION || fileVersion() != static_cast<int>(kMeshFileVersion)) {
+            error = std::format("krbr_step.dll version mismatch (api {} / mesh file v{}; expected {} / v{})", apiVersion(),
+                                fileVersion(), KRBR_STEP_API_VERSION, kMeshFileVersion);
+            return;
+        }
+        toMeshFile = fn;
+        log::debug("STEP converter: {}", platform::pathToUtf8(path));
+#else
+        error = "STEP converter DLL is only built on Windows";
+#endif
+    }
+};
+
 class StepLoader final : public IModelLoader {
 public:
     const char* name() const override { return "occt-step"; }
@@ -50,136 +86,42 @@ public:
     LoadResult load(const std::filesystem::path& p, const MeshParams& params) const override;
 };
 
-#ifdef KRBR_HAVE_OCCT
-
-// 部位の表（同じ名前・同じ色は1つの番号にまとめる）
-struct PartTable {
-    std::vector<ModelPart> parts;
-    uint32_t index(const ModelPart& p) {
-        for (size_t i = 0; i < parts.size(); ++i) {
-            const ModelPart& q = parts[i];
-            if (q.name == p.name && q.hasColor == p.hasColor && glm::all(glm::lessThan(glm::abs(q.srgb - p.srgb), glm::vec3(1e-4f))))
-                return static_cast<uint32_t>(i);
-        }
-        parts.push_back(p);
-        return static_cast<uint32_t>(parts.size() - 1);
-    }
-};
-
-std::string labelName(const TDF_Label& label) {
-    Handle(TDataStd_Name) n;
-    if (label.IsNull() || !label.FindAttribute(TDataStd_Name::GetID(), n)) return {};
-    return TCollection_AsciiString(n->Get()).ToCString();  // UTF-8
-}
-
-std::once_flag g_occtInit;
-
 LoadResult StepLoader::load(const std::filesystem::path& p, const MeshParams& params) const {
     LoadResult res;
     const auto t0 = std::chrono::steady_clock::now();
-    std::call_once(g_occtInit, [] {
-        // OCCT の標準出力へのメッセージを止める
-        Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_Printer));
-    });
-    try {
-        Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
-        Handle(TDocStd_Document) doc;
-        app->NewDocument("BinXCAF", doc);
-        XCAFDoc_DocumentTool::SetLengthUnit(doc, 1.0, UnitsMethods_LengthUnit_Millimeter);
-
-        STEPCAFControl_Reader reader;
-        reader.SetColorMode(true);
-        reader.SetNameMode(true);  // 部位の名前（XDE）を材質の割り当てに使う
-        reader.SetLayerMode(false);
-        reader.SetPropsMode(false);
-        const std::string u8 = platform::pathToUtf8(p);
-        if (reader.ReadFile(u8.c_str()) != IFSelect_RetDone) {
-            res.error = "STEP read failed";
-            app->Close(doc);
-            return res;
-        }
-        if (!reader.Transfer(doc)) {
-            res.error = "STEP transfer failed";
-            app->Close(doc);
-            return res;
-        }
-        Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
-        NCollection_Sequence<TDF_Label> roots;
-        shapes->GetFreeShapes(roots);
-        for (int i = 1; i <= roots.Length(); ++i) {
-            TopoDS_Shape s = XCAFDoc_ShapeTool::GetShape(roots.Value(i));
-            BRepMesh_IncrementalMesh mesher(s, params.linearDeflection, false, params.angularDeflection, true);
-            (void)mesher;
-        }
-
-        auto out = std::make_shared<ModelMesh>();
-        PartTable table;
-        // ルート（製品全体）の名前は部位の区別にならないので、部位名からは除く
-        std::string rootName;
-        if (roots.Length() == 1) rootName = labelName(roots.Value(1));
-        for (XCAFPrs_DocumentExplorer ex(doc, XCAFPrs_DocumentExplorerFlags_OnlyLeafNodes); ex.More(); ex.Next()) {
-            const XCAFPrs_DocumentNode& node = ex.Current();
-            std::string nodeName = labelName(node.RefLabel);
-            if (nodeName.empty()) nodeName = labelName(node.Label);
-            if (nodeName == rootName) nodeName.clear();
-            for (RWMesh_FaceIterator fit(node.RefLabel, node.Location, true, node.Style); fit.More(); fit.Next()) {
-                if (fit.IsEmptyMesh()) continue;
-                ModelPart part;
-                part.name = nodeName;
-                if (fit.HasFaceColor()) {
-                    const Quantity_ColorRGBA& c = fit.FaceColor();
-                    double r, g, b;
-                    // STEP の色値は表示用（sRGB）。OCCT はリニアに変換して持っているので、sRGB の値で受け取る
-                    c.GetRGB().Values(r, g, b, Quantity_TOC_sRGB);  // OCCT 内部はリニア。STEP に書かれた値に戻す
-                    part.srgb = {static_cast<float>(r), static_cast<float>(g), static_cast<float>(b)};
-                    part.alpha = c.Alpha();
-                    part.hasColor = true;
-                }
-                const uint32_t ci = table.index(part);
-                const uint32_t base = static_cast<uint32_t>(out->mesh.positions.size());
-                const int lo = fit.NodeLower(), hi = fit.NodeUpper();
-                for (int n = lo; n <= hi; ++n) {
-                    const gp_Pnt pt = fit.NodeTransformed(n);
-                    const gp_Dir nd = fit.NormalTransformed(n);
-                    out->mesh.addVertex({static_cast<float>(pt.X()), static_cast<float>(pt.Y()), static_cast<float>(pt.Z())},
-                                        {static_cast<float>(nd.X()), static_cast<float>(nd.Y()), static_cast<float>(nd.Z())});
-                }
-                for (int e = fit.ElemLower(); e <= fit.ElemUpper(); ++e) {
-                    int a, b, c;
-                    fit.TriangleOriented(e).Get(a, b, c);
-                    out->mesh.addTriangle(base + static_cast<uint32_t>(a - lo), base + static_cast<uint32_t>(b - lo),
-                                          base + static_cast<uint32_t>(c - lo), ci);
-                }
-            }
-        }
-        out->parts = std::move(table.parts);
-        app->Close(doc);
-        if (out->mesh.triangleCount() == 0) {
-            res.error = "tessellation produced no triangles";
-            return res;
-        }
-        res.mesh = std::move(out);
-    } catch (const Standard_Failure& e) {
-        res.error = std::string("OpenCASCADE exception: ") + e.what();
-    } catch (const std::exception& e) {
-        res.error = e.what();
+    const StepDll& dll = StepDll::get();
+    if (!dll.toMeshFile) {
+        res.error = "STEP converter unavailable: " + dll.error;
+        return res;
     }
+    // 変換器は .krbm をファイルに書くので、一時ファイル経由で受け取る
+    static std::atomic<unsigned> counter{0};
+    const std::filesystem::path tmpDir = platform::tempDir() / "step";
+    std::error_code ec;
+    std::filesystem::create_directories(tmpDir, ec);
+    const std::filesystem::path tmp = tmpDir / std::format("{}.krbm", counter++);
+    char err[512] = {};
+    const int rc = dll.toMeshFile(platform::pathToUtf8(p).c_str(), params.linearDeflection, params.angularDeflection,
+                                  platform::pathToUtf8(tmp).c_str(), err, sizeof err);
+    if (rc != 0) {
+        res.error = err[0] ? err : std::format("converter returned {}", rc);
+    } else {
+        res.mesh = readMeshFile(tmp);
+        if (!res.mesh) res.error = "cannot read converter output";
+    }
+    std::filesystem::remove(tmp, ec);
     res.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     return res;
 }
 
-#else
-
-LoadResult StepLoader::load(const std::filesystem::path&, const MeshParams&) const {
-    LoadResult res;
-    res.error = "built without OpenCASCADE";
-    return res;
-}
-
-#endif
-
 }  // namespace
 
 std::unique_ptr<IModelLoader> createStepLoader() { return std::make_unique<StepLoader>(); }
+
+bool stepSupportAvailable(std::string* why) {
+    const StepDll& dll = StepDll::get();
+    if (why) *why = dll.error;
+    return dll.toMeshFile != nullptr;
+}
 
 }  // namespace krbr::model

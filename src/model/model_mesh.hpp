@@ -53,5 +53,7 @@ public:
 };
 
 std::unique_ptr<IModelLoader> createStepLoader();
+// STEP 変換器 DLL（step\krbr_step.dll）が使えるか。why に無い理由
+bool stepSupportAvailable(std::string* why = nullptr);
 
 }  // namespace krbr::model
