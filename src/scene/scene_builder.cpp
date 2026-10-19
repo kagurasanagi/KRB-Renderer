@@ -90,7 +90,8 @@ void setupBoardMaterials(Scene& s, const kicad::Board& board, const SceneOptions
     mask.name = "solder_mask";
     // コートとして使う：coat_color がレジストを通る光の色、base_* は顔料自身の散乱
     mask.coat_weight = 1.0f;
-    mask.coat_color = srgbToLinear(maskSrgb);
+    // 設定の色は「銅の上で見えるレジストの色」とし、銅の平均反射率（約 0.7）で割って透過色にする
+    mask.coat_color = glm::min(srgbToLinear(maskSrgb) / 0.7f, glm::vec3(1.0f));
     mask.coat_roughness = o.maskRoughness;
     mask.coat_ior = 1.5f;
     mask.base_color = srgbToLinear(maskSrgb) * 0.6f;
