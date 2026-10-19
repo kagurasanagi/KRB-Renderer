@@ -6,6 +6,7 @@
 
 #include "app/commands.hpp"
 #include "app/material_cmd.hpp"
+#include "app/watch.hpp"
 #include "core/log.hpp"
 
 namespace {
@@ -44,7 +45,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> args(argv, argv + argc);
     for (size_t i = 1; i < args.size(); ++i) {
         if (!args[i].empty() && args[i][0] == '-') continue;
-        if (args[i] != "probe" && args[i] != "info" && args[i] != "render" && args[i] != "view" && args[i] != "material")
+        if (args[i] != "probe" && args[i] != "info" && args[i] != "render" && args[i] != "view" && args[i] != "material" && args[i] != "watch")
             args.insert(args.begin() + static_cast<std::ptrdiff_t>(i), "view");
         break;
     }
@@ -85,6 +86,17 @@ int main(int argc, char** argv) {
     view->add_flag("--hidden", vo.hidden, "do not show the window");
     view->add_option("--test-orbit", vo.testOrbitDeg, "development: rotate the camera by this many degrees per frame");
     view->add_option("--test-env", vo.testEnv, "development: switch to this environment map during the test");
+    bool noWatch = false;
+    view->add_flag("--no-watch", noWatch, "do not reload when the board file is saved");
+    view->add_flag("--test-reload", vo.testReload, "development: reload the board once during the test");
+
+    app::WatchOptions wo;
+    wo.common.out = "out/watch.png";
+    auto* watch = app.add_subcommand("watch", "headless: re-render whenever the board is saved (no window)");
+    addCommonOptions(watch, wo.common);
+    watch->add_option("--out,-o", wo.common.out, "output PNG (rewritten on every save)")->capture_default_str();
+    watch->add_option("--spp", wo.common.spp, "samples per pixel per update (default 32)");
+    watch->add_option("--max-updates", wo.maxUpdates, "stop after this many updates (0 = run until stopped)");
 
     // 材質の対応表
     auto* material = app.add_subcommand("material", "material assignment (OpenPBR materials, per model / per reference)");
@@ -113,7 +125,11 @@ int main(int argc, char** argv) {
     if (*probe) return app::cmdProbe();
     if (*info) return app::cmdInfo(infoPcb, infoModels);
     if (*render) return app::cmdRender(ro);
-    if (*view) return app::cmdView(vo);
+    if (*view) {
+        vo.watch = !noWatch;
+        return app::cmdView(vo);
+    }
+    if (*watch) return app::cmdWatch(wo);
     if (*mset) return app::cmdMaterialSet(mso);
     if (*mshow) return app::cmdMaterialShow(showPcb, showRef);
     if (*mlist) return app::cmdMaterialList();

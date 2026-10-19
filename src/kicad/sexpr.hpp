@@ -1,5 +1,6 @@
 #pragma once
 // KiCad の S式（.kicad_pcb など）の最小パーサ
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -39,6 +40,9 @@ struct ParseError {
     std::string message;
     size_t offset = 0;
 };
+
+// ノードの内容（アトムと入れ子の構造）のハッシュ
+uint64_t hashNode(const Node& n);
 
 // 失敗時は nullopt と err を返す
 std::optional<Node> parse(std::string_view text, ParseError* err = nullptr);

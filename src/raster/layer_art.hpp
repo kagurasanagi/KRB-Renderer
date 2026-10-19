@@ -30,7 +30,9 @@ struct LayerTextures {
 struct SidePaths {
     geom::Paths copper, maskOpen, silk;
 };
-SidePaths collectSidePaths(const kicad::Board& board, Side side, const LayerArtOptions& opts);
+// clip を渡すと、その矩形にかかる項目だけを集め、結果も矩形で切り抜く（タイル単位の作り直し用）
+SidePaths collectSidePaths(const kicad::Board& board, Side side, const LayerArtOptions& opts,
+                           const kicad::Box2* clip = nullptr);
 
 LayerTextures buildLayerTextures(const kicad::Board& board, const geom::BoardGeometry& geo,
                                  const LayerArtOptions& opts);

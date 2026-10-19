@@ -18,11 +18,13 @@ bool saveExr(const std::filesystem::path& p, const ImageF& img, std::string& err
 
 struct ToneMapOptions {
     float exposureEv = 0.0f;
+    int pngCompression = 8;  // 0..9。0 は圧縮しない（書き出しが速い。保存の監視中に使う）
 };
 // ACES（Hill による近似）でトーンマッピングして sRGB の 8bit PNG にする
 bool savePngTonemapped(const std::filesystem::path& p, const ImageF& img, const ToneMapOptions& opts, std::string& err);
 // 値をそのまま（0..1 を sRGB 変換して）PNG にする。デバッグ・AOV の確認用
 bool savePngLinear(const std::filesystem::path& p, const ImageF& img, bool srgb, std::string& err);
-bool savePngRgba8(const std::filesystem::path& p, int w, int h, const unsigned char* rgba, std::string& err);
+bool savePngRgba8(const std::filesystem::path& p, int w, int h, const unsigned char* rgba, std::string& err,
+                  int compression = 8);
 
 }  // namespace krbr::io

@@ -2,6 +2,8 @@
 
 #include <glm/gtc/constants.hpp>
 
+#include <chrono>
+
 #include "core/log.hpp"
 #include "core/platform.hpp"
 #include "kicad/model_resolver.hpp"
@@ -98,10 +100,10 @@ std::unique_ptr<PreparedScene> prepareScene(const RenderOptions& o, const fs::pa
     }
     std::error_code ec;
     const fs::path cacheDir = platform::cacheDir();
+    prep->options = o;
 
     // 部品の材質：材質ライブラリ、全体の対応表、プロジェクトの上書き
-    const MaterialSetup materials = loadMaterialSetup(board.file);
-    const scene::MaterialResolver materialResolver(materials.library, materials.project, materials.global);
+    prep->materials = loadMaterialSetup(board.file);
 
     // 線フォントの文字は kicad-cli の SVG 出力から取り込む
     const int strokeTexts = countSilkStrokeTexts(board);
@@ -109,6 +111,7 @@ std::unique_ptr<PreparedScene> prepareScene(const RenderOptions& o, const fs::pa
         if (!cfg.useKicadCliText || o.noKicadCli) {
             log::warn("{} stroke-font silkscreen text(s) will be missing (kicad-cli disabled)", strokeTexts);
         } else if (auto cli = findKicadCli(cfg.kicadCli)) {
+            prep->kicadCli = *cli;
             log::ScopedTimer t("kicad-cli");
             prep->silk = plotSilkWithKicadCli(*cli, board, cacheDir, !o.noCache);
             log::info("silkscreen text via kicad-cli ({} stroke texts){}", strokeTexts,
@@ -117,14 +120,13 @@ std::unique_ptr<PreparedScene> prepareScene(const RenderOptions& o, const fs::pa
             log::warn("kicad-cli not found; {} stroke-font silkscreen text(s) will be missing", strokeTexts);
         }
     }
-    for (int s = 0; s < 2; ++s)
-        if (prep->silk.side[s]) cfg.scene.layerArt.extraSilk[s] = &*prep->silk.side[s];
 
-    kicad::ModelResolver resolver(board.projectDir, cfg.pathVars, cfg.modelSearchDirs);
-    model::ModelLibrary library(cacheDir, model::MeshParams{}, !o.noCache);
+    cfg.scene.layerTextures = !debugLayersDir.empty();
+    prep->resolver = std::make_unique<kicad::ModelResolver>(board.projectDir, cfg.pathVars, cfg.modelSearchDirs);
+    prep->library = std::make_unique<model::ModelLibrary>(cacheDir, model::MeshParams{}, !o.noCache);
     log::info("mesh cache: {}{}", platform::pathToUtf8(cacheDir / "meshes"), o.noCache ? " (disabled)" : "");
-    prep->scene = scene::buildScene({board, resolver, library, materialResolver, cfg.scene});
-    const auto& st = library.stats();
+    prep->scene = std::move(*prep->buildScene(false));
+    const auto st = prep->library->stats();
     log::info("models: {} loaded+meshed, {} from cache, {} failed", st.loaded, st.cacheHits, st.failed);
 
     if (!debugLayersDir.empty()) {
@@ -147,6 +149,53 @@ std::unique_ptr<PreparedScene> prepareScene(const RenderOptions& o, const fs::pa
     log::info("environment: {} ({}x{})", cfg.hdr, prep->env.width, prep->env.height);
     prep->dist = render::buildEnvDistribution(prep->env);
     return prep;
+}
+
+std::unique_ptr<scene::Scene> PreparedScene::buildScene(bool asyncModels) {
+    for (int s = 0; s < 2; ++s) cfg.scene.layerArt.extraSilk[s] = silk.side[s] ? &*silk.side[s] : nullptr;
+    const scene::MaterialResolver materialResolver(materials.library, materials.project, materials.global);
+    scene::SceneContext ctx{board, *resolver, *library, materialResolver, cfg.scene, &tiles};
+    ctx.asyncModels = asyncModels;
+    return std::make_unique<scene::Scene>(scene::buildScene(ctx));
+}
+
+std::unique_ptr<scene::Scene> PreparedScene::reload(ReloadStats& st) {
+    using Clock = std::chrono::steady_clock;
+    const auto t0 = Clock::now();
+    auto r = kicad::loadBoard(board.file);
+    if (!r.board) {
+        // 保存の途中などで読めないことがある。前の状態のまま次の保存を待つ
+        st.error = r.error;
+        return nullptr;
+    }
+    st.parseMs = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+    st.diff = kicad::diffBoards(board, *r.board);
+    board = std::move(*r.board);
+    if (st.diff.full)
+        tiles.invalidateAll();
+    else
+        tiles.invalidate(st.diff.dirty);
+    if (st.diff.strokeSilkChanged && kicadCli && !silkJob.valid()) {
+        // kicad-cli は数秒かかるので裏で描き直し、それまでは前のシルクのまま
+        const auto cli = *kicadCli;
+        const kicad::Board copy = board;
+        const bool useCache = !options.noCache;
+        silkJob = std::async(std::launch::async, [cli, copy, useCache] {
+            return plotSilkWithKicadCli(cli, copy, platform::cacheDir(), useCache);
+        });
+    }
+    const auto t1 = Clock::now();
+    auto sc = buildScene(true);
+    st.buildMs = std::chrono::duration<double, std::milli>(Clock::now() - t1).count();
+    st.tilesRebuilt = tiles.lastBuilt;
+    return sc;
+}
+
+bool PreparedScene::takeFinishedSilk() {
+    if (!silkJob.valid() || silkJob.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+    silk = silkJob.get();
+    tiles.invalidateAll();
+    return true;
 }
 
 scene::CameraParams cameraParams(const ProjectConfig& cfg, int width, int height) {

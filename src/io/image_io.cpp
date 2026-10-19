@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <array>
 #include <cstring>
 
 #include "core/platform.hpp"
@@ -43,8 +44,86 @@ void acesFitted(float& r, float& g, float& b) {
     b = -0.00327f * o0 - 0.07276f * o1 + 1.07602f * o2;
 }
 
-bool writePng(const std::filesystem::path& p, int w, int h, const std::vector<unsigned char>& px, std::string& err) {
+// 圧縮しない PNG（zlib の stored ブロック）。保存の監視中など、書き出しの速さを優先するとき用
+std::string encodePngStored(int w, int h, const unsigned char* rgba) {
+    static const auto crcTable = [] {
+        std::array<uint32_t, 256> t{};
+        for (uint32_t n = 0; n < 256; ++n) {
+            uint32_t c = n;
+            for (int k = 0; k < 8; ++k) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            t[n] = c;
+        }
+        return t;
+    }();
+    auto crc = [&](const std::string& s, size_t from) {
+        uint32_t c = 0xFFFFFFFFu;
+        for (size_t i = from; i < s.size(); ++i) c = crcTable[(c ^ static_cast<uint8_t>(s[i])) & 0xFF] ^ (c >> 8);
+        return c ^ 0xFFFFFFFFu;
+    };
+    auto be32 = [](std::string& s, uint32_t v) {
+        for (int i = 3; i >= 0; --i) s.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
+    };
+    auto chunk = [&](std::string& out, const char* type, const std::string& data) {
+        be32(out, static_cast<uint32_t>(data.size()));
+        const size_t start = out.size();
+        out.append(type, 4);
+        out += data;
+        be32(out, crc(out, start));
+    };
+    // 画像データ：各行の先頭にフィルタ 0
+    const size_t rowBytes = static_cast<size_t>(w) * 4;
+    std::string raw;
+    raw.reserve((rowBytes + 1) * h);
+    for (int y = 0; y < h; ++y) {
+        raw.push_back(0);
+        raw.append(reinterpret_cast<const char*>(rgba + y * rowBytes), rowBytes);
+    }
+    std::string z;
+    z.reserve(raw.size() + raw.size() / 65535 * 5 + 16);
+    z.push_back(0x78);
+    z.push_back(0x01);
+    for (size_t pos = 0; pos < raw.size() || pos == 0;) {
+        const size_t n = std::min<size_t>(65535, raw.size() - pos);
+        const bool last = pos + n >= raw.size();
+        z.push_back(last ? 1 : 0);
+        z.push_back(static_cast<char>(n & 0xFF));
+        z.push_back(static_cast<char>(n >> 8));
+        z.push_back(static_cast<char>(~n & 0xFF));
+        z.push_back(static_cast<char>((~n >> 8) & 0xFF));
+        z.append(raw, pos, n);
+        pos += n;
+        if (last) break;
+    }
+    uint32_t a = 1, b = 0;
+    for (unsigned char c : raw) {
+        a = (a + c) % 65521;
+        b = (b + a) % 65521;
+    }
+    be32(z, (b << 16) | a);
+    std::string out("\x89PNG\r\n\x1a\n", 8);
+    std::string ihdr;
+    be32(ihdr, static_cast<uint32_t>(w));
+    be32(ihdr, static_cast<uint32_t>(h));
+    ihdr += std::string("\x08\x06\x00\x00\x00", 5);  // 8bit RGBA
+    chunk(out, "IHDR", ihdr);
+    chunk(out, "IDAT", z);
+    chunk(out, "IEND", {});
+    return out;
+}
+
+bool writePng(const std::filesystem::path& p, int w, int h, const std::vector<unsigned char>& px, std::string& err,
+              int compression = 8) {
+    if (compression <= 0) {
+        if (!platform::writeTextFile(p, encodePngStored(w, h, px.data()))) {
+            err = "cannot write " + platform::pathToUtf8(p);
+            return false;
+        }
+        return true;
+    }
     std::error_code ec;
+    stbi_write_png_compression_level = compression;
+    // 速さを優先する場合は行ごとのフィルタ選びを省く（ファイルは少し大きくなる）
+    stbi_write_force_png_filter = compression <= 2 ? 1 : -1;
     if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
     int len = 0;
     unsigned char* mem = stbi_write_png_to_mem(px.data(), w * 4, w, h, 4, &len);
@@ -158,7 +237,16 @@ bool savePngTonemapped(const std::filesystem::path& p, const ImageF& img, const 
         px[i * 4 + 2] = static_cast<unsigned char>(std::lround(std::clamp(linearToSrgb(b) + d, 0.0f, 1.0f) * 255));
         px[i * 4 + 3] = 255;
     }
-    return writePng(p, img.width, img.height, px, err);
+    // 書き出し中のファイルを読まれないよう、一時ファイルに書いてから置き換える
+    const std::filesystem::path tmp = p.string() + ".tmp";
+    if (!writePng(tmp, img.width, img.height, px, err, opts.pngCompression)) return false;
+    std::error_code ec;
+    std::filesystem::rename(tmp, p, ec);
+    if (ec) {
+        err = ec.message();
+        return false;
+    }
+    return true;
 }
 
 bool savePngLinear(const std::filesystem::path& p, const ImageF& img, bool srgb, std::string& err) {
@@ -175,9 +263,15 @@ bool savePngLinear(const std::filesystem::path& p, const ImageF& img, bool srgb,
     return writePng(p, img.width, img.height, px, err);
 }
 
-bool savePngRgba8(const std::filesystem::path& p, int w, int h, const unsigned char* rgba, std::string& err) {
+bool savePngRgba8(const std::filesystem::path& p, int w, int h, const unsigned char* rgba, std::string& err,
+                  int compression) {
     std::vector<unsigned char> px(rgba, rgba + static_cast<size_t>(w) * h * 4);
-    return writePng(p, w, h, px, err);
+    const std::filesystem::path tmp = p.string() + ".tmp";
+    if (!writePng(tmp, w, h, px, err, compression)) return false;
+    std::error_code ec;
+    std::filesystem::rename(tmp, p, ec);
+    if (ec) err = ec.message();
+    return !ec;
 }
 
 }  // namespace krbr::io

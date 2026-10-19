@@ -47,6 +47,23 @@ std::vector<GpuMaterial> toGpuMaterials(const std::vector<scene::Material>& mate
 void GpuScene::build(vk::Context& ctx, const scene::Scene& sc, const io::ImageF& env, const EnvDistribution& dist,
                      float bumpIntensity) {
     ctx_ = &ctx;
+    buildGeometry(sc, bumpIntensity);
+    setEnvironment(env, dist);
+    buildBoardTexture(sc);
+    log::info("GPU scene: {} triangles, {} BLAS, {} instances, env {}x{} (distribution {}x{})", triangleCount,
+              blas_.size(), sc.instances.size(), envWidth, envHeight, envDistW, envDistH);
+}
+
+void GpuScene::rebuildGeometry(const scene::Scene& sc, float bumpIntensity) {
+    vkDeviceWaitIdle(ctx_->device());
+    destroyGeometry();
+    buildGeometry(sc, bumpIntensity);
+    ctx_->destroyImage(boardImage);
+    buildBoardTexture(sc);
+}
+
+void GpuScene::buildGeometry(const scene::Scene& sc, float bumpIntensity) {
+    vk::Context& ctx = *ctx_;
     VkDevice dev = ctx.device();
 
     // ---- メッシュを1本のバッファにまとめる
@@ -191,12 +208,20 @@ void GpuScene::build(vk::Context& ctx, const scene::Scene& sc, const io::ImageF&
                           VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
     });
     ctx.destroyBuffer(scratch);
+}
 
-    // ---- 環境マップ
-    setEnvironment(env, dist);
-
+void GpuScene::buildBoardTexture(const scene::Scene& sc) {
+    vk::Context& ctx = *ctx_;
+    VkDevice dev = ctx.device();
     // ---- 基板の層テクスチャ（2 層の配列：表・裏）
-    const auto& L = sc.layers;
+    // 凹凸を形状で作る場合は層テクスチャを使わないので、1x1 のダミーにする
+    raster::LayerTextures dummy;
+    if (sc.layers.grid.width <= 0 || sc.layers.rgba[0].empty()) {
+        dummy.grid.width = dummy.grid.height = 1;
+        dummy.grid.pxPerMm = 1.0;
+        dummy.rgba[0] = dummy.rgba[1] = {0, 0, 0, 255};
+    }
+    const auto& L = dummy.grid.width > 0 ? dummy : sc.layers;
     const uint32_t tw = static_cast<uint32_t>(L.grid.width), th = static_cast<uint32_t>(L.grid.height);
     boardImage = ctx.createImage2D(tw, th, 2, VK_FORMAT_R8G8B8A8_UNORM,
                                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
@@ -204,15 +229,13 @@ void GpuScene::build(vk::Context& ctx, const scene::Scene& sc, const io::ImageF&
     std::memcpy(both.data(), L.rgba[0].data(), L.rgba[0].size());
     std::memcpy(both.data() + L.rgba[0].size(), L.rgba[1].data(), L.rgba[1].size());
     ctx.uploadImage(boardImage, both.data(), both.size(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    boardSampler = makeSampler(dev, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    if (!boardSampler)
+        boardSampler = makeSampler(dev, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
     const double sizeX = L.grid.width / L.grid.pxPerMm, sizeZ = L.grid.height / L.grid.pxPerMm;
     boardMap = {static_cast<float>(L.grid.origin.x - sc.board.center.x),
                 static_cast<float>(L.grid.origin.y - sc.board.center.y), static_cast<float>(1.0 / sizeX),
                 static_cast<float>(1.0 / sizeZ)};
     boardMats = sc.boardMats;
-
-    log::info("GPU scene: {} triangles, {} BLAS, {} instances, env {}x{} (distribution {}x{})", triangleCount,
-              blas_.size(), inst.size(), envWidth, envHeight, envDistW, envDistH);
 }
 
 void GpuScene::setEnvironment(const io::ImageF& env, const EnvDistribution& dist) {
@@ -242,10 +265,8 @@ void GpuScene::updateMaterials(const std::vector<scene::Material>& materials, fl
     ctx_->upload(this->materials, mats.data(), mats.size() * sizeof(GpuMaterial));
 }
 
-void GpuScene::destroy() {
-    if (!ctx_) return;
+void GpuScene::destroyGeometry() {
     VkDevice dev = ctx_->device();
-    vkDeviceWaitIdle(dev);
     if (tlas) vkDestroyAccelerationStructureKHR(dev, tlas, nullptr);
     tlas = VK_NULL_HANDLE;
     for (auto a : blas_)
@@ -253,10 +274,17 @@ void GpuScene::destroy() {
     blas_.clear();
     for (auto& b : blasBuffers_) ctx_->destroyBuffer(b);
     blasBuffers_.clear();
-    for (vk::Buffer* b : {&vertices, &indices, &triMats, &meshInfos, &materials, &instanceInfos, &envMarginal,
-                          &envConditional, &envPdf,
-                          &tlasBuffer_, &instanceBuffer_})
+    for (vk::Buffer* b : {&vertices, &indices, &triMats, &meshInfos, &materials, &instanceInfos, &tlasBuffer_,
+                          &instanceBuffer_})
         ctx_->destroyBuffer(*b);
+}
+
+void GpuScene::destroy() {
+    if (!ctx_) return;
+    VkDevice dev = ctx_->device();
+    vkDeviceWaitIdle(dev);
+    destroyGeometry();
+    for (vk::Buffer* b : {&envMarginal, &envConditional, &envPdf}) ctx_->destroyBuffer(*b);
     ctx_->destroyImage(envImage);
     ctx_->destroyImage(boardImage);
     if (envSampler) vkDestroySampler(dev, envSampler, nullptr);

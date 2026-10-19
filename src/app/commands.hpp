@@ -31,6 +31,8 @@ struct ViewOptions {
     bool hidden = false;       // ウィンドウを表示しない（testFrames 指定時は自動）
     double testOrbitDeg = 0;   // 開発用：毎フレームこの角度だけカメラを回す（カメラ変更の経路の確認）
     std::string testEnv;       // 開発用：途中でこの環境マップに切り替える（差し替えの経路の確認）
+    bool watch = true;         // .kicad_pcb の保存を見張って自動で読み直す
+    bool testReload = false;   // 開発用：途中で保存されたものとして読み直す（作り直しの経路の確認）
 };
 
 int cmdProbe();

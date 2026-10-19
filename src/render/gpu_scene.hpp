@@ -15,6 +15,8 @@ public:
     // bumpIntensity: 全材質の bump_strength に掛ける倍率
     void build(vk::Context& ctx, const scene::Scene& scene, const io::ImageF& env, const EnvDistribution& dist,
                float bumpIntensity = 1.0f);
+    // シーンの形状・配置・材質を作り直す（環境マップはそのまま。積分器は作り直しが必要）
+    void rebuildGeometry(const scene::Scene& scene, float bumpIntensity);
     // 環境マップを差し替える（GPU が待機中に呼ぶこと。積分器は作り直しが必要）
     void setEnvironment(const io::ImageF& env, const EnvDistribution& dist);
     // 材質を送り直す（GPU が待機中に呼ぶこと）
@@ -33,6 +35,10 @@ public:
     size_t triangleCount = 0;
 
 private:
+    void buildGeometry(const scene::Scene& sc, float bumpIntensity);
+    void buildBoardTexture(const scene::Scene& sc);
+    void destroyGeometry();
+
     vk::Context* ctx_ = nullptr;
     std::vector<vk::Buffer> blasBuffers_;
     std::vector<VkAccelerationStructureKHR> blas_;

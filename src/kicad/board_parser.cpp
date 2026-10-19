@@ -1,6 +1,9 @@
 #include <cmath>
 #include <numbers>
 
+#include <map>
+
+#include "core/hash.hpp"
 #include "core/log.hpp"
 #include "core/platform.hpp"
 #include "kicad/board.hpp"
@@ -357,7 +360,96 @@ void readSetup(const Node& n, Board& board) {
     }
 }
 
+// 項目を読む前の各一覧の長さ。読んだ後との差が、その項目が作ったもの
+struct ItemMark {
+    size_t g, p, t, v, z, s;
+};
+ItemMark markOf(const Board& b) {
+    return {b.graphics.size(), b.pads.size(), b.tracks.size(), b.vias.size(), b.zones.size(), b.strokeTexts.size()};
+}
+
+void addItem(const Node& n, const ItemMark& m, Board& b) {
+    BoardItem item;
+    item.hash = sexpr::hashNode(n);
+    item.key = n.childStr("uuid").value_or(n.childStr("tstamp").value_or(""));
+    if (item.key.empty()) item.key = "h:" + toHex(item.hash);
+    Box2& bb = item.bbox;
+    for (size_t i = m.g; i < b.graphics.size(); ++i) {
+        const Graphic& g = b.graphics[i];
+        const double w = g.width / 2;
+        if (g.kind == GrKind::Line || g.kind == GrKind::Arc) {  // 多角形などでは start / end は使わない
+            bb.add(g.start, w);
+            bb.add(g.end, w);
+        }
+        if (g.kind == GrKind::Arc) bb.add(g.mid, w);
+        if (g.kind == GrKind::Circle) bb.add(g.start, glm::length(g.end - g.start) + w);
+        for (Vec2 p : g.pts) bb.add(p, w);
+        item.edgeCuts = item.edgeCuts || g.layer == "Edge.Cuts";
+    }
+    for (size_t i = m.p; i < b.pads.size(); ++i) {
+        const Pad& p = b.pads[i];
+        // 回転とレジストの広がりを見込んで大きめに
+        bb.add(p.pos, 0.75 * std::max(p.size.x, p.size.y) + 0.2);
+        item.holes = item.holes || p.drill.present;
+    }
+    for (size_t i = m.t; i < b.tracks.size(); ++i) {
+        const Track& t = b.tracks[i];
+        bb.add(t.start, t.width / 2);
+        bb.add(t.end, t.width / 2);
+        if (t.mid) bb.add(*t.mid, t.width / 2);
+    }
+    for (size_t i = m.v; i < b.vias.size(); ++i) {
+        bb.add(b.vias[i].pos, b.vias[i].size / 2 + 0.1);
+        item.holes = true;
+    }
+    for (size_t i = m.z; i < b.zones.size(); ++i)
+        for (Vec2 p : b.zones[i].pts) bb.add(p);
+    for (size_t i = m.s; i < b.strokeTexts.size(); ++i) {
+        const StrokeText& s = b.strokeTexts[i];
+        if (s.layer == "F.SilkS" || s.layer == "B.SilkS") {
+            item.strokeSilk = true;
+            bb.add(s.pos, 1.0 + 0.8 * static_cast<double>(s.text.size()));  // 文字の大きさは分からないので広めに
+        }
+    }
+    b.items.push_back(std::move(item));
+}
+
 }  // namespace
+
+BoardDiff diffBoards(const Board& before, const Board& after) {
+    BoardDiff d;
+    if (before.setupHash != after.setupHash) {
+        d.full = true;
+        return d;
+    }
+    std::map<std::string, const BoardItem*> old;
+    for (const auto& it : before.items) old[it.key] = &it;
+    auto touch = [&](const BoardItem& it) {
+        if (it.edgeCuts) d.full = true;
+        if (it.holes) d.holesChanged = true;
+        if (it.strokeSilk) d.strokeSilkChanged = true;
+        if (it.bbox.valid()) d.dirty.push_back(it.bbox);
+    };
+    for (const auto& it : after.items) {
+        auto o = old.find(it.key);
+        if (o == old.end()) {
+            ++d.added;
+            touch(it);
+            continue;
+        }
+        if (o->second->hash != it.hash) {
+            ++d.changed;
+            touch(*o->second);
+            touch(it);
+        }
+        old.erase(o);
+    }
+    for (const auto& [k, it] : old) {
+        ++d.removed;
+        touch(*it);
+    }
+    return d;
+}
 
 ParseResult loadBoard(const std::filesystem::path& file) {
     ParseResult res;
@@ -386,9 +478,14 @@ ParseResult loadBoard(const std::filesystem::path& file) {
         if (auto t = g->childNum("thickness")) board.stackup.thickness = *t;
 
     const Xform ident{};
+    std::string setupKey;
     for (const auto& it : root->items) {
         if (!it.isList) continue;
         const std::string_view tag = it.tag();
+        if (tag == "general" || tag == "layers" || tag == "setup") setupKey += toHex(sexpr::hashNode(it));
+        const bool isItem = tag == "footprint" || tag == "module" || tag == "segment" || tag == "arc" ||
+                            tag == "via" || tag == "zone" || tag.rfind("gr_", 0) == 0;
+        const ItemMark mark = markOf(board);
         if (tag == "setup") {
             readSetup(it, board);
         } else if (tag == "footprint" || tag == "module") {
@@ -435,7 +532,9 @@ ParseResult loadBoard(const std::filesystem::path& file) {
             Graphic g;
             if (readGraphic(it, tag.substr(3), ident, -1, g)) board.graphics.push_back(std::move(g));
         }
+        if (isItem) addItem(it, mark, board);
     }
+    board.setupHash = xxh64(setupKey.data(), setupKey.size());
     res.board = std::move(board);
     return res;
 }

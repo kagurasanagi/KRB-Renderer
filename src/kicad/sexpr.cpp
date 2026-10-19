@@ -3,6 +3,8 @@
 #include <charconv>
 #include <cstdlib>
 
+#include "core/hash.hpp"
+
 namespace krbr::sexpr {
 
 std::string_view Node::tag() const {
@@ -145,6 +147,27 @@ struct Parser {
 };
 
 }  // namespace
+
+static void serialize(const Node& n, std::string& out) {
+    if (n.isList) {
+        out.push_back('(');
+        for (const auto& c : n.items) {
+            serialize(c, out);
+            out.push_back(' ');
+        }
+        out.push_back(')');
+    } else {
+        if (n.quoted) out.push_back('"');
+        out += n.text;
+        if (n.quoted) out.push_back('"');
+    }
+}
+
+uint64_t hashNode(const Node& n) {
+    std::string s;
+    serialize(n, s);
+    return xxh64(s.data(), s.size());
+}
 
 std::optional<Node> parse(std::string_view text, ParseError* err) {
     Parser p{text, 0, err};

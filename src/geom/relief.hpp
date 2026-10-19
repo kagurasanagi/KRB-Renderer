@@ -24,10 +24,16 @@ enum ReliefMat : uint32_t {
 struct ReliefInput {
     Paths copper, maskOpen, silk;  // 面ごとの多角形（layer_art::collectSidePaths）
     Paths tentedHoles;             // レジストでふさがれたビアの穴（面を張る）
+    const Paths* base = nullptr;   // 面を張る範囲を前もって求めてある場合（タイル単位で作るとき）
 };
 
+// 面を張る範囲：穴を開けた基板＋レジストでふさがれたビアの穴
+Paths reliefBase(const BoardGeometry& geo, const Paths& tentedHoles);
+
 // side: 0=表（+Y 向き）, 1=裏（-Y 向き）。基材の面は ±coreHalf
-void buildRelief(const BoardGeometry& geo, int side, const ReliefInput& in, const ReliefParams& p, Mesh& out);
+// clip を渡すと、その矩形の中だけを作る（タイル単位の作り直し用。入力も同じ矩形で切り抜いておくこと）
+void buildRelief(const BoardGeometry& geo, int side, const ReliefInput& in, const ReliefParams& p, Mesh& out,
+                 const kicad::Box2* clip = nullptr);
 
 // 銅上のレジストの上面が板厚の半分（t/2）に来るように、基材の半分の厚みを決める
 inline double reliefCoreHalf(double thickness, const ReliefParams& p) {

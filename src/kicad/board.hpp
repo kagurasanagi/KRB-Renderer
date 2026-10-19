@@ -2,6 +2,7 @@
 // .kicad_pcb から読み取った基板の内容。座標はすべて基板座標（mm、x 右・y 下）に変換済み。
 #include <glm/glm.hpp>
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -13,6 +14,40 @@ using Vec2 = glm::dvec2;
 using Vec3 = glm::dvec3;
 
 enum class GrKind { Line, Arc, Circle, Poly, Curve };
+
+// 基板座標の矩形
+struct Box2 {
+    Vec2 lo{1e30}, hi{-1e30};
+    void add(Vec2 p) {
+        lo = glm::min(lo, p);
+        hi = glm::max(hi, p);
+    }
+    void add(Vec2 p, double r) {
+        add(p - Vec2{r, r});
+        add(p + Vec2{r, r});
+    }
+    void add(const Box2& b) {
+        if (b.valid()) {
+            add(b.lo);
+            add(b.hi);
+        }
+    }
+    bool valid() const { return lo.x <= hi.x && lo.y <= hi.y; }
+    bool intersects(const Box2& b) const {
+        return valid() && b.valid() && lo.x <= b.hi.x && b.lo.x <= hi.x && lo.y <= b.hi.y && b.lo.y <= hi.y;
+    }
+    Box2 expanded(double m) const { return valid() ? Box2{lo - Vec2{m, m}, hi + Vec2{m, m}} : *this; }
+};
+
+// 差分の検出用：ファイルの最上位の項目（部品・配線・ビア・ベタ・図形）ごとのキーと内容のハッシュと範囲
+struct BoardItem {
+    std::string key;     // UUID（無ければ内容のハッシュ）
+    uint64_t hash = 0;   // 項目の S 式全体のハッシュ
+    Box2 bbox;           // 銅箔・レジスト・シルクなどの範囲（基板座標）
+    bool edgeCuts = false;     // 基板外形を含む
+    bool holes = false;        // 穴を含む
+    bool strokeSilk = false;   // 線フォントのシルクの文字を含む（kicad-cli で描き直しが要る）
+};
 
 // 図形（基板直下の gr_* と、部品内の fp_*、文字の render_cache）
 struct Graphic {
@@ -132,7 +167,19 @@ struct Board {
     std::vector<StrokeText> strokeTexts;
     std::vector<Footprint> footprints;
     int unfilledZones = 0;
+    std::vector<BoardItem> items;  // 差分の検出用
+    uint64_t setupHash = 0;        // general / setup / layers のハッシュ（変われば全体を作り直す）
 };
+
+// 前回の読み込みとの差分
+struct BoardDiff {
+    bool full = false;          // 外形・層構成などが変わった（全体を作り直す）
+    bool holesChanged = false;  // 穴が変わった（基材の側面・穴の内壁を作り直す）
+    bool strokeSilkChanged = false;
+    std::vector<Box2> dirty;    // 作り直しが要る範囲
+    size_t added = 0, removed = 0, changed = 0;
+};
+BoardDiff diffBoards(const Board& before, const Board& after);
 
 struct ParseResult {
     std::optional<Board> board;

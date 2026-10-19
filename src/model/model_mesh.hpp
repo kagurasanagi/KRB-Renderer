@@ -37,6 +37,7 @@ struct MeshParams {
 struct LoadResult {
     std::shared_ptr<const ModelMesh> mesh;
     bool fromCache = false;
+    bool pending = false;  // 裏で分割中（ModelLibrary::request）
     std::string fileHash;  // ファイル内容の XXH64（16 進）。材質の対応表の照合にも使う
     std::string error;
     double seconds = 0.0;

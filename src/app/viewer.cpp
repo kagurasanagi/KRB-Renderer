@@ -22,6 +22,7 @@
 #include "app/commands.hpp"
 #include "app/prepare.hpp"
 #include "app/report.hpp"
+#include "core/file_watcher.hpp"
 #include "core/log.hpp"
 #include "core/platform.hpp"
 #include "render/gpu_scene.hpp"
@@ -476,6 +477,20 @@ int cmdView(const ViewOptions& vo) {
             log::info("loading environment {}", path);
         };
 
+        // 保存の監視：読み直しとシーンの作り直しは裏のスレッドで行い、できたら GPU の形状だけ差し替える
+        struct ReloadResult {
+            std::unique_ptr<scene::Scene> scene;
+            ReloadStats stats;
+            bool saved = false;
+        };
+        std::unique_ptr<FileWatcher> watcher;
+        if (vo.watch) watcher = std::make_unique<FileWatcher>(prep->board.file);
+        std::future<ReloadResult> reloadJob;
+        std::chrono::system_clock::time_point reloadSavedAt{};
+        size_t modelsCompleted = prep->library->completed();
+        std::string lastUpdate;  // パネルに出す、直近の更新の情報
+        bool testReloaded = false;
+
         uint32_t samplesPerFrame = 1;
         const double targetFrameMs = 10.0;  // 60fps（16.7 ms）に収まるよう、表示処理の分を残す
         bool needRecreate = false;
@@ -489,9 +504,10 @@ int cmdView(const ViewOptions& vo) {
         const std::string stem = platform::pathToUtf8(outPng.stem());
 
         while (!glfwWindowShouldClose(window)) {
-            const bool idle = prog.samples() >= static_cast<uint32_t>(st.maxSpp) && !st.dirty && !envJob.valid();
+            const bool idle = prog.samples() >= static_cast<uint32_t>(st.maxSpp) && !st.dirty && !envJob.valid() &&
+                              !reloadJob.valid();
             if (idle && vo.testFrames == 0)
-                glfwWaitEventsTimeout(0.25);  // 収束したら GPU を休ませ、入力を待つ
+                glfwWaitEventsTimeout(watcher ? 0.1 : 0.25);  // 収束したら GPU を休ませ、入力と保存を待つ
             else
                 glfwPollEvents();
 
@@ -512,6 +528,28 @@ int cmdView(const ViewOptions& vo) {
                 startEnvLoad(vo.testEnv);
             }
 
+            // ---- 保存の監視（裏で読み直す）
+            if (!reloadJob.valid()) {
+                const bool fromWatcher = watcher && watcher->poll();
+                bool saved = fromWatcher;
+                if (vo.testReload && !testReloaded && frames == 5) {
+                    saved = testReloaded = true;  // 開発用：保存されたものとして読み直す
+                }
+                const bool modelsDone = prep->library->completed() != modelsCompleted;
+                const bool silkDone = prep->takeFinishedSilk();
+                if (saved || modelsDone || silkDone) {
+                    modelsCompleted = prep->library->completed();
+                    reloadSavedAt = fromWatcher ? watcher->savedAt() : std::chrono::system_clock::now();
+                    PreparedScene* p = prep.get();
+                    reloadJob = std::async(std::launch::async, [p, saved] {
+                        ReloadResult r;
+                        r.saved = saved;
+                        r.scene = saved ? p->reload(r.stats) : p->buildScene(true);
+                        return r;
+                    });
+                }
+            }
+
             // ---- 操作パネル
             ImGui_ImplVulkan_NewFrame();
             ImGui_ImplGlfw_NewFrame();
@@ -524,6 +562,11 @@ int cmdView(const ViewOptions& vo) {
                             lastGpuMs);
                 ImGui::ProgressBar(std::min(1.0f, static_cast<float>(prog.samples()) / std::max(1, st.maxSpp)),
                                    ImVec2(-1, 0), "");
+
+                if (reloadJob.valid())
+                    ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1), "基板を読み直し中...");
+                else if (!lastUpdate.empty())
+                    ImGui::TextDisabled("%s", lastUpdate.c_str());
 
                 ImGui::SeparatorText("環境マップ");
                 const std::string curName = platform::pathToUtf8(platform::u8path(envPath).filename());
@@ -586,6 +629,33 @@ int cmdView(const ViewOptions& vo) {
             ImGui::Render();
 
             // ---- 状態の反映（GPU は前のフレームの完了を待っているので、ここで資源を触ってよい）
+            if (reloadJob.valid() && reloadJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                ReloadResult r = reloadJob.get();
+                if (r.scene) {
+                    vkDeviceWaitIdle(dev);
+                    prep->scene = std::move(*r.scene);
+                    gpu.rebuildGeometry(prep->scene, st.bumpIntensity);
+                    prog.rebuildIntegrator();
+                    st.dirty = true;
+                    const double ms = std::chrono::duration<double, std::milli>(std::chrono::system_clock::now() -
+                                                                                reloadSavedAt).count();
+                    if (r.saved) {
+                        lastUpdate = std::format("保存から {:.2f} 秒で更新（タイル {} 枚{}）", ms / 1000.0,
+                                                 r.stats.tilesRebuilt,
+                                                 prep->scene.pendingModels
+                                                     ? std::format("、{} 個のモデルを分割中", prep->scene.pendingModels)
+                                                     : "");
+                        log::info("viewer: reloaded {:.0f} ms after save (parse {:.0f}, build {:.0f}, {} tiles); "
+                                  "{} added, {} changed, {} removed",
+                                  ms, r.stats.parseMs, r.stats.buildMs, r.stats.tilesRebuilt, r.stats.diff.added,
+                                  r.stats.diff.changed, r.stats.diff.removed);
+                    } else {
+                        lastUpdate = "裏での分割・シルクの描き直しを反映";
+                    }
+                } else if (r.saved) {
+                    log::warn("viewer: cannot read the board ({}); waiting for the next save", r.stats.error);
+                }
+            }
             if (envJob.valid() && envJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
                 std::unique_ptr<EnvData> d = envJob.get();
                 if (d->error.empty()) {
@@ -643,7 +713,8 @@ int cmdView(const ViewOptions& vo) {
 
             const uint32_t maxSpp = static_cast<uint32_t>(st.maxSpp);
             const uint32_t add = prog.samples() >= maxSpp ? 0 : std::min(samplesPerFrame, maxSpp - prog.samples());
-            const bool lastTestFrame = vo.testFrames > 0 && frames + 1 >= vo.testFrames && !envJob.valid();
+            const bool lastTestFrame = vo.testFrames > 0 && frames + 1 >= vo.testFrames && !envJob.valid() &&
+                                       !reloadJob.valid() && (!vo.testReload || testReloaded);
             vkResetCommandBuffer(cmd, 0);
             VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
             bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -815,6 +886,7 @@ int cmdView(const ViewOptions& vo) {
 
         vkDeviceWaitIdle(dev);
         if (envJob.valid()) envJob.wait();
+        if (reloadJob.valid()) reloadJob.wait();
         ImGui_ImplVulkan_Shutdown();
         ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();

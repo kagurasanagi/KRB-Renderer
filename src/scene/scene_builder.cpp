@@ -1,4 +1,7 @@
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <glm/gtc/matrix_transform.hpp>
 #include <map>
@@ -270,7 +273,116 @@ void addInstanceBounds(Scene& s, uint32_t mesh, const glm::mat4& xf) {
     }
 }
 
+// 凹凸メッシュをタイルごとに作る（キャッシュにある有効なタイルはそのまま使う）。タイルは並列に作る
+void buildReliefTiles(Scene& s, const kicad::Board& board, const geom::ReliefParams& rp, const SceneOptions& opts,
+                      ReliefTileCache* cache) {
+    const auto t0 = std::chrono::steady_clock::now();
+    ReliefTileCache local;
+    ReliefTileCache& c = cache ? *cache : local;
+    if (!c.matches(s.board)) c.reset(s.board);
+    const uint32_t rmap[5] = {s.boardMats.fr4, s.boardMats.finish, s.boardMats.maskOnFr4, s.boardMats.maskOnCopper,
+                              s.boardMats.silk};
+
+    // 面を張る範囲（表裏それぞれ、ふさがれたビアの穴を含める）
+    geom::Paths base[2];
+    for (int side = 0; side < 2; ++side) {
+        geom::Paths tented;
+        const bool tentDefault = side == 0 ? board.setup.tentFront : board.setup.tentBack;
+        for (const auto& v : board.vias) {
+            const std::optional<bool> tent = side == 0 ? v.tentFront : v.tentBack;
+            if (tent.value_or(tentDefault) && v.drill > 0) geom::append(tented, geom::disc(v.pos, v.drill / 2));
+        }
+        base[side] = geom::reliefBase(s.board, tented);
+    }
+
+    std::vector<std::pair<int, int>> todo;  // (面, タイル)
+    for (int side = 0; side < 2; ++side)
+        for (int t = 0; t < c.count(); ++t)
+            if (!c.valid[side][t]) todo.emplace_back(side, t);
+    std::atomic<size_t> next{0};
+    auto worker = [&] {
+        for (size_t k; (k = next.fetch_add(1)) < todo.size();) {
+            const auto [side, t] = todo[k];
+            const kicad::Box2 rect = c.tileRect(t);
+            const auto sp = raster::collectSidePaths(board, static_cast<raster::Side>(side), opts.layerArt, &rect);
+            const geom::Paths tileBase = geom::intersect(
+                base[side], {geom::toPath({rect.lo, {rect.hi.x, rect.lo.y}, rect.hi, {rect.lo.x, rect.hi.y}})});
+            geom::ReliefInput in{sp.copper, sp.maskOpen, sp.silk, {}, &tileBase};
+            geom::Mesh m;
+            geom::buildRelief(s.board, side, in, rp, m, &rect);
+            for (auto& id : m.triMaterial) id = rmap[std::min<uint32_t>(id, 4)];
+            c.tiles[side][t] = std::move(m);
+            c.valid[side][t] = 1;
+        }
+    };
+    const unsigned nthreads = std::clamp(std::thread::hardware_concurrency() / 2, 1u, 12u);
+    std::vector<std::thread> pool;
+    for (unsigned i = 0; i < std::min<size_t>(nthreads, todo.size()); ++i) pool.emplace_back(worker);
+    for (auto& th : pool) th.join();
+    c.lastBuilt = static_cast<int>(todo.size());
+
+    size_t tris = 0;
+    for (int side = 0; side < 2; ++side)
+        for (int t = 0; t < c.count(); ++t) {
+            const geom::Mesh& m = c.tiles[side][t];
+            if (m.triangleCount() == 0) continue;
+            tris += m.triangleCount();
+            const uint32_t id = static_cast<uint32_t>(s.meshes.size());
+            s.meshes.push_back({std::format("relief_{}_{}", side == 0 ? "front" : "back", t), m});
+            s.instances.push_back({id, glm::mat4(1.0f), 0});
+        }
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    log::info("relief: rebuilt {} of {} tiles ({}x{}, {:.0f} mm) in {:.0f} ms, {} triangles", todo.size(),
+              2 * c.count(), c.nx, c.ny, c.tileSize, ms, tris);
+}
+
 }  // namespace
+
+bool ReliefTileCache::matches(const geom::BoardGeometry& g) const {
+    return nx > 0 && bounds.lo == g.bounds.lo && bounds.hi == g.bounds.hi && center == g.center &&
+           coreHalf == g.coreHalf;
+}
+
+void ReliefTileCache::reset(const geom::BoardGeometry& g) {
+    bounds = {g.bounds.lo, g.bounds.hi};
+    center = g.center;
+    coreHalf = g.coreHalf;
+    nx = std::max(1, static_cast<int>(std::ceil((bounds.hi.x - bounds.lo.x) / tileSize)));
+    ny = std::max(1, static_cast<int>(std::ceil((bounds.hi.y - bounds.lo.y) / tileSize)));
+    for (int s = 0; s < 2; ++s) {
+        tiles[s].assign(count(), {});
+        valid[s].assign(count(), 0);
+    }
+}
+
+void ReliefTileCache::invalidateAll() {
+    for (auto& v : valid) std::fill(v.begin(), v.end(), 0);
+}
+
+void ReliefTileCache::invalidate(const std::vector<kicad::Box2>& dirty) {
+    for (int t = 0; t < count(); ++t) {
+        // レジストの広がりなどを見込んで、少し広げた範囲で判定する
+        const kicad::Box2 r = tileRect(t).expanded(1.0);
+        for (const auto& d : dirty)
+            if (r.intersects(d)) {
+                valid[0][t] = valid[1][t] = 0;
+                break;
+            }
+    }
+}
+
+kicad::Box2 ReliefTileCache::tileRect(int index) const {
+    const int i = index % nx, j = index / nx;
+    kicad::Box2 r;
+    r.lo = bounds.lo + kicad::Vec2{i * tileSize, j * tileSize};
+    r.hi = r.lo + kicad::Vec2{tileSize, tileSize};
+    // 外周のタイルは基板の外まで少し広げる（端の取りこぼしを防ぐ）
+    if (i == 0) r.lo.x -= 1.0;
+    if (j == 0) r.lo.y -= 1.0;
+    if (i == nx - 1) r.hi.x += 1.0;
+    if (j == ny - 1) r.hi.y += 1.0;
+    return r;
+}
 
 Scene buildScene(const SceneContext& ctx) {
     const auto& board = ctx.board;
@@ -293,33 +405,12 @@ Scene buildScene(const SceneContext& ctx) {
         bm.mesh = s.board.mesh;
         const uint32_t remap[4] = {s.boardMats.top, s.boardMats.bottom, s.boardMats.edge, s.boardMats.plated};
         for (auto& m : bm.mesh.triMaterial) m = remap[std::min<uint32_t>(m, 3)];
-        if (opts.relief) {
-            log::ScopedTimer t("relief");
-            const uint32_t rmap[5] = {s.boardMats.fr4, s.boardMats.finish, s.boardMats.maskOnFr4,
-                                      s.boardMats.maskOnCopper, s.boardMats.silk};
-            for (int side = 0; side < 2; ++side) {
-                const auto sp = raster::collectSidePaths(board, static_cast<raster::Side>(side), opts.layerArt);
-                geom::ReliefInput in{sp.copper, sp.maskOpen, sp.silk, {}};
-                // レジストでふさがれたビアは穴の上にも面を張る
-                const bool tentDefault = side == 0 ? board.setup.tentFront : board.setup.tentBack;
-                for (const auto& v : board.vias) {
-                    const std::optional<bool> tent = side == 0 ? v.tentFront : v.tentBack;
-                    if (tent.value_or(tentDefault) && v.drill > 0) geom::append(in.tentedHoles, geom::disc(v.pos, v.drill / 2));
-                }
-                geom::Mesh rm;
-                geom::buildRelief(s.board, side, in, rp, rm);
-                const uint32_t base = static_cast<uint32_t>(bm.mesh.positions.size());
-                bm.mesh.positions.insert(bm.mesh.positions.end(), rm.positions.begin(), rm.positions.end());
-                bm.mesh.normals.insert(bm.mesh.normals.end(), rm.normals.begin(), rm.normals.end());
-                for (uint32_t i : rm.indices) bm.mesh.indices.push_back(base + i);
-                for (uint32_t m : rm.triMaterial) bm.mesh.triMaterial.push_back(rmap[std::min<uint32_t>(m, 4)]);
-            }
-        }
         s.meshes.push_back(std::move(bm));
         s.instances.push_back({0, glm::mat4(1.0f)});
         addInstanceBounds(s, 0, glm::mat4(1.0f));
+        if (opts.relief) buildReliefTiles(s, board, rp, opts, ctx.reliefCache);
     }
-    {
+    if (!opts.relief || opts.layerTextures) {
         log::ScopedTimer t("layer textures");
         s.layers = raster::buildLayerTextures(board, s.board, opts.layerArt);
     }
@@ -354,7 +445,11 @@ Scene buildScene(const SceneContext& ctx) {
                 s.missing.push_back(std::move(miss));
                 continue;
             }
-            const auto lr = ctx.library.get(res.path);
+            const auto lr = ctx.asyncModels ? ctx.library.request(res.path) : ctx.library.get(res.path);
+            if (lr.pending) {
+                ++s.pendingModels;  // 分割が終わるまで箱で仮表示（不足とは扱わない）
+                continue;
+            }
             if (!lr.mesh) {
                 miss.reason = lr.error;
                 s.missing.push_back(std::move(miss));

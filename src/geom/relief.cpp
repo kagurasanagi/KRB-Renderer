@@ -4,13 +4,20 @@
 
 namespace krbr::geom {
 
-void buildRelief(const BoardGeometry& geo, int side, const ReliefInput& in, const ReliefParams& p, Mesh& out) {
-    // 面を張る範囲：穴を開けた基板＋レジストでふさがれたビアの穴
-    const Paths base = in.tentedHoles.empty() ? geo.body : unite([&] {
-        Paths a = geo.body;
-        append(a, intersect(in.tentedHoles, geo.region));
-        return a;
-    }());
+Paths reliefBase(const BoardGeometry& geo, const Paths& tentedHoles) {
+    if (tentedHoles.empty()) return geo.body;
+    Paths a = geo.body;
+    append(a, intersect(tentedHoles, geo.region));
+    return unite(a);
+}
+
+void buildRelief(const BoardGeometry& geo, int side, const ReliefInput& in, const ReliefParams& p, Mesh& out,
+                 const kicad::Box2* clip) {
+    // 面を張る範囲（タイルなら、その矩形の中だけ）
+    Paths base = in.base ? *in.base : reliefBase(geo, in.tentedHoles);
+    if (clip)
+        base = intersect(base, {toPath({clip->lo, {clip->hi.x, clip->lo.y}, clip->hi, {clip->lo.x, clip->hi.y}})});
+    if (base.empty()) return;
     const Paths C = intersect(in.copper, base);
     const Paths O = intersect(in.maskOpen, base);
     const Paths M = subtract(base, O);
@@ -50,7 +57,7 @@ void buildRelief(const BoardGeometry& geo, int side, const ReliefInput& in, cons
         // 高さ 0 の領域（むき出しの基材）も、基材の側面とつながる面として作る
         extrudeRegion(r.paths, y0 + sign * r.h, y0, side == 0, r.faceMat, r.wallMat, geo.center, out);
     }
-    log::info("relief ({}): {} triangles; copper {:.0f} um, mask {:.0f}/{:.0f} um, silk {:.0f} um",
+    log::debug("relief ({}): {} triangles; copper {:.0f} um, mask {:.0f}/{:.0f} um, silk {:.0f} um",
               side == 0 ? "front" : "back", out.triangleCount() - tris0, p.copper * 1000, p.maskOnCopper * 1000,
               p.maskOnSubstrate * 1000, p.silk * 1000);
 }
