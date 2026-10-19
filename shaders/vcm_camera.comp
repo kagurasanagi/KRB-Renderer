@@ -3,10 +3,8 @@
 //   s = 0：光源に当たった、s = 1：光源への直接サンプリング、s > 1：同じ番号の光源側の経路の頂点への接続、
 //   merging（VCM のみ）：近くの光源側の頂点とのまとめ
 // を MIS で組み合わせる。最後に、光源側からカメラへつないだ寄与（画面のバッファ）を足して累積する
-#extension GL_EXT_ray_query : require
 #extension GL_GOOGLE_include_directive : require
-
-layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+#include "stage.glsl"  // 計算シェーダ（ray query）か、レイ生成シェーダ（ray tracing pipeline）か
 
 #include "common.glsl"
 #include "spectral.glsl"
@@ -147,7 +145,7 @@ vec4 mergeVertices(SubPath cam, Shade cs, CamVertex cv, VcmConst vc) {
 }
 
 void main() {
-    uvec2 px = gl_GlobalInvocationID.xy;
+    uvec2 px = KRBR_INVOCATION_ID.xy;
     if (px.x >= F.dims.x || px.y >= F.dims.y) return;
     uint pathIdx = px.y * F.dims.x + px.x;
     Rng rng = rngInit(px, pc.sampleIndex, pc.seed);

@@ -28,21 +28,30 @@ FrameUBO makeFrameUbo(const GpuScene& sc, const RenderTargets& targets, const Fr
 // レンズの値（makeFrameUbo から呼ぶ）
 void fillLens(FrameUBO& u, const FrameParams& fp);
 
-// 計算シェーダ 1 本（記述子の組は 1 つ、プッシュ定数は PushConstants）
+// レイを飛ばすカーネル 1 本（記述子の組は 1 つ、プッシュ定数は PushConstants）。
+// 画素ごとに 1 スレッドで、GPU によって次のどちらかで作る（シェーダの本文は同じ）：
+//   ray query            : 計算シェーダ shaders/<name>.comp.spv
+//   ray tracing pipeline : レイ生成シェーダ shaders/<name>.rgen.spv ＋ rt_hit.rchit / rt_miss.rmiss / rt_shadow.rmiss
 class ComputeKernel {
 public:
     ~ComputeKernel() { destroy(); }
-    void create(vk::Context& ctx, const std::string& spvName, const std::vector<KernelBinding>& bindings);
+    void create(vk::Context& ctx, const std::string& name, const std::vector<KernelBinding>& bindings);
     void dispatch(VkCommandBuffer cmd, const PushConstants& pc, uint32_t width, uint32_t height) const;
     void destroy();
 
 private:
+    void createRayTracingPipeline(const std::string& name);
+
     vk::Context* ctx_ = nullptr;
+    bool rtPipeline_ = false;
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
     VkDescriptorSet set_ = VK_NULL_HANDLE;
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     VkPipeline pipeline_ = VK_NULL_HANDLE;
+    // シェーダバインディングテーブル（ray tracing pipeline のとき）
+    vk::Buffer sbt_;
+    VkStridedDeviceAddressRegionKHR sbtRaygen_{}, sbtMiss_{}, sbtHit_{}, sbtCallable_{};
 };
 
 // 計算シェーダの書き込みを、次の計算シェーダ・転送が読めるようにする

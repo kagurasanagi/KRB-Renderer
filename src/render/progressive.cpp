@@ -38,7 +38,7 @@ void Progressive::createTargets() {
     ctx_->submitAndWait([&](VkCommandBuffer cmd) {
         for (VkImage img : {targets_.color.image, targets_.albedo.image, targets_.normal.image})
             vk::imageBarrier(cmd, img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_NONE, 0,
-                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                             vk::traceStages(),
                              VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     });
     integrator_ = createIntegrator(integratorName_);

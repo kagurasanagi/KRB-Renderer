@@ -13,19 +13,77 @@ struct Hit {
     uint material;
 };
 
-bool traceClosest(vec3 origin, vec3 dir, out Hit hit) {
+// 交差判定の生の結果（ray query と ray tracing pipeline で共通の形）
+struct RawHit {
+    mat4x3 o2w, w2o;
+    vec2 bc;
+    float t;
+    uint instCustom, instId, prim;
+};
+
+#ifdef KRBR_RT_PIPELINE
+// ray tracing pipeline：traceRayEXT と最近接ヒット・ミスのシェーダ（rt_hit.rchit / rt_miss.rmiss / rt_shadow.rmiss）
+#include "rt_payload.glsl"
+layout(location = 0) rayPayloadEXT RtHit rtPayload;
+layout(location = 1) rayPayloadEXT uint rtShadowPayload;
+
+bool rawTraceClosest(vec3 origin, vec3 dir, out RawHit r) {
+    traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFF, 0u, 0u, 0u, origin, 0.0, dir, 1e30, 0);
+    if (rtPayload.hit == 0u) return false;
+    r.o2w = rtPayload.o2w;
+    r.w2o = rtPayload.w2o;
+    r.bc = rtPayload.bc;
+    r.t = rtPayload.t;
+    r.instCustom = rtPayload.instCustom;
+    r.instId = rtPayload.instId;
+    r.prim = rtPayload.prim;
+    return true;
+}
+
+bool rawOccluded(vec3 origin, vec3 dir, float tmax) {
+    rtShadowPayload = 1u;  // 影のミスシェーダが 0 にする
+    traceRayEXT(tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+                0xFF, 0u, 0u, 1u, origin, 0.0, dir, tmax, 1);
+    return rtShadowPayload != 0u;
+}
+#else
+// ray query：計算シェーダの中で辿る
+bool rawTraceClosest(vec3 origin, vec3 dir, out RawHit r) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT, 0xFF, origin, 0.0, dir, 1e30);
     while (rayQueryProceedEXT(rq)) {
     }
     if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) return false;
+    r.o2w = rayQueryGetIntersectionObjectToWorldEXT(rq, true);
+    r.w2o = rayQueryGetIntersectionWorldToObjectEXT(rq, true);
+    r.bc = rayQueryGetIntersectionBarycentricsEXT(rq, true);
+    r.t = rayQueryGetIntersectionTEXT(rq, true);
+    r.instCustom = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true));
+    r.instId = uint(rayQueryGetIntersectionInstanceIdEXT(rq, true));
+    r.prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, true));
+    return true;
+}
 
-    InstanceInfo ii = instanceInfos[uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true))];
+bool rawOccluded(vec3 origin, vec3 dir, float tmax) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, origin, 0.0, dir,
+                          tmax);
+    while (rayQueryProceedEXT(rq)) {
+    }
+    return rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+}
+#endif
+
+bool traceClosest(vec3 origin, vec3 dir, out Hit hit) {
+    RawHit r;
+    if (!rawTraceClosest(origin, dir, r)) return false;
+
+    InstanceInfo ii = instanceInfos[r.instCustom];
     uint meshId = ii.mesh;
-    uint prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, true));
-    vec2 bc = rayQueryGetIntersectionBarycentricsEXT(rq, true);
-    mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT(rq, true);
-    mat4x3 w2o = rayQueryGetIntersectionWorldToObjectEXT(rq, true);
+    uint prim = r.prim;
+    vec2 bc = r.bc;
+    mat4x3 o2w = r.o2w;
+    mat4x3 w2o = r.w2o;
 
     MeshInfo mi = meshes[meshId];
     uint i0 = indices[mi.indexOffset + prim * 3u + 0u] + mi.vertexOffset;
@@ -38,26 +96,19 @@ bool traceClosest(vec3 origin, vec3 dir, out Hit hit) {
     vec3 ngObj = cross(v1.pos - v0.pos, v2.pos - v0.pos);
 
     hit.w2o = mat3(w2o);
-    hit.t = rayQueryGetIntersectionTEXT(rq, true);
+    hit.t = r.t;
     hit.pObj = pObj;
     hit.pos = o2w * vec4(pObj, 1.0);
     hit.ng = normalize(ngObj * hit.w2o);  // 法線は逆転置で変換
     vec3 ns = nObj * hit.w2o;
     hit.ns = dot(ns, ns) > 1e-20 ? normalize(ns) : hit.ng;
-    hit.instance = uint(rayQueryGetIntersectionInstanceIdEXT(rq, true));
+    hit.instance = r.instId;
     hit.material = ii.materialBase + triMats[mi.triOffset + prim];
     return true;
 }
 
 // 距離 tmax までにさえぎるものがあるか（発光面への直接サンプリング用）
-bool occludedDist(vec3 origin, vec3 dir, float tmax) {
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, origin, 0.0, dir,
-                          tmax);
-    while (rayQueryProceedEXT(rq)) {
-    }
-    return rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
-}
+bool occludedDist(vec3 origin, vec3 dir, float tmax) { return rawOccluded(origin, dir, tmax); }
 
 // 保存しておいた値から交点を作り直す（光源側の頂点で材質を評価し直すため）
 Hit rebuildHit(vec3 pos, vec3 pObj, vec3 ng, vec3 ns, uint instance, uint material) {
@@ -74,14 +125,7 @@ Hit rebuildHit(vec3 pos, vec3 pObj, vec3 ng, vec3 ns, uint instance, uint materi
     return h;
 }
 
-bool occluded(vec3 origin, vec3 dir) {
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, origin, 0.0, dir,
-                          1e30);
-    while (rayQueryProceedEXT(rq)) {
-    }
-    return rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
-}
+bool occluded(vec3 origin, vec3 dir) { return rawOccluded(origin, dir, 1e30); }
 
 // ---------------------------------------------------------------- 表面の微細な凹凸
 

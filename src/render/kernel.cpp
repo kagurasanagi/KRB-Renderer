@@ -1,6 +1,7 @@
 #include "render/kernel.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <numbers>
@@ -161,16 +162,23 @@ VkShaderModule loadShader(VkDevice dev, const std::filesystem::path& p) {
     vk::check(vkCreateShaderModule(dev, &ci, nullptr, &m), "vkCreateShaderModule");
     return m;
 }
+
+uint32_t alignUp(uint32_t v, uint32_t a) { return (v + a - 1) / a * a; }
 }  // namespace
 
-void ComputeKernel::create(vk::Context& ctx, const std::string& spvName, const std::vector<KernelBinding>& bindings) {
+void ComputeKernel::create(vk::Context& ctx, const std::string& name, const std::vector<KernelBinding>& bindings) {
     destroy();
     ctx_ = &ctx;
+    rtPipeline_ = ctx.useRayTracingPipeline();
     VkDevice dev = ctx.device();
+    // 記述子とプッシュ定数を使う段階。ray tracing pipeline では、レイ生成のほかヒット・ミスのシェーダも同じ配置を共有する
+    const VkShaderStageFlags stages =
+        rtPipeline_ ? (VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR)
+                    : VK_SHADER_STAGE_COMPUTE_BIT;
     std::vector<VkDescriptorSetLayoutBinding> lb;
     std::map<VkDescriptorType, uint32_t> counts;
     for (const auto& b : bindings) {
-        lb.push_back({b.binding, b.type, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
+        lb.push_back({b.binding, b.type, 1, stages, nullptr});
         ++counts[b.type];
     }
     VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
@@ -213,14 +221,19 @@ void ComputeKernel::create(vk::Context& ctx, const std::string& spvName, const s
     }
     vkUpdateDescriptorSets(dev, static_cast<uint32_t>(w.size()), w.data(), 0, nullptr);
 
-    VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants)};
+    VkPushConstantRange pcr{stages, 0, sizeof(PushConstants)};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     plci.setLayoutCount = 1;
     plci.pSetLayouts = &setLayout_;
     plci.pushConstantRangeCount = 1;
     plci.pPushConstantRanges = &pcr;
     vk::check(vkCreatePipelineLayout(dev, &plci, nullptr, &layout_), "vkCreatePipelineLayout");
-    VkShaderModule sm = loadShader(dev, platform::exeDir() / "shaders" / spvName);
+
+    if (rtPipeline_) {
+        createRayTracingPipeline(name);
+        return;
+    }
+    VkShaderModule sm = loadShader(dev, platform::exeDir() / "shaders" / (name + ".comp.spv"));
     VkComputePipelineCreateInfo cci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     cci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, sm, "main",
                  nullptr};
@@ -230,7 +243,83 @@ void ComputeKernel::create(vk::Context& ctx, const std::string& spvName, const s
     vk::check(r, "vkCreateComputePipelines");
 }
 
+// ray tracing pipeline：レイ生成 1 本 ＋ ミス 2 本（最近接用・影用）＋ 三角形のヒットグループ 1 つ。
+// 再帰はしない（traceRayEXT はレイ生成からだけ呼ぶ）
+void ComputeKernel::createRayTracingPipeline(const std::string& name) {
+    VkDevice dev = ctx_->device();
+    const std::filesystem::path dir = platform::exeDir() / "shaders";
+    const char* files[4] = {nullptr, "rt_miss.rmiss.spv", "rt_shadow.rmiss.spv", "rt_hit.rchit.spv"};
+    const std::string rgen = name + ".rgen.spv";
+    files[0] = rgen.c_str();
+    const VkShaderStageFlagBits stageOf[4] = {VK_SHADER_STAGE_RAYGEN_BIT_KHR, VK_SHADER_STAGE_MISS_BIT_KHR,
+                                              VK_SHADER_STAGE_MISS_BIT_KHR, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR};
+    VkShaderModule modules[4]{};
+    VkPipelineShaderStageCreateInfo stages[4]{};
+    for (int i = 0; i < 4; ++i) {
+        modules[i] = loadShader(dev, dir / files[i]);
+        stages[i] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, stageOf[i], modules[i], "main",
+                     nullptr};
+    }
+    VkRayTracingShaderGroupCreateInfoKHR groups[4]{};
+    for (int i = 0; i < 4; ++i) {
+        groups[i] = {VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR};
+        groups[i].generalShader = VK_SHADER_UNUSED_KHR;
+        groups[i].closestHitShader = VK_SHADER_UNUSED_KHR;
+        groups[i].anyHitShader = VK_SHADER_UNUSED_KHR;
+        groups[i].intersectionShader = VK_SHADER_UNUSED_KHR;
+    }
+    for (int i = 0; i < 3; ++i) {
+        groups[i].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+        groups[i].generalShader = static_cast<uint32_t>(i);
+    }
+    groups[3].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+    groups[3].closestHitShader = 3;
+
+    VkRayTracingPipelineCreateInfoKHR ci{VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR};
+    ci.stageCount = 4;
+    ci.pStages = stages;
+    ci.groupCount = 4;
+    ci.pGroups = groups;
+    ci.maxPipelineRayRecursionDepth = 1;
+    ci.layout = layout_;
+    const VkResult r = vkCreateRayTracingPipelinesKHR(dev, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &ci, nullptr, &pipeline_);
+    for (auto m : modules) vkDestroyShaderModule(dev, m, nullptr);
+    vk::check(r, "vkCreateRayTracingPipelinesKHR");
+
+    // シェーダバインディングテーブル：[レイ生成][ミス×2][ヒット×1]。各領域の先頭は baseAlignment に揃える
+    const auto& rp = ctx_->rtProps();
+    const uint32_t handle = rp.shaderGroupHandleSize;
+    const uint32_t stride = alignUp(handle, rp.shaderGroupHandleAlignment);
+    const uint32_t base = rp.shaderGroupBaseAlignment;
+    const uint32_t raygenSize = alignUp(stride, base), missSize = alignUp(2 * stride, base), hitSize = alignUp(stride, base);
+    std::vector<uint8_t> handles(4 * handle);
+    vk::check(vkGetRayTracingShaderGroupHandlesKHR(dev, pipeline_, 0, 4, handles.size(), handles.data()),
+              "vkGetRayTracingShaderGroupHandlesKHR");
+    std::vector<uint8_t> table(raygenSize + missSize + hitSize, 0);
+    std::memcpy(table.data(), handles.data(), handle);                                             // raygen
+    std::memcpy(table.data() + raygenSize, handles.data() + handle, handle);                       // miss 0
+    std::memcpy(table.data() + raygenSize + stride, handles.data() + 2 * handle, handle);          // miss 1
+    std::memcpy(table.data() + raygenSize + missSize, handles.data() + 3 * handle, handle);        // hit
+    sbt_ = ctx_->createDeviceBuffer(table.data(), table.size(),
+                                    VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+    sbtRaygen_ = {sbt_.address, stride, stride};  // レイ生成は size == stride でなければならない
+    sbtMiss_ = {sbt_.address + raygenSize, stride, 2 * stride};
+    sbtHit_ = {sbt_.address + raygenSize + missSize, stride, stride};
+    sbtCallable_ = {};
+    log::debug("{}: ray tracing pipeline, SBT {} bytes (handle {}, stride {}, base {})", name, table.size(), handle,
+               stride, base);
+}
+
 void ComputeKernel::dispatch(VkCommandBuffer cmd, const PushConstants& pc, uint32_t width, uint32_t height) const {
+    if (rtPipeline_) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, layout_, 0, 1, &set_, 0, nullptr);
+        vkCmdPushConstants(cmd, layout_,
+                           VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR,
+                           0, sizeof(pc), &pc);
+        vkCmdTraceRaysKHR(cmd, &sbtRaygen_, &sbtMiss_, &sbtHit_, &sbtCallable_, width, height, 1);
+        return;
+    }
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout_, 0, 1, &set_, 0, nullptr);
     vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
@@ -240,6 +329,7 @@ void ComputeKernel::dispatch(VkCommandBuffer cmd, const PushConstants& pc, uint3
 void ComputeKernel::destroy() {
     if (!ctx_) return;
     VkDevice dev = ctx_->device();
+    if (sbt_.buffer) ctx_->destroyBuffer(sbt_);
     if (pipeline_) vkDestroyPipeline(dev, pipeline_, nullptr);
     if (layout_) vkDestroyPipelineLayout(dev, layout_, nullptr);
     if (pool_) vkDestroyDescriptorPool(dev, pool_, nullptr);
@@ -251,10 +341,12 @@ void ComputeKernel::destroy() {
     ctx_ = nullptr;
 }
 
+// レイを飛ばすカーネルの書き込みを、次のカーネル・計算シェーダ・転送が読めるようにする
 void computeBarrier(VkCommandBuffer cmd) {
-    vk::memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+    const VkPipelineStageFlags2 trace = vk::traceStages();
+    vk::memoryBarrier(cmd, trace | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                       VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT,
+                      trace | VK_PIPELINE_STAGE_2_COPY_BIT,
                       VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT |
                           VK_ACCESS_2_TRANSFER_READ_BIT);
 }

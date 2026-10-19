@@ -8,6 +8,11 @@
 
 namespace krbr::vk {
 
+namespace {
+VkPipelineStageFlags2 g_traceStages = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+}
+VkPipelineStageFlags2 traceStages() { return g_traceStages; }
+
 VkError::VkError(const std::string& what, VkResult r)
     : std::runtime_error(std::format("{} failed (VkResult {})", what, static_cast<int>(r))), result(r) {}
 
@@ -53,6 +58,8 @@ DeviceInfo queryInfo(VkPhysicalDevice pd) {
     as.pNext = &rq;
     VkPhysicalDeviceShaderAtomicFloatFeaturesEXT af{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
     rq.pNext = &af;
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
+    af.pNext = &rtp;
     VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     f2.pNext = &as;
     vkGetPhysicalDeviceFeatures2(pd, &f2);
@@ -60,7 +67,7 @@ DeviceInfo queryInfo(VkPhysicalDevice pd) {
     info.rayQuery = hasExt(exts, VK_KHR_RAY_QUERY_EXTENSION_NAME) && rq.rayQuery;
     info.accelerationStructure =
         hasExt(exts, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) && as.accelerationStructure;
-    info.rayTracingPipeline = hasExt(exts, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+    info.rayTracingPipeline = hasExt(exts, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) && rtp.rayTracingPipeline;
     info.externalMemoryWin32 = hasExt(exts, "VK_KHR_external_memory_win32");
     {
         VkPhysicalDeviceIDProperties idp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
@@ -171,15 +178,22 @@ void Context::init(const ContextOptions& opts) {
     int bestScore = -1;
     for (auto pd : pds) {
         DeviceInfo di = queryInfo(pd);
-        if (!di.rayQuery || !di.accelerationStructure || di.apiVersion < VK_API_VERSION_1_3) continue;
-        const int score = (di.discrete ? 1000 : 0) + static_cast<int>(di.deviceLocalBytes >> 30);
+        // ray query が第一候補。無ければ ray tracing pipeline（Pascal など。ドライバのエミュレーションで遅い）
+        if ((!di.rayQuery && !di.rayTracingPipeline) || !di.accelerationStructure ||
+            di.apiVersion < VK_API_VERSION_1_3)
+            continue;
+        const int score =
+            (di.discrete ? 1000 : 0) + (di.rayQuery ? 100 : 0) + static_cast<int>(di.deviceLocalBytes >> 30);
         if (score > bestScore) {
             bestScore = score;
             physical_ = pd;
             info_ = di;
         }
     }
-    if (!physical_) throw std::runtime_error("no Vulkan 1.3 device with VK_KHR_ray_query + acceleration_structure");
+    if (!physical_)
+        throw std::runtime_error(
+            "no Vulkan 1.3 device with VK_KHR_acceleration_structure + (VK_KHR_ray_query or VK_KHR_ray_tracing_pipeline)");
+    useRtPipeline_ = !info_.rayQuery;
 
     // キュー：グラフィックスを持たない計算専用ファミリーを優先（デスクトップ描画と競合しにくい）
     uint32_t qn = 0;
@@ -207,8 +221,9 @@ void Context::init(const ContextOptions& opts) {
     }
 
     const auto exts = deviceExtensions(physical_);
-    std::vector<const char*> devExts = {VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, VK_KHR_RAY_QUERY_EXTENSION_NAME,
+    std::vector<const char*> devExts = {VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
                                         VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME};
+    devExts.push_back(useRtPipeline_ ? VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME : VK_KHR_RAY_QUERY_EXTENSION_NAME);
     if (surface_) devExts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     // ノイズ除去（OIDN の CUDA デバイス）とバッファを共有するため
     if (info_.externalMemoryWin32) {
@@ -234,6 +249,8 @@ void Context::init(const ContextOptions& opts) {
     VkPhysicalDeviceAccelerationStructureFeaturesKHR fas{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
     VkPhysicalDeviceRayQueryFeaturesKHR frq{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR frtp{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
     VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     f2.features.shaderInt64 = VK_TRUE;
     f12.bufferDeviceAddress = VK_TRUE;
@@ -246,11 +263,17 @@ void Context::init(const ContextOptions& opts) {
     f13.dynamicRendering = VK_TRUE;  // ビューアの操作パネル（ImGui）の描画用
     fas.accelerationStructure = VK_TRUE;
     frq.rayQuery = VK_TRUE;
+    frtp.rayTracingPipeline = VK_TRUE;
     f2.pNext = &f12;
     f12.pNext = &f13;
     f13.pNext = &fas;
-    fas.pNext = &frq;
-    if (info_.atomicFloatAdd) frq.pNext = &faf;
+    if (useRtPipeline_) {
+        fas.pNext = &frtp;
+        if (info_.atomicFloatAdd) frtp.pNext = &faf;
+    } else {
+        fas.pNext = &frq;
+        if (info_.atomicFloatAdd) frq.pNext = &faf;
+    }
 
     const float prio = 0.5f;
     VkDeviceQueueGlobalPriorityCreateInfoKHR gp{VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR};
@@ -288,7 +311,11 @@ void Context::init(const ContextOptions& opts) {
 
     VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
     p2.pNext = &asProps_;
+    if (useRtPipeline_) asProps_.pNext = &rtProps_;
     vkGetPhysicalDeviceProperties2(physical_, &p2);
+    asProps_.pNext = nullptr;
+    g_traceStages = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                    (useRtPipeline_ ? VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR : VkPipelineStageFlags2{0});
 
     VmaVulkanFunctions fns{};
     fns.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
@@ -309,9 +336,10 @@ void Context::init(const ContextOptions& opts) {
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     check(vkCreateFence(device_, &fci, nullptr, &fence_), "vkCreateFence");
 
-    log::info("GPU: {} (Vulkan {}.{}.{}), queue family {}{}{}", info_.name, VK_API_VERSION_MAJOR(info_.apiVersion),
+    log::info("GPU: {} (Vulkan {}.{}.{}), queue family {}{}{}, {}", info_.name, VK_API_VERSION_MAJOR(info_.apiVersion),
               VK_API_VERSION_MINOR(info_.apiVersion), VK_API_VERSION_PATCH(info_.apiVersion), queueFamily_,
-              computeOnly >= 0 ? " (compute-only)" : "", lowPrio ? ", low global priority" : "");
+              computeOnly >= 0 ? " (compute-only)" : "", lowPrio ? ", low global priority" : "",
+              useRtPipeline_ ? "ray tracing pipeline (no ray_query)" : "ray query");
 }
 
 void Context::destroy() {
@@ -426,7 +454,7 @@ void Context::uploadImage(Image& img, const void* data, VkDeviceSize size, VkIma
         region.imageExtent = {img.width, img.height, 1};
         vkCmdCopyBufferToImage(cmd, staging.buffer, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
         imageBarrier(cmd, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, finalLayout, VK_PIPELINE_STAGE_2_COPY_BIT,
-                     VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                     VK_ACCESS_2_TRANSFER_WRITE_BIT, traceStages(),
                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT, img.layers);
     });
     destroyBuffer(staging);

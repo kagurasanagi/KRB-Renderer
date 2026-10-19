@@ -42,7 +42,7 @@ struct DeviceInfo {
     bool discrete = false;
     bool rayQuery = false;
     bool accelerationStructure = false;
-    bool rayTracingPipeline = false;
+    bool rayTracingPipeline = false;  // VK_KHR_ray_tracing_pipeline（ray_query が無い GPU での代替）
     bool globalPriority = false;
     uint64_t deviceLocalBytes = 0;
     bool externalMemoryWin32 = false;  // VK_KHR_external_memory_win32（OIDN との共有）
@@ -79,6 +79,9 @@ public:
     VmaAllocator allocator() const { return allocator_; }
     const DeviceInfo& info() const { return info_; }
     const VkPhysicalDeviceAccelerationStructurePropertiesKHR& asProps() const { return asProps_; }
+    // 交差判定の方式：ray query（計算シェーダ）が使えなければ ray tracing pipeline（レイ生成シェーダ）
+    bool useRayTracingPipeline() const { return useRtPipeline_; }
+    const VkPhysicalDeviceRayTracingPipelinePropertiesKHR& rtProps() const { return rtProps_; }
 
     Buffer createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible, bool hostReadback = false);
     void destroyBuffer(Buffer& b);
@@ -113,7 +116,13 @@ private:
     DeviceInfo info_;
     VkPhysicalDeviceAccelerationStructurePropertiesKHR asProps_{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};
+    bool useRtPipeline_ = false;
+    VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtProps_{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
 };
+
+// レイを飛ばすシェーダの段階（バリア用）：計算シェーダと、ray tracing pipeline を使うときはそのシェーダも
+VkPipelineStageFlags2 traceStages();
 
 void imageBarrier(VkCommandBuffer cmd, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout,
                   VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStage,

@@ -1,10 +1,8 @@
 #version 460
 // 単方向パストレーサー（光源の直接サンプリング ＋ BSDF サンプリングを MIS で結合）
 // 1 回の dispatch で各画素 1 サンプルを追加する
-#extension GL_EXT_ray_query : require
 #extension GL_GOOGLE_include_directive : require
-
-layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+#include "stage.glsl"  // 計算シェーダ（ray query）か、レイ生成シェーダ（ray tracing pipeline）か
 
 #include "common.glsl"
 #include "spectral.glsl"
@@ -18,7 +16,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 #include "camera.glsl"
 
 void main() {
-    uvec2 px = gl_GlobalInvocationID.xy;
+    uvec2 px = KRBR_INVOCATION_ID.xy;
     if (px.x >= F.dims.x || px.y >= F.dims.y) return;
     Rng rng = rngInit(px, pc.sampleIndex, pc.seed);
     bool spectral = spectralMode();

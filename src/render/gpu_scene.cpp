@@ -98,14 +98,14 @@ void GpuScene::updateSdfTiles(const scene::Scene& sc) {
     vmaFlushAllocation(ctx_->allocator(), buf.alloc, 0, VK_WHOLE_SIZE);
     ctx_->submitAndWait([&](VkCommandBuffer cmd) {
         vk::imageBarrier(cmd, boardImage.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, vk::traceStages(),
                          VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
                          VK_ACCESS_2_TRANSFER_WRITE_BIT, boardImage.layers);
         vkCmdCopyBufferToImage(cmd, buf.buffer, boardImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                static_cast<uint32_t>(regions.size()), regions.data());
         vk::imageBarrier(cmd, boardImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT,
-                         VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_ACCESS_2_TRANSFER_WRITE_BIT, vk::traceStages(),
                          VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, boardImage.layers);
     });
     ctx_->destroyBuffer(buf);
@@ -256,7 +256,7 @@ void GpuScene::buildGeometry(const scene::Scene& sc, float bumpIntensity) {
         const VkAccelerationStructureBuildRangeInfoKHR* tr = &trange;
         vkCmdBuildAccelerationStructuresKHR(cmd, 1, &tinfo, &tr);
         vk::memoryBarrier(cmd, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                          VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                          VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, vk::traceStages(),
                           VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
     });
     ctx.destroyBuffer(scratch);

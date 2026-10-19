@@ -1,10 +1,8 @@
 #version 460
 // BDPT / VCM の光源側：画素ごとに 1 本の光源側の経路を作り、拡散・光沢の頂点を保存する（接続と近傍のまとめ用）。
 // 各頂点はカメラへ直接つなぎ（t = 1 の戦略）、寄与を画面のバッファへ足し込む
-#extension GL_EXT_ray_query : require
 #extension GL_GOOGLE_include_directive : require
-
-layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+#include "stage.glsl"  // 計算シェーダ（ray query）か、レイ生成シェーダ（ray tracing pipeline）か
 
 #include "common.glsl"
 #include "spectral.glsl"
@@ -63,7 +61,7 @@ void connectToCamera(SubPath sp, Shade s, vec3 pos, vec3 ng, vec3 ns, vec3 wo, V
 }
 
 void main() {
-    uvec2 px = gl_GlobalInvocationID.xy;
+    uvec2 px = KRBR_INVOCATION_ID.xy;
     if (px.x >= F.dims.x || px.y >= F.dims.y) return;
     uint pathIdx = px.y * F.dims.x + px.x;
     Rng rng = rngInit(px, pc.sampleIndex, pc.seed ^ 0x6a09e667u);

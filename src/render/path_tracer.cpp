@@ -41,7 +41,7 @@ public:
         targets_ = targets;
         frame_.create(ctx);
         updateFrame(fp);
-        kernel_.create(ctx, "pathtrace.comp.spv", sceneBindings(sc, targets, frame_.ubo));
+        kernel_.create(ctx, "pathtrace", sceneBindings(sc, targets, frame_.ubo));
     }
 
     void updateFrame(const FrameParams& fp) override {
@@ -103,8 +103,8 @@ public:
         b.push_back(bufferBinding(22, cellHeads_));
         b.push_back(bufferBinding(23, counters_));
         b.push_back(bufferBinding(24, splat_));
-        light_.create(ctx, "vcm_light.comp.spv", b);
-        camera_.create(ctx, "vcm_camera.comp.spv", b);
+        light_.create(ctx, "vcm_light", b);
+        camera_.create(ctx, "vcm_camera", b);
         log::info("{}: up to {} light vertices ({} MB)", name(), capacity_,
                   static_cast<uint64_t>(capacity_) * 96 >> 20);
     }
