@@ -10,6 +10,7 @@
 #include "core/log.hpp"
 #include "core/platform.hpp"
 #include "geom/relief.hpp"
+#include "raster/board_sdf.hpp"
 #include "scene/scene.hpp"
 
 namespace krbr::scene {
@@ -57,6 +58,10 @@ void setupBoardMaterials(Scene& s, const kicad::Board& board, const SceneOptions
     fr4.base_color = srgbToLinear(o.fr4Color);
     fr4.specular_roughness = 0.55f;
     fr4.specular_ior = 1.5f;
+    // わずかな透光性：入った光は基材の中で吸収されながら進み、反対側やふちから拡散して出る
+    fr4.transmission_weight = 0.15f;
+    fr4.transmission_color = {0.85f, 0.72f, 0.38f};
+    fr4.transmission_depth = 1.0f;
     fr4.bump_pattern = BumpPattern::Weave;  // ガラス繊維の織り（7628 程度のピッチ）
     fr4.bump_strength = 0.12f;
     fr4.bump_scale = 0.45f;
@@ -279,7 +284,7 @@ void buildReliefTiles(Scene& s, const kicad::Board& board, const geom::ReliefPar
     const auto t0 = std::chrono::steady_clock::now();
     ReliefTileCache local;
     ReliefTileCache& c = cache ? *cache : local;
-    if (!c.matches(s.board)) c.reset(s.board);
+    if (!c.matches(s.board)) c.reset(s.board, opts.layerArt.pxPerMm);
     const uint32_t rmap[5] = {s.boardMats.fr4, s.boardMats.finish, s.boardMats.maskOnFr4, s.boardMats.maskOnCopper,
                               s.boardMats.silk};
 
@@ -304,10 +309,40 @@ void buildReliefTiles(Scene& s, const kicad::Board& board, const geom::ReliefPar
         for (size_t k; (k = next.fetch_add(1)) < todo.size();) {
             const auto [side, t] = todo[k];
             const kicad::Box2 rect = c.tileRect(t);
-            const auto sp = raster::collectSidePaths(board, static_cast<raster::Side>(side), opts.layerArt, &rect);
-            const geom::Paths tileBase = geom::intersect(
-                base[side], {geom::toPath({rect.lo, {rect.hi.x, rect.lo.y}, rect.hi, {rect.lo.x, rect.hi.y}})});
-            geom::ReliefInput in{sp.copper, sp.maskOpen, sp.silk, {}, &tileBase};
+            // 距離場のために、タイルより少し広い範囲（kSdfRangeMm 以上）の図形を集める
+            int px0, py0, px1, py1;
+            c.tilePixels(t, px0, py0, px1, py1);
+            const raster::Grid& G = c.sdfGrid;
+            const int margin = static_cast<int>(std::ceil(raster::kSdfRangeMm * G.pxPerMm)) + 2;
+            const int ex0 = std::max(0, px0 - margin), ey0 = std::max(0, py0 - margin);
+            const int ex1 = std::min(G.width, px1 + margin), ey1 = std::min(G.height, py1 + margin);
+            kicad::Box2 wide;
+            wide.lo = G.origin + kicad::Vec2{ex0, ey0} / G.pxPerMm;
+            wide.hi = G.origin + kicad::Vec2{ex1, ey1} / G.pxPerMm;
+            wide.add(rect);
+            const auto sp = raster::collectSidePaths(board, static_cast<raster::Side>(side), opts.layerArt, &wide);
+            const geom::Paths rectPath{
+                geom::toPath({rect.lo, {rect.hi.x, rect.lo.y}, rect.hi, {rect.lo.x, rect.hi.y}})};
+            const geom::Paths tileBase = geom::intersect(base[side], rectPath);
+            geom::ReliefInput in{geom::intersect(sp.copper, rectPath), geom::intersect(sp.maskOpen, rectPath),
+                                 geom::intersect(sp.silk, rectPath), {}, &tileBase};
+            {
+                // 距離場（広い範囲で求め、タイルの画素だけを残す）
+                raster::Grid eg{G.origin + kicad::Vec2{ex0, ey0} / G.pxPerMm, G.pxPerMm, ex1 - ex0, ey1 - ey0};
+                ReliefTileCache::SdfPatch patch{px0, py0, px1 - px0, py1 - py0, {}, {}};
+                std::vector<float> cov;
+                std::vector<uint8_t> enc;
+                for (int layer = 0; layer < 2; ++layer) {
+                    raster::rasterizeCoverage(layer == 0 ? sp.copper : sp.maskOpen, eg, cov);
+                    raster::encodeSdf(cov, eg.width, eg.height, G.pxPerMm, enc);
+                    auto& dst = layer == 0 ? patch.copper : patch.maskOpen;
+                    dst.resize(static_cast<size_t>(patch.w) * patch.h);
+                    for (int y = 0; y < patch.h; ++y)
+                        std::copy_n(enc.begin() + static_cast<size_t>(y + py0 - ey0) * eg.width + (px0 - ex0),
+                                    patch.w, dst.begin() + static_cast<size_t>(y) * patch.w);
+                }
+                c.sdf[side][t] = std::move(patch);
+            }
             geom::Mesh m;
             geom::buildRelief(s.board, side, in, rp, m, &rect);
             for (auto& id : m.triMaterial) id = rmap[std::min<uint32_t>(id, 4)];
@@ -320,6 +355,31 @@ void buildReliefTiles(Scene& s, const kicad::Board& board, const geom::ReliefPar
     for (unsigned i = 0; i < std::min<size_t>(nthreads, todo.size()); ++i) pool.emplace_back(worker);
     for (auto& th : pool) th.join();
     c.lastBuilt = static_cast<int>(todo.size());
+
+    // 作り直したタイルの距離場だけを、基板全体の画像（RG8）に書き込む。範囲外は「遠く外側」
+    {
+        const raster::Grid& G = c.sdfGrid;
+        const size_t bytes = static_cast<size_t>(G.width) * G.height * 2;
+        for (int side = 0; side < 2; ++side)
+            if (c.sdfImage[side].size() != bytes) c.sdfImage[side].assign(bytes, 255);
+        for (const auto& [side, t] : todo) {
+            const auto& p = c.sdf[side][t];
+            for (int y = 0; y < p.h; ++y) {
+                uint8_t* row = c.sdfImage[side].data() + (static_cast<size_t>(p.y0 + y) * G.width + p.x0) * 2;
+                const uint8_t* cu = p.copper.data() + static_cast<size_t>(y) * p.w;
+                const uint8_t* mo = p.maskOpen.data() + static_cast<size_t>(y) * p.w;
+                for (int x = 0; x < p.w; ++x) {
+                    row[x * 2 + 0] = cu[x];
+                    row[x * 2 + 1] = mo[x];
+                }
+            }
+        }
+        c.lastRebuiltTiles = todo;
+        s.layers.grid = G;
+        s.layersAreSdf = true;
+        s.sdf = &c;
+        s.sdfDirty = todo;
+    }
 
     size_t tris = 0;
     for (int side = 0; side < 2; ++side)
@@ -343,7 +403,7 @@ bool ReliefTileCache::matches(const geom::BoardGeometry& g) const {
            coreHalf == g.coreHalf;
 }
 
-void ReliefTileCache::reset(const geom::BoardGeometry& g) {
+void ReliefTileCache::reset(const geom::BoardGeometry& g, double pxPerMm) {
     bounds = {g.bounds.lo, g.bounds.hi};
     center = g.center;
     coreHalf = g.coreHalf;
@@ -352,7 +412,22 @@ void ReliefTileCache::reset(const geom::BoardGeometry& g) {
     for (int s = 0; s < 2; ++s) {
         tiles[s].assign(count(), {});
         valid[s].assign(count(), 0);
+        sdf[s].assign(count(), {});
     }
+    // 距離場の格子：タイルの外周の広げ分（1 mm）を含める。画素はタイルの境と揃える
+    sdfGrid.pxPerMm = pxPerMm;
+    sdfGrid.origin = bounds.lo - kicad::Vec2{1.0, 1.0};
+    sdfGrid.width = static_cast<int>(std::ceil((nx * tileSize + 2.0) * pxPerMm));
+    sdfGrid.height = static_cast<int>(std::ceil((ny * tileSize + 2.0) * pxPerMm));
+}
+
+void ReliefTileCache::tilePixels(int index, int& x0, int& y0, int& x1, int& y1) const {
+    const kicad::Box2 r = tileRect(index);
+    auto px = [&](double v, double o) { return static_cast<int>(std::lround((v - o) * sdfGrid.pxPerMm)); };
+    x0 = std::clamp(px(r.lo.x, sdfGrid.origin.x), 0, sdfGrid.width);
+    y0 = std::clamp(px(r.lo.y, sdfGrid.origin.y), 0, sdfGrid.height);
+    x1 = std::clamp(px(r.hi.x, sdfGrid.origin.x), 0, sdfGrid.width);
+    y1 = std::clamp(px(r.hi.y, sdfGrid.origin.y), 0, sdfGrid.height);
 }
 
 void ReliefTileCache::invalidateAll() {
@@ -399,6 +474,10 @@ Scene buildScene(const SceneContext& ctx) {
         bo.caps = false;  // 上下面は凹凸メッシュが受け持つ
     }
     s.board = geom::buildBoardGeometry(board, bo);
+    s.mask.onCopper = static_cast<float>(rp.maskOnCopper);
+    s.mask.onSubstrate = static_cast<float>(rp.maskOnSubstrate);
+    s.mask.copper = static_cast<float>(rp.copper);
+    s.mask.atEdge = std::min(s.mask.atEdge, s.mask.onCopper);
     {
         SceneMesh bm;
         bm.name = "board";
@@ -410,7 +489,7 @@ Scene buildScene(const SceneContext& ctx) {
         addInstanceBounds(s, 0, glm::mat4(1.0f));
         if (opts.relief) buildReliefTiles(s, board, rp, opts, ctx.reliefCache);
     }
-    if (!opts.relief || opts.layerTextures) {
+    if (!opts.relief) {
         log::ScopedTimer t("layer textures");
         s.layers = raster::buildLayerTextures(board, s.board, opts.layerArt);
     }

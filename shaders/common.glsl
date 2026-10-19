@@ -38,6 +38,7 @@ struct Material {
     vec4 params2;     // x: 凹凸の模様, y: 強さ（傾き）, z: 大きさ（mm）, w: 粗さのむら
     vec4 emission;    // rgb: 放射輝度, a: geometry_opacity
     vec4 transmission;  // x: transmission_weight, y: アッベ数, z: 分散の倍率, w: thin_walled（フェーズ5で使う）
+    vec4 transmission2; // rgb: transmission_color, a: transmission_depth（mm）
 };
 
 struct InstanceInfo {
@@ -72,7 +73,9 @@ layout(set = 0, binding = 14, std140) uniform Frame {
     uvec4 dims;       // x,y: 出力解像度, z,w: 環境マップ分布の解像度
     uvec4 counts;     // x: 最大深さ, y: ロシアンルーレット開始深さ
     uvec4 boardMats;  // x: レジスト, y: 銅（レジスト下）, z: 表面処理, w: 基材
-    uvec4 boardMats2; // x: シルク
+    uvec4 boardMats2; // x: シルク, y: 銅, z: 基材
+    vec4 maskParams;  // x: 銅の上のレジストの厚み, y: 基材の上, z: 銅の縁の上, w: 縁から中央への変化の距離（mm）
+    vec4 maskParams2; // x: 銅の壁ぎわのたまり, y: その距離, z: 銅の厚み, w: 1 なら層テクスチャは距離場
 } F;
 
 layout(set = 0, binding = 15, std430) readonly buffer Instances { InstanceInfo instanceInfos[]; };

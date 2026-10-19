@@ -146,7 +146,9 @@ public:
         u.dims = {targets_.width, targets_.height, sc.envDistW, sc.envDistH};
         u.counts = {fp.maxDepth, fp.rrStartDepth, 0, 0};
         u.boardMats = {sc.boardMats.mask, sc.boardMats.copper, sc.boardMats.finish, sc.boardMats.fr4};
-        u.boardMats2 = {sc.boardMats.silk, 0, 0, 0};
+        u.boardMats2 = {sc.boardMats.silk, sc.boardMats.copper, sc.boardMats.fr4, 0};
+        u.maskParams = sc.maskParams;
+        u.maskParams2 = sc.maskParams2;
         std::memcpy(ubo_.mapped, &u, sizeof(u));
         vmaFlushAllocation(ctx_->allocator(), ubo_.alloc, 0, VK_WHOLE_SIZE);
     }

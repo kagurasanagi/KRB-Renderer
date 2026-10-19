@@ -32,12 +32,15 @@ public:
     // 基板テクスチャの対応（ワールド X, Z の原点と 1/大きさ）
     glm::vec4 boardMap{0.0f};
     scene::BoardMaterialIds boardMats;
+    glm::vec4 maskParams{0.0f}, maskParams2{0.0f};
     size_t triangleCount = 0;
 
 private:
     void buildGeometry(const scene::Scene& sc, float bumpIntensity);
     void buildBoardTexture(const scene::Scene& sc);
     void destroyGeometry();
+    void updateSdfTiles(const scene::Scene& sc);
+    bool boardImageIsSdf_ = false;
 
     vk::Context* ctx_ = nullptr;
     std::vector<vk::Buffer> blasBuffers_;

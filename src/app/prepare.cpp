@@ -134,7 +134,17 @@ std::unique_ptr<PreparedScene> prepareScene(const RenderOptions& o, const fs::pa
         for (int s = 0; s < 2; ++s) {
             std::string err;
             const fs::path p = debugLayersDir / (debugStem + (s == 0 ? "_layers_front.png" : "_layers_back.png"));
-            if (io::savePngRgba8(p, L.grid.width, L.grid.height, L.rgba[s].data(), err))
+            std::vector<uint8_t> rgba = L.rgba[s];
+            if (prep->scene.layersAreSdf && prep->scene.sdf) {
+                const auto& rg = prep->scene.sdf->sdfImage[s];
+                rgba.assign(rg.size() * 2, 255);
+                for (size_t i = 0; i < rg.size() / 2; ++i) {
+                    rgba[i * 4 + 0] = rg[i * 2];
+                    rgba[i * 4 + 1] = rg[i * 2 + 1];
+                    rgba[i * 4 + 2] = 0;
+                }
+            }
+            if (io::savePngRgba8(p, L.grid.width, L.grid.height, rgba.data(), err))
                 log::info("wrote {}", platform::pathToUtf8(p));
             else
                 log::warn("{}", err);

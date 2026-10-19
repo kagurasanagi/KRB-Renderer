@@ -58,8 +58,55 @@ void GpuScene::rebuildGeometry(const scene::Scene& sc, float bumpIntensity) {
     vkDeviceWaitIdle(ctx_->device());
     destroyGeometry();
     buildGeometry(sc, bumpIntensity);
+    const auto& G = sc.layers.grid;
+    if (sc.layersAreSdf && sc.sdf && boardImageIsSdf_ && boardImage.width == static_cast<uint32_t>(G.width) &&
+        boardImage.height == static_cast<uint32_t>(G.height)) {
+        updateSdfTiles(sc);
+        return;
+    }
     ctx_->destroyImage(boardImage);
     buildBoardTexture(sc);
+}
+
+void GpuScene::updateSdfTiles(const scene::Scene& sc) {
+    if (sc.sdfDirty.empty()) return;
+    const auto& c = *sc.sdf;
+    // 作り直したタイルの画素を詰めて 1 回で送る
+    std::vector<uint8_t> staging;
+    std::vector<VkBufferImageCopy> regions;
+    for (const auto& [side, t] : sc.sdfDirty) {
+        int x0, y0, x1, y1;
+        c.tilePixels(t, x0, y0, x1, y1);
+        if (x1 <= x0 || y1 <= y0) continue;
+        VkBufferImageCopy r{};
+        r.bufferOffset = staging.size();
+        r.bufferRowLength = static_cast<uint32_t>(x1 - x0);
+        r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, static_cast<uint32_t>(side), 1};
+        r.imageOffset = {x0, y0, 0};
+        r.imageExtent = {static_cast<uint32_t>(x1 - x0), static_cast<uint32_t>(y1 - y0), 1};
+        regions.push_back(r);
+        for (int y = y0; y < y1; ++y) {
+            const uint8_t* row = c.sdfImage[side].data() + (static_cast<size_t>(y) * c.sdfGrid.width + x0) * 2;
+            staging.insert(staging.end(), row, row + static_cast<size_t>(x1 - x0) * 2);
+        }
+    }
+    if (regions.empty()) return;
+    vk::Buffer buf = ctx_->createBuffer(staging.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
+    std::memcpy(buf.mapped, staging.data(), staging.size());
+    vmaFlushAllocation(ctx_->allocator(), buf.alloc, 0, VK_WHOLE_SIZE);
+    ctx_->submitAndWait([&](VkCommandBuffer cmd) {
+        vk::imageBarrier(cmd, boardImage.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+                         VK_ACCESS_2_TRANSFER_WRITE_BIT, boardImage.layers);
+        vkCmdCopyBufferToImage(cmd, buf.buffer, boardImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               static_cast<uint32_t>(regions.size()), regions.data());
+        vk::imageBarrier(cmd, boardImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT,
+                         VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, boardImage.layers);
+    });
+    ctx_->destroyBuffer(buf);
 }
 
 void GpuScene::buildGeometry(const scene::Scene& sc, float bumpIntensity) {
@@ -214,6 +261,27 @@ void GpuScene::buildBoardTexture(const scene::Scene& sc) {
     vk::Context& ctx = *ctx_;
     VkDevice dev = ctx.device();
     // ---- 基板の層テクスチャ（2 層の配列：表・裏）
+    if (sc.layersAreSdf && sc.sdf) {
+        // 距離場（RG8、表・裏の 2 層）
+        const auto& G = sc.layers.grid;
+        boardImage = ctx.createImage2D(static_cast<uint32_t>(G.width), static_cast<uint32_t>(G.height), 2,
+                                       VK_FORMAT_R8G8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        std::vector<uint8_t> both(sc.sdf->sdfImage[0].size() + sc.sdf->sdfImage[1].size());
+        std::memcpy(both.data(), sc.sdf->sdfImage[0].data(), sc.sdf->sdfImage[0].size());
+        std::memcpy(both.data() + sc.sdf->sdfImage[0].size(), sc.sdf->sdfImage[1].data(), sc.sdf->sdfImage[1].size());
+        ctx.uploadImage(boardImage, both.data(), both.size(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if (!boardSampler)
+            boardSampler = makeSampler(dev, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+        const double sizeX = G.width / G.pxPerMm, sizeZ = G.height / G.pxPerMm;
+        boardMap = {static_cast<float>(G.origin.x - sc.board.center.x), static_cast<float>(G.origin.y - sc.board.center.y),
+                    static_cast<float>(1.0 / sizeX), static_cast<float>(1.0 / sizeZ)};
+        boardImageIsSdf_ = true;
+        boardMats = sc.boardMats;
+        maskParams = {sc.mask.onCopper, sc.mask.onSubstrate, sc.mask.atEdge, sc.mask.falloff};
+        maskParams2 = {sc.mask.pool, sc.mask.poolFalloff, sc.mask.copper, 1.0f};
+        return;
+    }
+    boardImageIsSdf_ = false;
     // 凹凸を形状で作る場合は層テクスチャを使わないので、1x1 のダミーにする
     raster::LayerTextures dummy;
     if (sc.layers.grid.width <= 0 || sc.layers.rgba[0].empty()) {
@@ -236,6 +304,8 @@ void GpuScene::buildBoardTexture(const scene::Scene& sc) {
                 static_cast<float>(L.grid.origin.y - sc.board.center.y), static_cast<float>(1.0 / sizeX),
                 static_cast<float>(1.0 / sizeZ)};
     boardMats = sc.boardMats;
+    maskParams = {sc.mask.onCopper, sc.mask.onSubstrate, sc.mask.atEdge, sc.mask.falloff};
+    maskParams2 = {sc.mask.pool, sc.mask.poolFalloff, sc.mask.copper, sc.layersAreSdf ? 1.0f : 0.0f};
 }
 
 void GpuScene::setEnvironment(const io::ImageF& env, const EnvDistribution& dist) {

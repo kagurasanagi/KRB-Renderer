@@ -115,6 +115,13 @@ TEST_CASE("white furnace test") {
         m.base_metalness = 1.0f;
         m.specular_roughness = 1.0f;
     }, 0.39, 0.43);
+    // 拡散の透過（基材の透光性の仕組み）：吸収のない白なら、入って出ても 1
+    add("translucent", [](scene::Material& m) {
+        m.specular_weight = 0.0f;
+        m.transmission_weight = 0.3f;
+        m.transmission_color = glm::vec3(1.0f);
+        m.transmission_depth = 1000.0f;
+    }, 0.985, 1.015);
     // 白い誘電体（鏡面＋拡散）：層の重ね方の近似で少し損失がある
     add("dielectric_r0.3", [](scene::Material&) {}, 0.80, 1.015);
     // コートつきの白い拡散

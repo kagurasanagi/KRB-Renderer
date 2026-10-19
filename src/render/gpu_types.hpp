@@ -29,8 +29,9 @@ struct GpuMaterial {
     glm::vec4 params2;    // bump pattern, bump strength, bump scale (mm), roughness variation
     glm::vec4 emission;   // rgb: 放射輝度（emission_color × emission_luminance × kEmissionScale）, a: geometry_opacity
     glm::vec4 transmission;  // transmission_weight, dispersion abbe number, dispersion scale, thin_walled
+    glm::vec4 transmission2;  // rgb: transmission_color, a: transmission_depth（mm）
 };
-static_assert(sizeof(GpuMaterial) == 128);
+static_assert(sizeof(GpuMaterial) == 144);
 
 // 発光の単位：放射輝度 1.0 を 1000 cd/m² とみなす（HDR の画素値と同じ尺度）
 constexpr float kEmissionScale = 1.0f / 1000.0f;
@@ -54,6 +55,7 @@ inline GpuMaterial toGpu(const scene::Material& m) {
     g.emission = {m.emission_color * (m.emission_luminance * kEmissionScale), m.geometry_opacity};
     g.transmission = {m.transmission_weight, m.transmission_dispersion_abbe_number, m.transmission_dispersion_scale,
                       m.geometry_thin_walled ? 1.0f : 0.0f};
+    g.transmission2 = {m.transmission_color, m.transmission_depth};
     return g;
 }
 
@@ -68,6 +70,8 @@ struct FrameUBO {
     glm::uvec4 counts;
     glm::uvec4 boardMats;
     glm::uvec4 boardMats2;
+    glm::vec4 maskParams;   // x: 銅の上の厚み, y: 基材の上の厚み, z: 縁の厚み, w: 縁からの変化の距離（mm）
+    glm::vec4 maskParams2;  // x: 壁ぎわのたまり, y: その距離, z: 銅の厚み, w: 1 なら距離場が使える
 };
 
 struct PushConstants {

@@ -15,6 +15,13 @@ struct Shade {
     vec3 coatColor;
     float coatRoughness;
     float coatIor;
+    // コートの吸収を Beer–Lambert で求める場合（coatThickness > 0）。coatColor の代わりに使う
+    vec3 coatSigma;        // 吸収係数（1/mm）
+    float coatThickness;   // 厚み（mm）
+    // 拡散の透過（基材の中へ入る割合と、中での吸収）。transWeight = 0 なら不透明
+    float transWeight;
+    vec3 transSigma;       // 中での吸収係数（1/mm）
+    bool metallic;         // 中から当たったとき光を通さない（銅など）
 };
 
 Shade shadeFromMaterial(Material m) {
@@ -30,7 +37,22 @@ Shade shadeFromMaterial(Material m) {
     s.coatColor = m.coatColor.rgb;
     s.coatRoughness = m.coatColor.a;
     s.coatIor = m.params1.x;
+    s.coatSigma = vec3(0.0);
+    s.coatThickness = 0.0;
+    s.transWeight = m.transmission.x;
+    float depth = max(m.transmission2.a, 1e-3);
+    s.transSigma = -log(max(m.transmission2.rgb, vec3(1e-4))) / depth;
+    s.metallic = m.params0.x > 0.5;
     return s;
+}
+
+// コートを通る光の透過率（入射と出射の 2 回、コートの中での屈折後の角度で光路長を求める）
+vec3 coatTransmittance(Shade s, float cosV, float cosL) {
+    if (s.coatThickness <= 0.0) return s.coatColor;
+    float n2 = s.coatIor * s.coatIor;
+    float cv = sqrt(max(1e-4, 1.0 - (1.0 - cosV * cosV) / n2));
+    float cl = sqrt(max(1e-4, 1.0 - (1.0 - cosL * cosL) / n2));
+    return exp(-s.coatSigma * s.coatThickness * (1.0 / cv + 1.0 / cl));
 }
 
 float fresnelDielectric(float cosi, float eta) {
@@ -119,7 +141,7 @@ vec3 bsdfEval(Shade s, vec3 v, vec3 l) {
         float fc = fresnelDielectric(VoH, s.coatIor);
         result += s.coatWeight * fc * ggxD(h.z, a2) * ggxG2(v.z, l.z, a2) / (4.0 * v.z * l.z);
     }
-    vec3 coatAtten = mix(vec3(1.0), s.coatColor * (1.0 - fcV) * (1.0 - fcL), s.coatWeight);
+    vec3 coatAtten = mix(vec3(1.0), coatTransmittance(s, v.z, l.z) * (1.0 - fcV) * (1.0 - fcL), s.coatWeight);
 
     // ベースの鏡面（誘電体と金属で分布は共通、フレネルだけ異なる）
     float a = ggxAlpha(s.roughness);

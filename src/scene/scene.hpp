@@ -56,14 +56,25 @@ struct ReliefTileCache {
     int nx = 0, ny = 0;
     std::vector<geom::Mesh> tiles[2];  // 表・裏。三角形の材質は Scene::materials の番号
     std::vector<char> valid[2];
+    // 銅・レジスト開口の縁からの距離場（基板全体の格子のうち、タイルの範囲の画素）
+    struct SdfPatch {
+        int x0 = 0, y0 = 0, w = 0, h = 0;
+        std::vector<uint8_t> copper, maskOpen;
+    };
+    std::vector<SdfPatch> sdf[2];
+    raster::Grid sdfGrid;  // 距離場の格子（基板の範囲＋1 mm）
+    std::vector<uint8_t> sdfImage[2];  // 基板全体の距離場（RG8：R = 銅, G = レジスト開口）。タイルごとに書き換える
+    std::vector<std::pair<int, int>> lastRebuiltTiles;  // 直前の構築で作り直した（面, タイル）
     int lastBuilt = 0;  // 直前の構築で作り直したタイルの数
 
     bool matches(const geom::BoardGeometry& g) const;
-    void reset(const geom::BoardGeometry& g);
+    void reset(const geom::BoardGeometry& g, double pxPerMm);
     void invalidateAll();
     void invalidate(const std::vector<kicad::Box2>& dirty);
     kicad::Box2 tileRect(int index) const;
     int count() const { return nx * ny; }
+    // タイルの範囲の画素（距離場の格子での）
+    void tilePixels(int index, int& x0, int& y0, int& x1, int& y1) const;
 };
 
 struct Scene {
@@ -71,7 +82,20 @@ struct Scene {
     std::vector<Material> materials;
     std::vector<Instance> instances;
     geom::BoardGeometry board;
-    raster::LayerTextures layers;
+    raster::LayerTextures layers;  // 凹凸を形状で作らない場合の層テクスチャ（R=銅, G=開口, B=シルク）
+    bool layersAreSdf = false;     // true なら層テクスチャの代わりに距離場（sdf）を使う
+    const ReliefTileCache* sdf = nullptr;         // 距離場の画像（タイルのキャッシュが持つ）
+    std::vector<std::pair<int, int>> sdfDirty;    // 作り直した（面, タイル）。GPU にはこの範囲だけ送る
+    // レジストの厚み t(x) のモデル（mm）。shaders/pathtrace.comp の maskThickness と対応
+    struct MaskModel {
+        float onCopper = 0.012f;     // 銅の上（縁から十分離れたところ）
+        float onSubstrate = 0.025f;  // 基材の上
+        float atEdge = 0.004f;       // 銅の縁の上（流れて薄くなる）
+        float falloff = 0.06f;       // 縁から中央の厚みに近づく距離
+        float pool = 0.010f;         // 銅の壁ぎわにたまる分
+        float poolFalloff = 0.05f;
+        float copper = 0.035f;       // 銅の厚み（縁の丸みの高さ）
+    } mask;
     BoardMaterialIds boardMats;
     std::vector<MissingModel> missing;
     std::vector<MaterialAssignment> assignments;
