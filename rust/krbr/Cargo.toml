@@ -12,5 +12,6 @@ path = "src/main.rs"
 [dependencies]
 krbr-core = { path = "../crates/krbr-core" }
 krbr-kicad = { path = "../crates/krbr-kicad" }
+krbr-model = { path = "../crates/krbr-model" }
 clap.workspace = true
 anyhow.workspace = true

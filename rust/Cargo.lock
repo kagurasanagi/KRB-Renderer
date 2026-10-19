@@ -68,6 +68,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "cfg-if"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
+
+[[package]]
 name = "clap"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -148,6 +154,7 @@ dependencies = [
  "clap",
  "krbr-core",
  "krbr-kicad",
+ "krbr-model",
 ]
 
 [[package]]
@@ -165,6 +172,25 @@ dependencies = [
  "krbr-core",
  "regex",
  "serde_json",
+]
+
+[[package]]
+name = "krbr-model"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "krbr-core",
+ "libloading",
+]
+
+[[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
 ]
 
 [[package]]

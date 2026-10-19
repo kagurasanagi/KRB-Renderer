@@ -28,6 +28,53 @@ enum Command {
         #[arg(long)]
         models: bool,
     },
+    /// load every 3D model of a board (mesh cache, else the STEP converter DLL) and print statistics
+    Models {
+        /// .kicad_pcb file
+        pcb: PathBuf,
+        /// do not read or write the mesh cache
+        #[arg(long)]
+        no_cache: bool,
+    },
+}
+
+fn cmd_models(pcb: &PathBuf, no_cache: bool) -> anyhow::Result<()> {
+    use krbr_model::{library::step_support, MeshParams, ModelLibrary};
+    let board = load_board(pcb)?;
+    match step_support() {
+        Ok(()) => info!("STEP converter: available"),
+        Err(e) => krbr_core::warn!("STEP converter unavailable ({e}); STEP models will be placeholders"),
+    }
+    let resolver = ModelResolver::new(&board.project_dir, &BTreeMap::new(), &[]);
+    let library = ModelLibrary::new(krbr_core::platform::cache_dir(), MeshParams::default(), !no_cache);
+    let t0 = std::time::Instant::now();
+    let (mut tris, mut parts, mut missing) = (0usize, 0usize, 0usize);
+    for fp in &board.footprints {
+        for m in &fp.models {
+            let r = resolver.resolve(&m.path);
+            if !r.found {
+                missing += 1;
+                continue;
+            }
+            let res = library.get(&r.path);
+            if let Some(mesh) = &res.mesh {
+                tris += mesh.mesh.triangle_count();
+                parts += mesh.parts.len();
+            }
+        }
+    }
+    let st = library.stats();
+    info!(
+        "models: {} loaded, {} cache hits, {} failed, {} unresolved; {} triangles, {} parts, {:.2} s",
+        st.loaded,
+        st.cache_hits,
+        st.failed,
+        missing,
+        tris,
+        parts,
+        t0.elapsed().as_secs_f64()
+    );
+    Ok(())
 }
 
 fn cmd_info(pcb: &PathBuf, models: bool) -> anyhow::Result<()> {
@@ -85,6 +132,7 @@ fn main() {
     }
     let result = match &cli.command {
         Command::Info { pcb, models } => cmd_info(pcb, *models),
+        Command::Models { pcb, no_cache } => cmd_models(pcb, *no_cache),
     };
     if let Err(e) = result {
         krbr_core::error!("{e}");
