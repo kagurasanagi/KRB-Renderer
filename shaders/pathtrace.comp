@@ -29,7 +29,8 @@ bool traceClosest(vec3 origin, vec3 dir, out Hit hit) {
     }
     if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) return false;
 
-    uint meshId = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true));
+    InstanceInfo ii = instanceInfos[uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true))];
+    uint meshId = ii.mesh;
     uint prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, true));
     vec2 bc = rayQueryGetIntersectionBarycentricsEXT(rq, true);
     mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT(rq, true);
@@ -52,7 +53,7 @@ bool traceClosest(vec3 origin, vec3 dir, out Hit hit) {
     vec3 ns = nObj * hit.w2o;
     hit.ns = dot(ns, ns) > 1e-20 ? normalize(ns) : hit.ng;
     hit.instance = uint(rayQueryGetIntersectionInstanceIdEXT(rq, true));
-    hit.material = triMats[mi.triOffset + prim];
+    hit.material = ii.materialBase + triMats[mi.triOffset + prim];
     return true;
 }
 
@@ -224,6 +225,13 @@ void main() {
                 L += depth >= 2u ? clampRadiance(c) : c;  // 間接光だけを抑える（ホタル対策）
             }
             break;
+        }
+
+        // 発光面（emission）。発光面を光源として直接サンプリングはしないので、当たったときにそのまま足す
+        vec3 Le = materials[hit.material].emission.rgb;
+        if (Le.r + Le.g + Le.b > 0.0) {
+            L += depth == 0u ? Le : clampRadiance(beta * Le);
+            if (depth == 0u) albedo = clamp(Le, 0.0, 1.0);
         }
 
         vec3 wo = -dir;

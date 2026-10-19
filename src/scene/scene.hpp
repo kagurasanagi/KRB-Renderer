@@ -21,7 +21,17 @@ struct SceneMesh {
 
 struct Instance {
     uint32_t mesh = 0;
-    glm::mat4 xform{1.0f};  // オブジェクト -> ワールド
+    glm::mat4 xform{1.0f};      // オブジェクト -> ワールド
+    uint32_t materialBase = 0;  // 材質の番号 = materialBase + 三角形の triMaterial（基板などは 0）
+};
+
+// 部品の部位ごとの材質の割り当て（krbr material show 用）
+struct MaterialAssignment {
+    std::string reference, footprint;
+    std::string modelSpec, modelFile, modelHash;
+    std::string partKeys;  // 部位のキー（空白区切り）
+    std::string material;  // 材質ライブラリの名前
+    std::string source;    // どの段階で決まったか
 };
 
 struct BoardMaterialIds {
@@ -45,6 +55,7 @@ struct Scene {
     raster::LayerTextures layers;
     BoardMaterialIds boardMats;
     std::vector<MissingModel> missing;
+    std::vector<MaterialAssignment> assignments;
     int modelInstances = 0;
     int placeholders = 0;
     geom::Bounds3 bounds;
@@ -73,7 +84,7 @@ struct SceneContext {
     const kicad::Board& board;
     const kicad::ModelResolver& resolver;
     model::ModelLibrary& library;
-    const ModelMap& modelMap;
+    const MaterialResolver& materials;
     const SceneOptions& options;
 };
 

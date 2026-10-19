@@ -8,11 +8,25 @@
 
 namespace krbr::model {
 
+// モデルの部位（STEP の XDE の名前と面の色の組）。材質はこの単位で割り当てる
+struct ModelPart {
+    std::string name;  // XDE の名前（部品・サブシェイプ）。無ければ空
+    glm::vec3 srgb{0.5f};  // STEP に書かれた色の値（表示用の sRGB）
+    float alpha = 1.0f;
+    bool hasColor = false;
+
+    glm::vec3 linearColor() const;
+    std::string hex() const;            // "#rrggbb"
+    std::string kicadColorName() const;  // KiCad 標準モデルの色なら "metal_grey_pins" など。違えば空
+    // 対応表の照合に使うキーの候補（優先順）：名前、"kicad:<色名>"、"#rrggbb"
+    std::vector<std::string> keys() const;
+};
+
 // 3D モデルを分割したメッシュ。座標は mm（モデル自身の座標系、KiCad 3D と同じ Z 上向き）。
-// mesh.triMaterial は colors の番号
+// mesh.triMaterial は parts の番号
 struct ModelMesh {
     geom::Mesh mesh;
-    std::vector<glm::vec4> colors;  // リニア RGB + 不透明度
+    std::vector<ModelPart> parts;
 };
 
 struct MeshParams {
@@ -23,11 +37,12 @@ struct MeshParams {
 struct LoadResult {
     std::shared_ptr<const ModelMesh> mesh;
     bool fromCache = false;
+    std::string fileHash;  // ファイル内容の XXH64（16 進）。材質の対応表の照合にも使う
     std::string error;
     double seconds = 0.0;
 };
 
-// モデル形式ごとの読み込み器。BDPT 等とは独立に、形式（STEP / VRML ...）を後から追加できる
+// モデル形式ごとの読み込み器（STEP / VRML ...）。後から形式を追加できる
 class IModelLoader {
 public:
     virtual ~IModelLoader() = default;

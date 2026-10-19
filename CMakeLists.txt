@@ -53,35 +53,48 @@ foreach(src ${SHADER_SOURCES})
 endforeach()
 add_custom_target(krbr_shaders DEPENDS ${SHADER_OUTPUTS})
 
-# ---------------------------------------------------------------- krbr
+# ---------------------------------------------------------------- krbr_core（本体とテストで共有）
 file(GLOB_RECURSE KRBR_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+list(REMOVE_ITEM KRBR_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
 # ImGui のバックエンドは volk を使うよう自前でビルドする（vcpkg 版は Vulkan ローダーを直接リンクするため）
 set(IMGUI_BACKEND_SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui_backends/imgui_impl_glfw.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui_backends/imgui_impl_vulkan.cpp")
-add_executable(krbr ${KRBR_SOURCES} ${IMGUI_BACKEND_SOURCES})
-add_dependencies(krbr krbr_shaders)
-target_include_directories(krbr PRIVATE src third_party/imgui_backends ${STB_INCLUDE_DIRS} ${EARCUT_HPP_INCLUDE_DIRS})
-target_link_libraries(krbr PRIVATE
+add_library(krbr_core STATIC ${KRBR_SOURCES} ${IMGUI_BACKEND_SOURCES})
+add_dependencies(krbr_core krbr_shaders)
+target_include_directories(krbr_core PUBLIC src third_party/imgui_backends ${STB_INCLUDE_DIRS} ${EARCUT_HPP_INCLUDE_DIRS})
+target_link_libraries(krbr_core PUBLIC
   Vulkan::Headers volk::volk GPUOpen::VulkanMemoryAllocator
   tomlplusplus::tomlplusplus nlohmann_json::nlohmann_json
   unofficial::tinyexr::tinyexr Clipper2::Clipper2 CLI11::CLI11 glm::glm glfw imgui::imgui)
-target_compile_definitions(krbr PRIVATE VK_NO_PROTOTYPES GLM_FORCE_DEPTH_ZERO_TO_ONE IMGUI_IMPL_VULKAN_USE_VOLK)
+target_compile_definitions(krbr_core PUBLIC VK_NO_PROTOTYPES GLM_FORCE_DEPTH_ZERO_TO_ONE IMGUI_IMPL_VULKAN_USE_VOLK)
 if(WIN32)
-  target_link_libraries(krbr PRIVATE comdlg32)
-endif()
-if(WIN32)
-  target_compile_definitions(krbr PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+  target_link_libraries(krbr_core PUBLIC comdlg32)
+  target_compile_definitions(krbr_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 endif()
 if(MSVC)
-  target_compile_options(krbr PRIVATE /utf-8 /W3 /permissive- /EHsc /Zc:__cplusplus)
+  target_compile_options(krbr_core PUBLIC /utf-8 /W3 /permissive- /EHsc /Zc:__cplusplus)
 endif()
 
 if(OpenCASCADE_FOUND)
   message(STATUS "OpenCASCADE ${OpenCASCADE_VERSION}: STEP support enabled")
-  target_compile_definitions(krbr PRIVATE KRBR_HAVE_OCCT=1)
-  target_include_directories(krbr PRIVATE ${OpenCASCADE_INCLUDE_DIR})
-  target_link_libraries(krbr PRIVATE TKDESTEP TKXCAF TKLCAF TKCAF TKRWMesh TKMesh TKBRep TKTopAlgo TKMath TKernel TKDE TKXSBase TKG3d TKGeomBase)
+  target_compile_definitions(krbr_core PUBLIC KRBR_HAVE_OCCT=1)
+  target_include_directories(krbr_core PUBLIC ${OpenCASCADE_INCLUDE_DIR})
+  target_link_libraries(krbr_core PUBLIC TKDESTEP TKXCAF TKLCAF TKCAF TKRWMesh TKMesh TKBRep TKTopAlgo TKMath TKernel TKDE TKXSBase TKG3d TKGeomBase)
 else()
   message(WARNING "OpenCASCADE not found: STEP models will fall back to placeholder boxes")
 endif()
+
+# ---------------------------------------------------------------- krbr（コマンド）
+add_executable(krbr src/main.cpp)
+target_link_libraries(krbr PRIVATE krbr_core)
+
+# ---------------------------------------------------------------- テスト
+# 単体テストと、オフスクリーン描画を使う検証（白い炉テストなど）。ウィンドウは開かない
+find_package(doctest CONFIG REQUIRED)
+enable_testing()
+file(GLOB KRBR_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
+add_executable(krbr_tests ${KRBR_TEST_SOURCES})
+target_link_libraries(krbr_tests PRIVATE krbr_core doctest::doctest)
+target_compile_definitions(krbr_tests PRIVATE KRBR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME krbr_tests COMMAND krbr_tests)

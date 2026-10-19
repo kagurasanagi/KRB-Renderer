@@ -81,6 +81,10 @@ release だけをビルドする独自トリプレット `triplets/x64-windows-r
 | `krbr info <pcb> [--models]` | 基板の解析結果と 3D モデルのパス解決の確認（GPU は使わない） |
 | `krbr <pcb> --hdr <file>`（= `krbr view`） | リアルタイム表示 |
 | `krbr render <pcb> --hdr <file> [options]` | ファイルへ出力 |
+| `krbr material list` | 材質ライブラリの一覧 |
+| `krbr material show <pcb> [--ref U3]` | 部品・部位ごとの材質と、どの段階で決まったか |
+| `krbr material set <pcb> --ref U3 [--part K] --material M` | 部品番号ごとの上書き（プロジェクトの overrides.toml） |
+| `krbr material set <pcb> --model <パス/ファイル名> [--part K] --material M [--global]` | 3D モデルごとの設定（プロジェクト、または `--global` で全体設定） |
 
 `render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X,Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--init`, `--no-cache`, `--no-kicad-cli`, `--debug-layers`（層テクスチャを PNG で出力）, `--validate`, `--normal-priority`, `-v`。
 
@@ -101,11 +105,64 @@ release だけをビルドする独自トリプレット `triplets/x64-windows-r
 |---|---|
 | `<プロジェクト>/<プロジェクト名>.krbr/board.toml` | 表面処理、レジスト・シルク・基材の色、層テクスチャの解像度、代替の箱、モデルのパスの変数・追加検索フォルダ、kicad-cli |
 | `<プロジェクト>/<プロジェクト名>.krbr/environment.toml` | HDR、強度・回転、カメラ、解像度・spp・最大深さ・露出 |
-| `%APPDATA%\krbr\model_map.toml` | 部品モデルの面の色・ファイル名から材質（OpenPBR パラメータ）を決める規則 |
+| `<プロジェクト>/<プロジェクト名>.krbr/overrides.toml` | 材質の上書き（部品番号ごと・3D モデルごと） |
+| `%APPDATA%\krbr\materials\*.toml` | 名前付きの材質（OpenPBR）。組み込みの材質に、書いた項目だけ重ねる |
+| `%APPDATA%\krbr\model_map.toml` | 3D モデルごとの材質（他のプロジェクトと共有）と、色・名前の規則 |
 | `%LOCALAPPDATA%\krbr\cache\meshes\` | STEP の分割結果のキャッシュ（キーはファイル内容の XXH64 ＋分割パラメータ） |
 | `%LOCALAPPDATA%\krbr\cache\silk\` | kicad-cli によるシルク SVG のキャッシュ |
 
 ファイルが無ければ既定値を使います。優先順位は「コマンドライン ＞ 設定ファイル ＞ 既定値」です。
+全体設定とキャッシュの場所は、環境変数 `KRBR_CONFIG_DIR` / `KRBR_CACHE_DIR` で差し替えられます（テストで使用）。
+
+### 材質システム（フェーズ2）
+
+材質は OpenPBR Surface のパラメータで書きます（`scene/material.hpp`、色はリニア）。分散は `transmission_dispersion_abbe_number` と `transmission_dispersion_scale` で指定し、`specular_ior` を nd として扱います。アッベ数で表せない材質は、`[material.<名前>.krbr]` に Sellmeier の係数（`sellmeier_b`, `sellmeier_c`）を書けます。
+
+```toml
+# %APPDATA%\krbr\materials\my.toml
+[material.epoxy_matte]
+base_color = [0.02, 0.02, 0.02]
+specular_roughness = 0.6
+[material.epoxy_matte.krbr]
+bump_pattern = "noise"
+bump_strength = 0.015
+bump_scale = 0.1
+```
+
+3D モデルの部位（STEP の XDE の名前、または面の色）ごとに、次の順で材質を決めます。
+
+1. 部品番号ごとの上書き（プロジェクトの `overrides.toml` の `[ref.U3]`）
+2. 3D モデルごとの上書き（プロジェクトの `overrides.toml` の `[[model]]`）
+3. 3D モデルごとの設定（全体の `model_map.toml` の `[[model]]`。他のプロジェクトと共有）
+4. 色・名前の規則（全体の `model_map.toml` の `[[rule]]`、次に組み込みの規則）
+5. 既定値
+
+- 3D モデルは、展開前のパス（`path`）か、ファイル内容の XXH64（`hash`）のどちらかが一致すれば同じとみなします。ファイルを別の場所に移しても、中身が同じなら設定が効きます。
+- 部位のキーは、XDE の名前、`kicad:<色名>`（KiCad 標準モデルの色。例 `kicad:metal_grey_pins`、`kicad:black_body`）、`#rrggbb`（STEP に書かれた色）です。`"*"` は全部位に一致します。
+- 材質ライブラリで `base_color` を書かない材質は、3D モデルの面の色を使います。
+- transmission・subsurface・fuzz・thin_film・anisotropy・geometry_opacity は値を GPU まで渡していますが、描画にはまだ反映していません（使われるとログで知らせます。transmission と分散はフェーズ5）。発光（`emission_luminance`、cd/m²）は、放射輝度 1.0 = 1000 cd/m² として描きます。
+
+## テスト
+
+```
+buildelease\krbr_tests.exe
+```
+
+doctest で、次をウィンドウを開かずに確かめます。
+
+- 材質の TOML の往復、アッベ数からの屈折率、材質ライブラリの重ね方
+- 解決順序の5段階、パス・ハッシュでの照合、部位ごとの指定
+- フェーズ2の完了条件：一時フォルダに2つのプロジェクトを作り、全体設定で U2 の材質を変えると両方に反映されること、部品番号の上書きが優先されること（全体設定は `KRBR_CONFIG_DIR` で一時フォルダに向ける）
+- **白い炉テスト**：一様な白い環境光の中の球をオフスクリーンで描き、吸収のない材質で放射輝度が 1 になることを確かめます。エネルギーが増える（1 を超える）のは誤りとして扱います。粗さ 1 の金属は、単一散乱の GGX の理論値（数値積分で 0.409）と一致することを確かめます。
+
+| 材質 | 平均 | 備考 |
+|---|---|---|
+| Lambert（鏡面なし） | 0.9999 | 理想値 1 |
+| 完全な鏡 | 0.9998 | 理想値 1 |
+| 金属 粗さ 0.3 | 0.977 | 単一散乱による損失 |
+| 金属 粗さ 1.0 | 0.413 | 理論値 0.409（フェーズ8で多重散乱を補償する） |
+| 白い誘電体 粗さ 0.3 | 0.906 | 層の重ね方の近似による損失 |
+| コートつき Lambert | 0.905 | 同上 |
 
 ## 処理の流れとモジュール構成
 

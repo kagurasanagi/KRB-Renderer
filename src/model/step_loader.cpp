@@ -16,6 +16,8 @@
 #include <Poly_Triangle.hxx>
 #include <Quantity_ColorRGBA.hxx>
 #include <RWMesh_FaceIterator.hxx>
+#include <TCollection_AsciiString.hxx>
+#include <TDataStd_Name.hxx>
 #include <STEPCAFControl_Reader.hxx>
 #include <NCollection_Sequence.hxx>
 #include <TDF_Label.hxx>
@@ -38,11 +40,6 @@ std::string lowerExt(const std::filesystem::path& p) {
     return e;
 }
 
-[[maybe_unused]] float srgbToLinear(float c) {
-    c = std::clamp(c, 0.0f, 1.0f);
-    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
-}
-
 class StepLoader final : public IModelLoader {
 public:
     const char* name() const override { return "occt-step"; }
@@ -55,16 +52,25 @@ public:
 
 #ifdef KRBR_HAVE_OCCT
 
-// 色の値を探すためのキー（同じ色は1つの番号にまとめる）
-struct ColorTable {
-    std::vector<glm::vec4> colors;
-    uint32_t index(glm::vec4 c) {
-        for (size_t i = 0; i < colors.size(); ++i)
-            if (glm::all(glm::lessThan(glm::abs(colors[i] - c), glm::vec4(1e-4f)))) return static_cast<uint32_t>(i);
-        colors.push_back(c);
-        return static_cast<uint32_t>(colors.size() - 1);
+// 部位の表（同じ名前・同じ色は1つの番号にまとめる）
+struct PartTable {
+    std::vector<ModelPart> parts;
+    uint32_t index(const ModelPart& p) {
+        for (size_t i = 0; i < parts.size(); ++i) {
+            const ModelPart& q = parts[i];
+            if (q.name == p.name && q.hasColor == p.hasColor && glm::all(glm::lessThan(glm::abs(q.srgb - p.srgb), glm::vec3(1e-4f))))
+                return static_cast<uint32_t>(i);
+        }
+        parts.push_back(p);
+        return static_cast<uint32_t>(parts.size() - 1);
     }
 };
+
+std::string labelName(const TDF_Label& label) {
+    Handle(TDataStd_Name) n;
+    if (label.IsNull() || !label.FindAttribute(TDataStd_Name::GetID(), n)) return {};
+    return TCollection_AsciiString(n->Get()).ToCString();  // UTF-8
+}
 
 std::once_flag g_occtInit;
 
@@ -83,7 +89,7 @@ LoadResult StepLoader::load(const std::filesystem::path& p, const MeshParams& pa
 
         STEPCAFControl_Reader reader;
         reader.SetColorMode(true);
-        reader.SetNameMode(false);
+        reader.SetNameMode(true);  // 部位の名前（XDE）を材質の割り当てに使う
         reader.SetLayerMode(false);
         reader.SetPropsMode(false);
         const std::string u8 = platform::pathToUtf8(p);
@@ -107,22 +113,29 @@ LoadResult StepLoader::load(const std::filesystem::path& p, const MeshParams& pa
         }
 
         auto out = std::make_shared<ModelMesh>();
-        ColorTable table;
-        const glm::vec4 defaultColor{0.5f, 0.5f, 0.5f, 1.0f};
+        PartTable table;
+        // ルート（製品全体）の名前は部位の区別にならないので、部位名からは除く
+        std::string rootName;
+        if (roots.Length() == 1) rootName = labelName(roots.Value(1));
         for (XCAFPrs_DocumentExplorer ex(doc, XCAFPrs_DocumentExplorerFlags_OnlyLeafNodes); ex.More(); ex.Next()) {
             const XCAFPrs_DocumentNode& node = ex.Current();
+            std::string nodeName = labelName(node.RefLabel);
+            if (nodeName.empty()) nodeName = labelName(node.Label);
+            if (nodeName == rootName) nodeName.clear();
             for (RWMesh_FaceIterator fit(node.RefLabel, node.Location, true, node.Style); fit.More(); fit.Next()) {
                 if (fit.IsEmptyMesh()) continue;
-                glm::vec4 col = defaultColor;
+                ModelPart part;
+                part.name = nodeName;
                 if (fit.HasFaceColor()) {
                     const Quantity_ColorRGBA& c = fit.FaceColor();
                     double r, g, b;
-                    // STEP の色値は表示用（sRGB）として作られているのでリニアに直す
-                    c.GetRGB().Values(r, g, b, Quantity_TOC_RGB);
-                    col = {srgbToLinear(static_cast<float>(r)), srgbToLinear(static_cast<float>(g)),
-                           srgbToLinear(static_cast<float>(b)), c.Alpha()};
+                    // STEP の色値は表示用（sRGB）。OCCT はリニアに変換して持っているので、sRGB の値で受け取る
+                    c.GetRGB().Values(r, g, b, Quantity_TOC_sRGB);  // OCCT 内部はリニア。STEP に書かれた値に戻す
+                    part.srgb = {static_cast<float>(r), static_cast<float>(g), static_cast<float>(b)};
+                    part.alpha = c.Alpha();
+                    part.hasColor = true;
                 }
-                const uint32_t ci = table.index(col);
+                const uint32_t ci = table.index(part);
                 const uint32_t base = static_cast<uint32_t>(out->mesh.positions.size());
                 const int lo = fit.NodeLower(), hi = fit.NodeUpper();
                 for (int n = lo; n <= hi; ++n) {
@@ -139,7 +152,7 @@ LoadResult StepLoader::load(const std::filesystem::path& p, const MeshParams& pa
                 }
             }
         }
-        out->colors = std::move(table.colors);
+        out->parts = std::move(table.parts);
         app->Close(doc);
         if (out->mesh.triangleCount() == 0) {
             res.error = "tessellation produced no triangles";

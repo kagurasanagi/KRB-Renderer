@@ -24,6 +24,15 @@ struct PreparedScene {
     render::EnvDistribution dist;
 };
 
+// 材質ライブラリ（組み込み＋全体設定 materials/*.toml）、全体の対応表、プロジェクトの上書き
+struct MaterialSetup {
+    scene::MaterialLibrary library;
+    scene::GlobalModelMap global;
+    scene::ProjectOverrides project;
+    std::filesystem::path globalFile, projectFile;
+};
+MaterialSetup loadMaterialSetup(const std::filesystem::path& pcbFile);
+
 // 失敗したらエラーをログに出して nullptr。debugLayersDir が空でなければ層テクスチャの PNG も書く
 std::unique_ptr<PreparedScene> prepareScene(const RenderOptions& o, const std::filesystem::path& debugLayersDir = {},
                                             const std::string& debugStem = {});

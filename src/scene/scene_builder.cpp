@@ -337,6 +337,7 @@ Scene buildScene(const SceneContext& ctx) {
 
     const glm::dmat4 toWorld = kicadToWorld(s.board.center);
     std::map<const model::ModelMesh*, uint32_t> meshOf;
+    std::map<std::string, uint32_t> materialSetOf;  // 部位ごとの材質の組み合わせ -> 材質表の先頭
 
     for (size_t fi = 0; fi < board.footprints.size(); ++fi) {
         const Footprint& fp = board.footprints[fi];
@@ -365,20 +366,52 @@ Scene buildScene(const SceneContext& ctx) {
             } else {
                 SceneMesh sm;
                 sm.name = platform::pathToUtf8(res.path.filename());
-                sm.mesh = lr.mesh->mesh;
-                std::vector<uint32_t> colorMat(lr.mesh->colors.size());
-                for (size_t c = 0; c < colorMat.size(); ++c) {
-                    Material mm = ctx.modelMap.resolve(sm.name, lr.mesh->colors[c]);
-                    mm.name = sm.name + ":" + mm.name;
-                    colorMat[c] = addMaterial(s, mm);
-                }
-                for (auto& t : sm.mesh.triMaterial) t = t < colorMat.size() ? colorMat[t] : phMat;
+                sm.mesh = lr.mesh->mesh;  // triMaterial は部位の番号（インスタンスごとの材質表で引く）
+                const uint32_t nparts = static_cast<uint32_t>(std::max<size_t>(1, lr.mesh->parts.size()));
+                for (auto& t : sm.mesh.triMaterial) t = std::min(t, nparts - 1);
                 meshId = static_cast<uint32_t>(s.meshes.size());
                 s.meshes.push_back(std::move(sm));
                 meshOf[lr.mesh.get()] = meshId;
             }
+            // 部位ごとに材質を決める（部品番号・モデル・規則の順）
+            const std::string modelFile = platform::pathToUtf8(res.path.filename());
+            std::vector<ResolvedMaterial> resolved;
+            std::string setKey;
+            const auto& parts = lr.mesh->parts;
+            const size_t nparts = std::max<size_t>(1, parts.size());
+            for (size_t pi = 0; pi < nparts; ++pi) {
+                const model::ModelPart* part = pi < parts.size() ? &parts[pi] : nullptr;
+                const MaterialQuery q{fp.reference, m.path, lr.fileHash, modelFile, part};
+                ResolvedMaterial r = ctx.materials.resolve(q);
+                MaterialAssignment a;
+                a.reference = fp.reference;
+                a.footprint = fp.libId;
+                a.modelSpec = m.path;
+                a.modelFile = modelFile;
+                a.modelHash = lr.fileHash;
+                if (part) {
+                    for (const auto& k : part->keys()) a.partKeys += (a.partKeys.empty() ? "" : " ") + k;
+                }
+                a.material = r.name;
+                a.source = r.source;
+                s.assignments.push_back(std::move(a));
+                const glm::vec3 c = r.material.base_color;
+                setKey += std::format("{}|{:.4f},{:.4f},{:.4f};", r.name, c.r, c.g, c.b);
+                resolved.push_back(std::move(r));
+            }
+            uint32_t materialBase;
+            if (auto it = materialSetOf.find(setKey); it != materialSetOf.end()) {
+                materialBase = it->second;
+            } else {
+                materialBase = static_cast<uint32_t>(s.materials.size());
+                for (auto& r : resolved) {
+                    r.material.name = modelFile + ":" + r.name;
+                    s.materials.push_back(r.material);
+                }
+                materialSetOf[setKey] = materialBase;
+            }
             const glm::mat4 xf = glm::mat4(toWorld * kicadModelMatrix(fp, m, s.board.thickness));
-            s.instances.push_back({meshId, xf});
+            s.instances.push_back({meshId, xf, materialBase});
             addInstanceBounds(s, meshId, xf);
             ++placed;
             ++s.modelInstances;
@@ -399,6 +432,21 @@ Scene buildScene(const SceneContext& ctx) {
             addInstanceBounds(s, cubeMesh, xf);
             ++s.placeholders;
         }
+    }
+    // まだ描画に反映していない OpenPBR の要素を知らせる（値は GPU まで渡している）
+    {
+        std::map<std::string, std::vector<std::string>> unsupported;
+        for (const auto& m : s.materials) {
+            if (m.transmission_weight > 0) unsupported["transmission (phase 5)"].push_back(m.name);
+            if (m.subsurface_weight > 0) unsupported["subsurface"].push_back(m.name);
+            if (m.fuzz_weight > 0) unsupported["fuzz"].push_back(m.name);
+            if (m.thin_film_weight > 0) unsupported["thin_film"].push_back(m.name);
+            if (m.geometry_opacity < 1) unsupported["geometry_opacity"].push_back(m.name);
+            if (m.specular_roughness_anisotropy > 0 || m.coat_roughness_anisotropy > 0)
+                unsupported["anisotropy"].push_back(m.name);
+        }
+        for (const auto& [what, names] : unsupported)
+            log::warn("not rendered yet: {} used by {} material(s), e.g. {}", what, names.size(), names.front());
     }
     log::info("scene: {} meshes, {} instances ({} models, {} placeholders), {} materials", s.meshes.size(),
               s.instances.size(), s.modelInstances, s.placeholders, s.materials.size());

@@ -36,6 +36,15 @@ struct Material {
     vec4 coatColor;   // rgb: coat_color, a: coat_roughness
     vec4 params1;     // x: coat_ior, y: kind, z: side（基板面: 0=表, 1=裏）/ 下の材質, w: レジストの材質
     vec4 params2;     // x: 凹凸の模様, y: 強さ（傾き）, z: 大きさ（mm）, w: 粗さのむら
+    vec4 emission;    // rgb: 放射輝度, a: geometry_opacity
+    vec4 transmission;  // x: transmission_weight, y: アッベ数, z: 分散の倍率, w: thin_walled（フェーズ5で使う）
+};
+
+struct InstanceInfo {
+    uint mesh;
+    uint materialBase;
+    uint pad0;
+    uint pad1;
 };
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
@@ -65,6 +74,8 @@ layout(set = 0, binding = 14, std140) uniform Frame {
     uvec4 boardMats;  // x: レジスト, y: 銅（レジスト下）, z: 表面処理, w: 基材
     uvec4 boardMats2; // x: シルク
 } F;
+
+layout(set = 0, binding = 15, std430) readonly buffer Instances { InstanceInfo instanceInfos[]; };
 
 layout(push_constant) uniform Push {
     uint sampleIndex;

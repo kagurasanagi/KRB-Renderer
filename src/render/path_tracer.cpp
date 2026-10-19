@@ -38,7 +38,7 @@ public:
         updateFrame(fp);
 
         // ---- 記述子
-        const std::array<std::pair<uint32_t, VkDescriptorType>, 15> bindings = {{
+        const std::array<std::pair<uint32_t, VkDescriptorType>, 16> bindings = {{
             {0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR},
             {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
             {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
@@ -54,6 +54,7 @@ public:
             {12, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},
             {13, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},
             {14, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},
+            {15, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
         }};
         std::vector<VkDescriptorSetLayoutBinding> lb;
         for (auto [b, t] : bindings) lb.push_back({b, t, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
@@ -63,7 +64,7 @@ public:
         vk::check(vkCreateDescriptorSetLayout(dev, &lci, nullptr, &setLayout_), "vkCreateDescriptorSetLayout");
 
         const VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
-                                              {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8},
+                                              {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 9},
                                               {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2},
                                               {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3},
                                               {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}};
@@ -87,7 +88,7 @@ public:
             {sc.triMats.buffer, 0, VK_WHOLE_SIZE},        {sc.meshInfos.buffer, 0, VK_WHOLE_SIZE},
             {sc.materials.buffer, 0, VK_WHOLE_SIZE},      {sc.envMarginal.buffer, 0, VK_WHOLE_SIZE},
             {sc.envConditional.buffer, 0, VK_WHOLE_SIZE}, {sc.envPdf.buffer, 0, VK_WHOLE_SIZE},
-            {ubo_.buffer, 0, VK_WHOLE_SIZE}};
+            {ubo_.buffer, 0, VK_WHOLE_SIZE},              {sc.instanceInfos.buffer, 0, VK_WHOLE_SIZE}};
         VkDescriptorImageInfo envInfo{sc.envSampler, sc.envImage.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkDescriptorImageInfo boardInfo{sc.boardSampler, sc.boardImage.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkDescriptorImageInfo targetInfo[3] = {{VK_NULL_HANDLE, targets.color.view, VK_IMAGE_LAYOUT_GENERAL},
@@ -107,6 +108,7 @@ public:
         const uint32_t bufBindings[] = {1, 2, 3, 4, 5, 7, 8, 9};
         for (int i = 0; i < 8; ++i) write(bufBindings[i], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &bufInfos[i];
         write(14, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).pBufferInfo = &bufInfos[8];
+        write(15, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &bufInfos[9];
         write(6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo = &envInfo;
         write(10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo = &boardInfo;
         for (int i = 0; i < 3; ++i) write(11 + i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo = &targetInfo[i];

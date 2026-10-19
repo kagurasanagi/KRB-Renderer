@@ -201,7 +201,6 @@ void writeDefaultConfigs(const fs::path& pcbFile) {
     };
     writeIfMissing(dir / "board.toml", kBoardToml);
     writeIfMissing(dir / "environment.toml", kEnvironmentToml);
-    writeIfMissing(platform::configDir() / "model_map.toml", scene::ModelMap::defaultToml());
 }
 
 }  // namespace krbr::app

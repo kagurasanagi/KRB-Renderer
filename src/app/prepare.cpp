@@ -40,6 +40,30 @@ std::optional<kicad::Board> loadBoardOrReport(const std::string& pcb) {
     return r.board;
 }
 
+MaterialSetup loadMaterialSetup(const fs::path& pcbFile) {
+    MaterialSetup m;
+    const fs::path configDir = platform::configDir();
+    m.library = scene::MaterialLibrary::load(configDir);
+    std::error_code ec;
+    m.globalFile = configDir / "model_map.toml";
+    if (fs::exists(m.globalFile, ec)) {
+        std::string err;
+        if (m.global.load(m.globalFile, err))
+            log::info("model map: {}", platform::pathToUtf8(m.globalFile));
+        else
+            log::warn("model map {}: {} - ignored", platform::pathToUtf8(m.globalFile), err);
+    }
+    m.projectFile = projectConfigDir(pcbFile) / "overrides.toml";
+    if (fs::exists(m.projectFile, ec)) {
+        std::string err;
+        if (m.project.load(m.projectFile, err))
+            log::info("overrides: {}", platform::pathToUtf8(m.projectFile));
+        else
+            log::warn("overrides {}: {} - ignored", platform::pathToUtf8(m.projectFile), err);
+    }
+    return m;
+}
+
 std::unique_ptr<PreparedScene> prepareScene(const RenderOptions& o, const fs::path& debugLayersDir,
                                             const std::string& debugStem) {
     auto boardOpt = loadBoardOrReport(o.pcb);
@@ -75,16 +99,9 @@ std::unique_ptr<PreparedScene> prepareScene(const RenderOptions& o, const fs::pa
     std::error_code ec;
     const fs::path cacheDir = platform::cacheDir();
 
-    // 部品の材質の対応表（全体設定）
-    scene::ModelMap modelMap = scene::ModelMap::defaults();
-    const fs::path mapFile = platform::configDir() / "model_map.toml";
-    if (fs::exists(mapFile, ec)) {
-        std::string err;
-        if (modelMap.load(mapFile, err))
-            log::info("model map: {}", platform::pathToUtf8(mapFile));
-        else
-            log::warn("model map {}: {} - using defaults", platform::pathToUtf8(mapFile), err);
-    }
+    // 部品の材質：材質ライブラリ、全体の対応表、プロジェクトの上書き
+    const MaterialSetup materials = loadMaterialSetup(board.file);
+    const scene::MaterialResolver materialResolver(materials.library, materials.project, materials.global);
 
     // 線フォントの文字は kicad-cli の SVG 出力から取り込む
     const int strokeTexts = countSilkStrokeTexts(board);
@@ -106,7 +123,7 @@ std::unique_ptr<PreparedScene> prepareScene(const RenderOptions& o, const fs::pa
     kicad::ModelResolver resolver(board.projectDir, cfg.pathVars, cfg.modelSearchDirs);
     model::ModelLibrary library(cacheDir, model::MeshParams{}, !o.noCache);
     log::info("mesh cache: {}{}", platform::pathToUtf8(cacheDir / "meshes"), o.noCache ? " (disabled)" : "");
-    prep->scene = scene::buildScene({board, resolver, library, modelMap, cfg.scene});
+    prep->scene = scene::buildScene({board, resolver, library, materialResolver, cfg.scene});
     const auto& st = library.stats();
     log::info("models: {} loaded+meshed, {} from cache, {} failed", st.loaded, st.cacheHits, st.failed);
 

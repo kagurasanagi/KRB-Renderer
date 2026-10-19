@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "app/commands.hpp"
+#include "app/material_cmd.hpp"
 #include "core/log.hpp"
 
 namespace {
@@ -43,7 +44,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> args(argv, argv + argc);
     for (size_t i = 1; i < args.size(); ++i) {
         if (!args[i].empty() && args[i][0] == '-') continue;
-        if (args[i] != "probe" && args[i] != "info" && args[i] != "render" && args[i] != "view")
+        if (args[i] != "probe" && args[i] != "info" && args[i] != "render" && args[i] != "view" && args[i] != "material")
             args.insert(args.begin() + static_cast<std::ptrdiff_t>(i), "view");
         break;
     }
@@ -85,6 +86,23 @@ int main(int argc, char** argv) {
     view->add_option("--test-orbit", vo.testOrbitDeg, "development: rotate the camera by this many degrees per frame");
     view->add_option("--test-env", vo.testEnv, "development: switch to this environment map during the test");
 
+    // 材質の対応表
+    auto* material = app.add_subcommand("material", "material assignment (OpenPBR materials, per model / per reference)");
+    material->require_subcommand(1);
+    app::MaterialSetOptions mso;
+    auto* mset = material->add_subcommand("set", "assign a material to a reference (project) or a 3D model (project / --global)");
+    mset->add_option("pcb", mso.pcb, ".kicad_pcb file")->required()->check(CLI::ExistingFile);
+    mset->add_option("--ref", mso.ref, "reference designator, e.g. U3 (written to <project>.krbr/overrides.toml)");
+    mset->add_option("--model", mso.model, "3D model: path as written in the board, file name, or file path");
+    mset->add_option("--part", mso.part, "part key (XDE name, kicad:<color>, #rrggbb); default: all parts");
+    mset->add_option("--material", mso.material, "material name (see: krbr material list)")->required();
+    mset->add_flag("--global", mso.global, "with --model: write to the global model_map.toml (shared by all projects)");
+    std::string showPcb, showRef;
+    auto* mshow = material->add_subcommand("show", "show the resolved material of each part and where it came from");
+    mshow->add_option("pcb", showPcb, ".kicad_pcb file")->required()->check(CLI::ExistingFile);
+    mshow->add_option("--ref", showRef, "only this reference");
+    auto* mlist = material->add_subcommand("list", "list materials in the material library");
+
     try {
         app.parse(static_cast<int>(cargs.size()), cargs.data());
     } catch (const CLI::ParseError& e) {
@@ -96,5 +114,8 @@ int main(int argc, char** argv) {
     if (*info) return app::cmdInfo(infoPcb, infoModels);
     if (*render) return app::cmdRender(ro);
     if (*view) return app::cmdView(vo);
+    if (*mset) return app::cmdMaterialSet(mso);
+    if (*mshow) return app::cmdMaterialShow(showPcb, showRef);
+    if (*mlist) return app::cmdMaterialList();
     return 1;
 }

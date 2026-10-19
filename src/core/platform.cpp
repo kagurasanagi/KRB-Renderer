@@ -65,6 +65,7 @@ static fs::path homeBased(const char* xdgVar, const char* fallback) {
 }
 
 fs::path cacheDir() {
+    if (auto v = getEnv("KRBR_CACHE_DIR")) return u8path(*v);  // テストなどで差し替える
 #ifdef _WIN32
     if (auto v = getEnv("LOCALAPPDATA")) return u8path(*v) / "krbr" / "cache";
     return fs::temp_directory_path() / "krbr" / "cache";
@@ -74,6 +75,7 @@ fs::path cacheDir() {
 }
 
 fs::path configDir() {
+    if (auto v = getEnv("KRBR_CONFIG_DIR")) return u8path(*v);  // テストなどで差し替える
 #ifdef _WIN32
     if (auto v = getEnv("APPDATA")) return u8path(*v) / "krbr";
     return fs::temp_directory_path() / "krbr" / "config";

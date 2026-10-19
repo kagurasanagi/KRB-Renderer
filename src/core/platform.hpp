@@ -9,9 +9,9 @@ namespace krbr::platform {
 namespace fs = std::filesystem;
 
 fs::path exeDir();
-// 全体用キャッシュ（Windows: %LOCALAPPDATA%\krbr\cache、他: $XDG_CACHE_HOME/krbr）
+// 全体用キャッシュ（Windows: %LOCALAPPDATA%\krbr\cache、他: $XDG_CACHE_HOME/krbr。KRBR_CACHE_DIR で差し替え可）
 fs::path cacheDir();
-// 全体設定（Windows: %APPDATA%\krbr、他: $XDG_CONFIG_HOME/krbr）
+// 全体設定（Windows: %APPDATA%\krbr、他: $XDG_CONFIG_HOME/krbr。KRBR_CONFIG_DIR で差し替え可）
 fs::path configDir();
 // 一時作業用（プロセスごとに分ける）
 fs::path tempDir();

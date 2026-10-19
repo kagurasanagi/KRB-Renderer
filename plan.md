@@ -124,6 +124,8 @@ C++20 + Vulkan + CMake を想定。STEP の読み込みには OpenCASCADE を使
   - 全体設定側：materials/*.toml、model_map.toml
 - 対応表の編集用 CLI：krbr material set --ref U3 ... / --model ... --global
 - 完了条件：同じICの材質を全体設定で変えると、別のプロジェクトでも反映される。部品番号ごとの上書きが、それより優先される
+- 状況：完了（自動テスト `krbr_tests` の "global model material is shared across projects; reference override wins" で確認）。
+  transmission・subsurface などは値を GPU まで渡し、描画は各フェーズで行う。白い炉テストの仕組みもこのフェーズで用意した
 
 ## フェーズ3：保存の監視とリアルタイム表示
 - .kicad_pcb の保存を監視する。一時ファイルへの書き込みや置き換えに備え、検知してから数百ミリ秒待ってから読み込む

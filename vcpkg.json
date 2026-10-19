@@ -16,6 +16,7 @@
     "glm",
     "glfw3",
     "imgui",
+    "doctest",
     { "name": "opencascade", "default-features": false }
   ]
 }

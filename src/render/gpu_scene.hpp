@@ -21,7 +21,7 @@ public:
     void updateMaterials(const std::vector<scene::Material>& materials, float bumpIntensity);
     void destroy();
 
-    vk::Buffer vertices, indices, triMats, meshInfos, materials;
+    vk::Buffer vertices, indices, triMats, meshInfos, materials, instanceInfos;
     vk::Buffer envMarginal, envConditional, envPdf;
     vk::Image envImage, boardImage;
     VkSampler envSampler = VK_NULL_HANDLE, boardSampler = VK_NULL_HANDLE;

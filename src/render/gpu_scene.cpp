@@ -121,11 +121,13 @@ void GpuScene::build(vk::Context& ctx, const scene::Scene& sc, const io::ImageF&
 
     // ---- TLAS（配置ごと）
     std::vector<VkAccelerationStructureInstanceKHR> inst;
+    std::vector<GpuInstanceInfo> instInfo;
     for (const auto& in : sc.instances) {
+        instInfo.push_back({in.mesh, in.materialBase, 0, 0});
         VkAccelerationStructureInstanceKHR v{};
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 4; ++c) v.transform.matrix[r][c] = in.xform[c][r];
-        v.instanceCustomIndex = in.mesh;
+        v.instanceCustomIndex = static_cast<uint32_t>(instInfo.size() - 1);  // GpuInstanceInfo の番号
         v.mask = 0xFF;
         v.instanceShaderBindingTableRecordOffset = 0;
         v.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
@@ -134,6 +136,8 @@ void GpuScene::build(vk::Context& ctx, const scene::Scene& sc, const io::ImageF&
         v.accelerationStructureReference = vkGetAccelerationStructureDeviceAddressKHR(dev, &ai);
         inst.push_back(v);
     }
+    instanceInfos = ctx.createDeviceBuffer(instInfo.data(), instInfo.size() * sizeof(GpuInstanceInfo),
+                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     instanceBuffer_ = ctx.createDeviceBuffer(inst.data(), inst.size() * sizeof(VkAccelerationStructureInstanceKHR),
                                              VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
     VkAccelerationStructureGeometryKHR tgeom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
@@ -249,7 +253,8 @@ void GpuScene::destroy() {
     blas_.clear();
     for (auto& b : blasBuffers_) ctx_->destroyBuffer(b);
     blasBuffers_.clear();
-    for (vk::Buffer* b : {&vertices, &indices, &triMats, &meshInfos, &materials, &envMarginal, &envConditional, &envPdf,
+    for (vk::Buffer* b : {&vertices, &indices, &triMats, &meshInfos, &materials, &instanceInfos, &envMarginal,
+                          &envConditional, &envPdf,
                           &tlasBuffer_, &instanceBuffer_})
         ctx_->destroyBuffer(*b);
     ctx_->destroyImage(envImage);
