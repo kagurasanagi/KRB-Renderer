@@ -45,6 +45,8 @@ struct DeviceInfo {
     bool rayTracingPipeline = false;
     bool globalPriority = false;
     uint64_t deviceLocalBytes = 0;
+    bool externalMemoryWin32 = false;  // VK_KHR_external_memory_win32（OIDN との共有）
+    uint8_t deviceUUID[16] = {};
 };
 
 struct ContextOptions {
@@ -93,10 +95,12 @@ public:
 
     VkCommandPool commandPool() const { return pool_; }
     VkSurfaceKHR surface() const { return surface_; }
+    bool externalMemoryEnabled() const { return externalMemory_; }
 
 private:
     VkInstance instance_ = VK_NULL_HANDLE;
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;
+    bool externalMemory_ = false;
     VkDebugUtilsMessengerEXT messenger_ = VK_NULL_HANDLE;
     VkPhysicalDevice physical_ = VK_NULL_HANDLE;
     VkDevice device_ = VK_NULL_HANDLE;

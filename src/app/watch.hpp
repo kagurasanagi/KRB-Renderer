@@ -19,6 +19,7 @@ struct WatchUpdate {
     double reloadMs = 0, gpuMs = 0, renderMs = 0, writeMs = 0;
     ReloadStats stats;
     int pendingModels = 0;
+    double denoiseMs = 0;
 };
 
 class WatchRunner {

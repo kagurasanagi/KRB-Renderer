@@ -52,7 +52,16 @@ krbr render kicad/mini_dsp_radio.kicad_pcb --hdr hdr/historic_cloister_passage_4
 - 線フォントのシルクの文字が変わったときは、kicad-cli による描き直しを裏で行い、それまでは前の文字のままです。
 - `krbr watch` は、トーンマッピングを GPU で行い、圧縮しない PNG（書き出しが速い。1080p で約 8 MB）を一時ファイル経由で置き換えます。
 
-計測（1920x1080、32 spp、部品を 1 つ動かして保存）：保存から画像の書き出しまで **約 0.53 秒**（検出と待ち合わせ約 0.21、読み直しと作り直し 0.12（タイル 4 枚）、GPU 0.06、描画 0.06、書き出し 0.08）。
+計測（1920x1080、32 spp、部品を 1 つ動かして保存）：保存から**ノイズ除去済みの**画像の書き出しまで **約 0.63 秒**（検出と待ち合わせ約 0.21、読み直しと作り直し 0.17（タイル 4 枚）、GPU 0.08、描画とノイズ除去 0.08（うちノイズ除去 0.02）、書き出し 0.09）。
+
+### ノイズ除去（OIDN）
+
+`render/denoiser` が Intel Open Image Denoise（RT フィルタ、HDR、補助情報としてアルベドと法線）を使います。
+
+- Vulkan のデバイスと同じ GPU（UUID で選ぶ）の CUDA デバイスで動かし、Vulkan のバッファを外部メモリ（Win32 ハンドル）として OIDN と共有します。CPU を経由する転送はありません。共有できない環境では CPU デバイスに切り替えます。
+- 累積画像をサンプル数で割って入力を作るシェーダ（`denoise_prep.comp`）→ OIDN → 結果を画像へ写し、表示用のトーンマッピングにつなぎます。
+- ビューア：既定で有効（パネルで切り替え）。カメラを動かしている間は品質 fast で毎フレーム、止まったら high で 150 ms ごと、収束時にもう一度。1080p の high で約 20 ms、720p の fast で約 4 ms（RTX 3080 Ti）。
+- `krbr watch`：既定で有効（high）。`krbr render --denoise` で `<名前>_denoised.png / .exr` も書き出します。`--no-denoise` で無効にできます。
 
 ### ファイル出力（`krbr render`）
 
@@ -70,6 +79,7 @@ krbr render kicad/mini_dsp_radio.kicad_pcb --hdr hdr/historic_cloister_passage_4
 前提: Visual Studio 2026（MSVC）、Vulkan SDK（`glslc`）、vcpkg（`VCPKG_ROOT`）。
 
 ```
+powershell -File scripts\get_oidn.ps1   # ノイズ除去（OIDN 2.5.1 の公式バイナリ）を third_party/oidn へ。無くてもビルドできる
 scripts\build.cmd          # MSVC 環境を読み込み、低優先度で configure + build
 build\release\krbr.exe probe
 ```
@@ -81,6 +91,7 @@ release だけをビルドする独自トリプレット `triplets/x64-windows-r
 |---|---|
 | volk, Vulkan-Headers, VulkanMemoryAllocator | Vulkan（ローダーは動的読み込み） |
 | GLFW 3.4 | リアルタイム表示のウィンドウと入力 |
+| Intel Open Image Denoise 2.5.1 | ノイズ除去。公式のビルド済みバイナリ（Apache-2.0）を `third_party/oidn` に置く（`scripts/get_oidn.ps1`、git には含めない） |
 | Dear ImGui 1.92 | ビューアの操作パネル。バックエンド（GLFW / Vulkan）は volk を使うよう `third_party/imgui_backends` を自前でビルド（MIT） |
 | OpenCASCADE 8.0（TKDESTEP / TKXCAF / TKMesh / TKRWMesh） | STEP の読み込みと三角形分割（面の色つき） |
 | Clipper2, earcut.hpp | 多角形の和・差・オフセット、三角形分割 |

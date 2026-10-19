@@ -37,7 +37,8 @@ find_program(GLSLC glslc HINTS "$ENV{VULKAN_SDK}/Bin" REQUIRED)
 set(SHADER_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
 set(SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/shaders")
 file(GLOB SHADER_INCLUDES CONFIGURE_DEPENDS "${SHADER_SRC_DIR}/*.glsl")
-set(SHADER_SOURCES "${SHADER_SRC_DIR}/pathtrace.comp" "${SHADER_SRC_DIR}/tonemap.comp")
+set(SHADER_SOURCES "${SHADER_SRC_DIR}/pathtrace.comp" "${SHADER_SRC_DIR}/tonemap.comp"
+                   "${SHADER_SRC_DIR}/denoise_prep.comp")
 set(SHADER_OUTPUTS)
 foreach(src ${SHADER_SOURCES})
   get_filename_component(name ${src} NAME)
@@ -85,9 +86,27 @@ else()
   message(WARNING "OpenCASCADE not found: STEP models will fall back to placeholder boxes")
 endif()
 
+# ノイズ除去（OIDN の公式ビルド済みバイナリを third_party/oidn に置く。無ければノイズ除去なしで動く）
+set(OIDN_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/oidn")
+find_package(OpenImageDenoise CONFIG QUIET PATHS "${OIDN_ROOT}" NO_DEFAULT_PATH)
+if(OpenImageDenoise_FOUND)
+  message(STATUS "OpenImageDenoise ${OpenImageDenoise_VERSION}: denoising enabled")
+  target_compile_definitions(krbr_core PUBLIC KRBR_HAVE_OIDN=1)
+  target_link_libraries(krbr_core PUBLIC OpenImageDenoise)
+  set(OIDN_RUNTIME_DLLS
+    "${OIDN_ROOT}/bin/OpenImageDenoise.dll" "${OIDN_ROOT}/bin/OpenImageDenoise_core.dll"
+    "${OIDN_ROOT}/bin/OpenImageDenoise_device_cuda.dll" "${OIDN_ROOT}/bin/OpenImageDenoise_device_cpu.dll"
+    "${OIDN_ROOT}/bin/tbb12.dll")
+else()
+  message(WARNING "OpenImageDenoise not found in ${OIDN_ROOT}: denoising disabled")
+endif()
+
 # ---------------------------------------------------------------- krbr（コマンド）
 add_executable(krbr src/main.cpp)
 target_link_libraries(krbr PRIVATE krbr_core)
+if(OIDN_RUNTIME_DLLS)
+  add_custom_command(TARGET krbr POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OIDN_RUNTIME_DLLS} $<TARGET_FILE_DIR:krbr>)
+endif()
 
 # ---------------------------------------------------------------- テスト
 # 単体テストと、オフスクリーン描画を使う検証（白い炉テストなど）。ウィンドウは開かない
@@ -98,3 +117,6 @@ add_executable(krbr_tests ${KRBR_TEST_SOURCES})
 target_link_libraries(krbr_tests PRIVATE krbr_core doctest::doctest)
 target_compile_definitions(krbr_tests PRIVATE KRBR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 add_test(NAME krbr_tests COMMAND krbr_tests)
+if(OIDN_RUNTIME_DLLS)
+  add_custom_command(TARGET krbr_tests POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OIDN_RUNTIME_DLLS} $<TARGET_FILE_DIR:krbr_tests>)
+endif()

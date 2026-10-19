@@ -5,6 +5,7 @@
 
 #include "app/watch.hpp"
 #include "io/image_io.hpp"
+#include "render/denoiser.hpp"
 #include "core/platform.hpp"
 #include "test_util.hpp"
 
@@ -54,7 +55,7 @@ TEST_CASE("watch: save -> updated image within 1 s, only nearby relief tiles reb
         REQUIRE(u.has_value());
         MESSAGE("move C11: " << u->sinceSaveMs << " ms after save; reload " << u->reloadMs << " ms ("
                              << u->stats.tilesRebuilt << " tiles), gpu " << u->gpuMs << " ms, render " << u->renderMs
-                             << " ms, write " << u->writeMs << " ms");
+                             << " ms (denoise " << u->denoiseMs << " ms), write " << u->writeMs << " ms");
         for (const auto& b : u->stats.diff.dirty)
             MESSAGE("dirty: (" << b.lo.x << ", " << b.lo.y << ") - (" << b.hi.x << ", " << b.hi.y << ")");
         CHECK(u->stats.diff.changed == 1);
@@ -63,6 +64,7 @@ TEST_CASE("watch: save -> updated image within 1 s, only nearby relief tiles reb
         CHECK(u->stats.tilesRebuilt > 0);
         CHECK(u->stats.tilesRebuilt <= 16);  // 全体（200 枚）ではなく周辺だけ
         CHECK(u->sinceSaveMs < 1000.0);
+        if (render::Denoiser::compiledIn()) CHECK(u->denoiseMs > 0.0);  // ノイズ除去込みで 1 秒以内
         // 速さ優先で書いた（圧縮しない）PNG が読めること
         io::ImageF img;
         std::string err;

@@ -104,6 +104,7 @@ int cmdRender(const RenderOptions& o) {
         rs.spp = static_cast<uint32_t>(cfg.spp);
         rs.integrator = cfg.integrator;
         rs.frame = frameParams(cfg, cam, o.seed);
+        rs.denoise = o.denoise.value_or(false);
         result = render::renderOffscreen(ctx, gpu, rs);
         gpu.destroy();
     } catch (const std::exception& e) {
@@ -129,6 +130,12 @@ int cmdRender(const RenderOptions& o) {
     report(io::saveExr(alb, result.albedo, err), alb, err);
     const fs::path nrm = outDir / (stem + "_normal.exr");
     report(io::saveExr(nrm, result.normal, err), nrm, err);
+    if (!result.denoised.rgba.empty()) {
+        const fs::path dpng = outDir / (stem + "_denoised.png");
+        report(io::savePngTonemapped(dpng, result.denoised, {cfg.exposureEv}, err), dpng, err);
+        const fs::path dexr = outDir / (stem + "_denoised.exr");
+        report(io::saveExr(dexr, result.denoised, err), dexr, err);
+    }
     writeMissingReport(prep->scene.missing, prep->board.file, outDir);
     return failures ? 1 : 0;
 }

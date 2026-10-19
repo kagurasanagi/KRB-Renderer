@@ -22,6 +22,7 @@ struct RenderOptions {
     bool validate = false;
     bool normalPriority = false;
     bool debugLayers = false;
+    std::optional<bool> denoise;  // ノイズ除去（render は既定で無効、view / watch は既定で有効）
 };
 
 struct ViewOptions {

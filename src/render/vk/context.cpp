@@ -58,6 +58,14 @@ DeviceInfo queryInfo(VkPhysicalDevice pd) {
     info.accelerationStructure =
         hasExt(exts, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) && as.accelerationStructure;
     info.rayTracingPipeline = hasExt(exts, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+    info.externalMemoryWin32 = hasExt(exts, "VK_KHR_external_memory_win32");
+    {
+        VkPhysicalDeviceIDProperties idp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+        VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        p2.pNext = &idp;
+        vkGetPhysicalDeviceProperties2(pd, &p2);
+        std::memcpy(info.deviceUUID, idp.deviceUUID, 16);
+    }
     info.globalPriority =
         hasExt(exts, VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME) || hasExt(exts, VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME);
     VkPhysicalDeviceMemoryProperties mem;
@@ -199,6 +207,11 @@ void Context::init(const ContextOptions& opts) {
     std::vector<const char*> devExts = {VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, VK_KHR_RAY_QUERY_EXTENSION_NAME,
                                         VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME};
     if (surface_) devExts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    // ノイズ除去（OIDN の CUDA デバイス）とバッファを共有するため
+    if (info_.externalMemoryWin32) {
+        devExts.push_back("VK_KHR_external_memory_win32");
+        externalMemory_ = true;
+    }
     const char* prioExt = nullptr;
     if (opts.lowQueuePriority) {
         if (hasExt(exts, VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME))

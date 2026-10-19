@@ -25,6 +25,7 @@
 #include "core/file_watcher.hpp"
 #include "core/log.hpp"
 #include "core/platform.hpp"
+#include "render/denoiser.hpp"
 #include "render/gpu_scene.hpp"
 #include "render/progressive.hpp"
 #include "render/tonemapper.hpp"
@@ -127,6 +128,7 @@ struct ViewState {
     bool saveRequested = false;
     bool resetRequested = false;
     bool autoExposureRequested = false;
+    bool denoise = true;  // ノイズ除去した画像を表示する
 
     // マウス
     bool rotating = false, panning = false;
@@ -414,6 +416,24 @@ int cmdView(const ViewOptions& vo) {
                   currentFrame(static_cast<int>(swap.extent.width), static_cast<int>(swap.extent.height)));
         render::Tonemapper tone;
         tone.init(ctx, prog.targets());
+        // ノイズ除去：操作中は品質 fast で毎フレーム、止まったら high で間隔をあけて
+        render::Denoiser denoiser;
+        render::Tonemapper toneDenoised;
+        st.denoise = o.denoise.value_or(true);
+        auto initDenoiser = [&] {
+            if (!st.denoise && !denoiser.ready() && !o.denoise.value_or(true)) return;
+            if (denoiser.init(ctx, prog.targets(), render::DenoiseQuality::Fast)) {
+                render::RenderTargets t = prog.targets();
+                t.color = denoiser.output();
+                toneDenoised.init(ctx, t);
+            }
+        };
+        initDenoiser();
+        uint64_t accumEpoch = 0, denoisedEpoch = UINT64_MAX;  // 累積をやり直すたびに増やす
+        uint32_t denoisedSamples = 0;
+        double lastDenoiseMs = 0.0;
+        auto lastDenoiseAt = Clock::now();
+        auto lastChangeAt = Clock::now();
 
         // ---- 操作パネル（ImGui）
         IMGUI_CHECKVERSION();
@@ -597,6 +617,17 @@ int cmdView(const ViewOptions& vo) {
                 ImGui::SameLine();
                 if (ImGui::Button("0")) st.exposure = 0.0f;
 
+                if (denoiser.ready() || st.denoise) {
+                    ImGui::Checkbox("ノイズ除去 (OIDN)", &st.denoise);
+                    if (denoiser.ready()) {
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("%s, %.0f ms", denoiser.deviceName().c_str(), lastDenoiseMs);
+                    } else {
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("使用できません");
+                    }
+                }
+
                 ImGui::SeparatorText("表面");
                 if (ImGui::SliderFloat("凹凸の強さ", &st.bumpIntensity, 0.0f, 2.0f, "%.2f")) st.materialsDirty = true;
 
@@ -688,12 +719,15 @@ int cmdView(const ViewOptions& vo) {
                 if (swap.images.size() != oldCount) ImGui_ImplVulkan_SetMinImageCount(2);
                 prog.resize(swap.extent.width, swap.extent.height);
                 tone.init(ctx, prog.targets());
+                if (denoiser.ready()) initDenoiser();
                 needRecreate = false;
                 st.dirty = true;
             }
             if (st.dirty) {
                 prog.setFrame(currentFrame(static_cast<int>(swap.extent.width), static_cast<int>(swap.extent.height)));
                 st.dirty = false;
+                ++accumEpoch;
+                lastChangeAt = Clock::now();
             }
             if (st.autoExposureRequested) {
                 st.autoExposureRequested = false;
@@ -713,18 +747,48 @@ int cmdView(const ViewOptions& vo) {
 
             const uint32_t maxSpp = static_cast<uint32_t>(st.maxSpp);
             const uint32_t add = prog.samples() >= maxSpp ? 0 : std::min(samplesPerFrame, maxSpp - prog.samples());
+            // このフレームでノイズ除去するか（画像の表示のときだけ）
+            const bool moving = Clock::now() - lastChangeAt < std::chrono::milliseconds(300);
+            const uint32_t samplesAfter = prog.samples() + add;
+            const bool wantDenoise = st.denoise && denoiser.ready() && st.mode == render::DisplayMode::Beauty &&
+                                     samplesAfter > 0 &&
+                                     (denoisedEpoch != accumEpoch || denoisedSamples != samplesAfter) &&
+                                     (moving || samplesAfter >= maxSpp ||
+                                      Clock::now() - lastDenoiseAt > std::chrono::milliseconds(150));
+            if (wantDenoise) {
+                // サンプルの追加と入力の準備を先に流し、OIDN（GPU）で除去してから表示のコマンドを作る
+                denoiser.setQuality(moving ? render::DenoiseQuality::Fast : render::DenoiseQuality::High);
+                ctx.submitAndWait([&](VkCommandBuffer c) {
+                    vkCmdResetQueryPool(c, timestamps, 0, 2);
+                    vkCmdWriteTimestamp2(c, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestamps, 0);
+                    prog.record(c, add);
+                    vkCmdWriteTimestamp2(c, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestamps, 1);
+                    denoiser.recordPrepare(c);
+                });
+                if (denoiser.execute(&lastDenoiseMs)) {
+                    denoisedEpoch = accumEpoch;
+                    denoisedSamples = prog.samples();
+                }
+                lastDenoiseAt = Clock::now();
+            }
+            const bool showDenoised = st.denoise && denoiser.ready() && st.mode == render::DisplayMode::Beauty &&
+                                      denoisedEpoch == accumEpoch;
             const bool lastTestFrame = vo.testFrames > 0 && frames + 1 >= vo.testFrames && !envJob.valid() &&
                                        !reloadJob.valid() && (!vo.testReload || testReloaded);
             vkResetCommandBuffer(cmd, 0);
             VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
             bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             vkBeginCommandBuffer(cmd, &bi);
-            vkCmdResetQueryPool(cmd, timestamps, 0, 2);
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestamps, 0);
-            prog.record(cmd, add);
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestamps, 1);
-            tone.record(cmd, st.exposure, st.mode);
-            const VkImage dispImg = tone.output().image, swapImg = swap.images[imageIndex];
+            if (!wantDenoise) {
+                vkCmdResetQueryPool(cmd, timestamps, 0, 2);
+                vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestamps, 0);
+                prog.record(cmd, add);
+                vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestamps, 1);
+            }
+            if (wantDenoise && denoisedEpoch == accumEpoch) denoiser.recordOutput(cmd);
+            render::Tonemapper& tm = showDenoised ? toneDenoised : tone;
+            tm.record(cmd, st.exposure, st.mode);
+            const VkImage dispImg = tm.output().image, swapImg = swap.images[imageIndex];
             vk::imageBarrier(cmd, dispImg, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                              VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
@@ -733,7 +797,7 @@ int cmdView(const ViewOptions& vo) {
                              VK_ACCESS_2_TRANSFER_WRITE_BIT);
             VkImageBlit blit{};
             blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            blit.srcOffsets[1] = {static_cast<int32_t>(tone.output().width), static_cast<int32_t>(tone.output().height), 1};
+            blit.srcOffsets[1] = {static_cast<int32_t>(tm.output().width), static_cast<int32_t>(tm.output().height), 1};
             blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             blit.dstOffsets[1] = {static_cast<int32_t>(swap.extent.width), static_cast<int32_t>(swap.extent.height), 1};
             vkCmdBlitImage(cmd, dispImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapImg,
@@ -871,7 +935,7 @@ int cmdView(const ViewOptions& vo) {
                                               static_cast<int>(swap.extent.height), px.data(), err);
                     } else {
                         ok = saveImage(ctx, tone.output().image, VK_IMAGE_LAYOUT_GENERAL, tone.output().width,
-                                       tone.output().height, false, p);
+                                       tone.output().height, false, p);  // 読み戻せない場合はノイズ除去前
                     }
                     if (ok)
                         log::info("wrote {}", platform::pathToUtf8(p));
@@ -887,6 +951,8 @@ int cmdView(const ViewOptions& vo) {
         vkDeviceWaitIdle(dev);
         if (envJob.valid()) envJob.wait();
         if (reloadJob.valid()) reloadJob.wait();
+        toneDenoised.destroy();
+        denoiser.destroy();
         ImGui_ImplVulkan_Shutdown();
         ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();
