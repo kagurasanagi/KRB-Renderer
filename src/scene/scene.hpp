@@ -56,7 +56,7 @@ struct SceneOptions {
     float maskRoughness = 0.18f;
     float maskScatter = 0.3f;                   // レジストの顔料自身が散乱する割合
     glm::vec3 silkColor{0.93f, 0.93f, 0.90f};   // sRGB
-    glm::vec3 fr4Color{0.60f, 0.52f, 0.30f};    // sRGB
+    glm::vec3 fr4Color{0.62f, 0.58f, 0.42f};    // sRGB
     double placeholderHeight = 1.0;             // mm
     glm::vec3 placeholderColor{0.30f, 0.36f, 0.50f};  // sRGB
     bool includeDnp = true;

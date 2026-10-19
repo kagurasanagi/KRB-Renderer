@@ -19,7 +19,7 @@ finish = "auto"              # auto（stackup の copper_finish に従う）/ EN
 mask_roughness = 0.18
 mask_scatter = 0.3           # レジストの顔料自身が光を散らす割合
 silk_color = [0.93, 0.93, 0.90]
-fr4_color = [0.60, 0.52, 0.30]
+fr4_color = [0.62, 0.58, 0.42]
 clip_silk_by_mask = true     # レジストの開口部ではシルクを印刷しない
 texture_px_per_mm = 50       # 層テクスチャの解像度（50 = 20 µm/px）
 include_dnp = true
