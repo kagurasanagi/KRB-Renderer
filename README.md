@@ -14,6 +14,17 @@ krbr render kicad/mini_dsp_radio.kicad_pcb --hdr hdr/historic_cloister_passage_4
 
 フレームごとにサンプルを積み増して表示します。1フレームに積むサンプル数は、GPU のタイムスタンプで測った時間が約 10 ms に収まるように自動で調整します。`--spp`（既定 1024）まで積むと描画を止め、GPU を休ませて入力を待ちます。
 
+ウィンドウ左上の**操作パネル**（`F1` / `Tab` で表示を切り替え）で、次の項目をその場で変えられます。
+
+| 項目 | 内容 |
+|---|---|
+| 環境マップ | 同じフォルダの `.hdr` / `.exr` から選ぶか、「開く...」でファイルを選ぶ。読み込みは別スレッドで行い、終わったら差し替える |
+| 強さ・回転 | 環境マップの明るさと、縦軸まわりの回転 |
+| 露出 | EV のスライダー。「自動」は、いまの画像の対数平均輝度を中間の灰色（0.18）に合わせる |
+| 凹凸の強さ | 表面の微細な凹凸の倍率（`bump_intensity`） |
+| 表示 | 画像 / アルベド / 法線、最大 spp |
+| カメラ | 画角、視点を戻す、保存 |
+
 | 操作 | 内容 |
 |---|---|
 | 左ドラッグ | 回転（方位・仰角） |
@@ -56,6 +67,7 @@ release だけをビルドする独自トリプレット `triplets/x64-windows-r
 |---|---|
 | volk, Vulkan-Headers, VulkanMemoryAllocator | Vulkan（ローダーは動的読み込み） |
 | GLFW 3.4 | リアルタイム表示のウィンドウと入力 |
+| Dear ImGui 1.92 | ビューアの操作パネル。バックエンド（GLFW / Vulkan）は volk を使うよう `third_party/imgui_backends` を自前でビルド（MIT） |
 | OpenCASCADE 8.0（TKDESTEP / TKXCAF / TKMesh / TKRWMesh） | STEP の読み込みと三角形分割（面の色つき） |
 | Clipper2, earcut.hpp | 多角形の和・差・オフセット、三角形分割 |
 | tinyexr, stb | EXR/HDR の入出力、PNG 出力 |

@@ -66,7 +66,7 @@ struct SceneOptions {
     bool relief = true;                    // 銅・レジスト・シルクの厚みを形状として作る
     bool reliefCopperFromStackup = true;   // 銅の厚みは stackup の値を使う
     geom::ReliefParams reliefParams;
-    float bumpIntensity = 1.0f;            // 表面の凹凸（バンプ）の強さの倍率。0 で無効
+    float bumpIntensity = 0.6f;            // 表面の凹凸（バンプ）の強さの倍率。0 で無効（GPU へ送るときに掛ける）
 };
 
 struct SceneContext {

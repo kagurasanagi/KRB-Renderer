@@ -12,7 +12,13 @@ namespace krbr::render {
 class GpuScene {
 public:
     ~GpuScene();
-    void build(vk::Context& ctx, const scene::Scene& scene, const io::ImageF& env, const EnvDistribution& dist);
+    // bumpIntensity: 全材質の bump_strength に掛ける倍率
+    void build(vk::Context& ctx, const scene::Scene& scene, const io::ImageF& env, const EnvDistribution& dist,
+               float bumpIntensity = 1.0f);
+    // 環境マップを差し替える（GPU が待機中に呼ぶこと。積分器は作り直しが必要）
+    void setEnvironment(const io::ImageF& env, const EnvDistribution& dist);
+    // 材質を送り直す（GPU が待機中に呼ぶこと）
+    void updateMaterials(const std::vector<scene::Material>& materials, float bumpIntensity);
     void destroy();
 
     vk::Buffer vertices, indices, triMats, meshInfos, materials;
@@ -20,7 +26,7 @@ public:
     vk::Image envImage, boardImage;
     VkSampler envSampler = VK_NULL_HANDLE, boardSampler = VK_NULL_HANDLE;
     VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
-    uint32_t envDistW = 0, envDistH = 0;
+    uint32_t envDistW = 0, envDistH = 0, envWidth = 0, envHeight = 0;
     // 基板テクスチャの対応（ワールド X, Z の原点と 1/大きさ）
     glm::vec4 boardMap{0.0f};
     scene::BoardMaterialIds boardMats;

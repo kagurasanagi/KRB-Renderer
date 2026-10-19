@@ -95,7 +95,7 @@ int cmdRender(const RenderOptions& o) {
         vk::Context ctx;
         ctx.init(vo);
         render::GpuScene gpu;
-        gpu.build(ctx, prep->scene, prep->env, prep->dist);
+        gpu.build(ctx, prep->scene, prep->env, prep->dist, cfg.scene.bumpIntensity);
         prep->env.rgba.clear();
         prep->env.rgba.shrink_to_fit();
         render::RenderSettings rs;

@@ -22,6 +22,8 @@ public:
     // カメラなどを変える（累積は 0 から）。GPU がこのクラスの処理を実行していないときに呼ぶこと
     void setFrame(const FrameParams& frame);
     void reset() { samples_ = 0; }
+    // 積分器を作り直す（シーンの資源、例えば環境マップを差し替えた後）。累積は 0 から
+    void rebuildIntegrator();
 
     // count サンプルを cmd に記録する
     void record(VkCommandBuffer cmd, uint32_t count);

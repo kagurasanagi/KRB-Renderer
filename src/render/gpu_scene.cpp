@@ -33,7 +33,19 @@ VkSampler makeSampler(VkDevice dev, VkSamplerAddressMode u, VkSamplerAddressMode
 
 GpuScene::~GpuScene() { destroy(); }
 
-void GpuScene::build(vk::Context& ctx, const scene::Scene& sc, const io::ImageF& env, const EnvDistribution& dist) {
+namespace {
+std::vector<GpuMaterial> toGpuMaterials(const std::vector<scene::Material>& materials, float bumpIntensity) {
+    std::vector<GpuMaterial> mats;
+    for (auto m : materials) {
+        m.bump_strength *= bumpIntensity;
+        mats.push_back(toGpu(m));
+    }
+    return mats;
+}
+}  // namespace
+
+void GpuScene::build(vk::Context& ctx, const scene::Scene& sc, const io::ImageF& env, const EnvDistribution& dist,
+                     float bumpIntensity) {
     ctx_ = &ctx;
     VkDevice dev = ctx.device();
 
@@ -51,8 +63,7 @@ void GpuScene::build(vk::Context& ctx, const scene::Scene& sc, const io::ImageF&
         tmat.insert(tmat.end(), m.mesh.triMaterial.begin(), m.mesh.triMaterial.end());
     }
     triangleCount = tmat.size();
-    std::vector<GpuMaterial> mats;
-    for (const auto& m : sc.materials) mats.push_back(toGpu(m));
+    const std::vector<GpuMaterial> mats = toGpuMaterials(sc.materials, bumpIntensity);
 
     vertices = ctx.createDeviceBuffer(verts.data(), verts.size() * sizeof(GpuVertex), kGeomUsage);
     indices = ctx.createDeviceBuffer(idx.data(), idx.size() * sizeof(uint32_t), kGeomUsage);
@@ -178,17 +189,7 @@ void GpuScene::build(vk::Context& ctx, const scene::Scene& sc, const io::ImageF&
     ctx.destroyBuffer(scratch);
 
     // ---- 環境マップ
-    envImage = ctx.createImage2D(env.width, env.height, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
-                                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-    ctx.uploadImage(envImage, env.rgba.data(), env.rgba.size() * sizeof(float), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    envSampler = makeSampler(dev, VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
-    envMarginal = ctx.createDeviceBuffer(dist.marginalCdf.data(), dist.marginalCdf.size() * sizeof(float),
-                                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    envConditional = ctx.createDeviceBuffer(dist.conditionalCdf.data(), dist.conditionalCdf.size() * sizeof(float),
-                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    envPdf = ctx.createDeviceBuffer(dist.pdf.data(), dist.pdf.size() * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    envDistW = dist.width;
-    envDistH = dist.height;
+    setEnvironment(env, dist);
 
     // ---- 基板の層テクスチャ（2 層の配列：表・裏）
     const auto& L = sc.layers;
@@ -207,7 +208,34 @@ void GpuScene::build(vk::Context& ctx, const scene::Scene& sc, const io::ImageF&
     boardMats = sc.boardMats;
 
     log::info("GPU scene: {} triangles, {} BLAS, {} instances, env {}x{} (distribution {}x{})", triangleCount,
-              blas_.size(), inst.size(), env.width, env.height, envDistW, envDistH);
+              blas_.size(), inst.size(), envWidth, envHeight, envDistW, envDistH);
+}
+
+void GpuScene::setEnvironment(const io::ImageF& env, const EnvDistribution& dist) {
+    vk::Context& ctx = *ctx_;
+    VkDevice dev = ctx.device();
+    ctx.destroyImage(envImage);
+    ctx.destroyBuffer(envMarginal);
+    ctx.destroyBuffer(envConditional);
+    ctx.destroyBuffer(envPdf);
+    envImage = ctx.createImage2D(env.width, env.height, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
+                                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    ctx.uploadImage(envImage, env.rgba.data(), env.rgba.size() * sizeof(float), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (!envSampler) envSampler = makeSampler(dev, VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    envMarginal = ctx.createDeviceBuffer(dist.marginalCdf.data(), dist.marginalCdf.size() * sizeof(float),
+                                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    envConditional = ctx.createDeviceBuffer(dist.conditionalCdf.data(), dist.conditionalCdf.size() * sizeof(float),
+                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    envPdf = ctx.createDeviceBuffer(dist.pdf.data(), dist.pdf.size() * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    envDistW = dist.width;
+    envDistH = dist.height;
+    envWidth = static_cast<uint32_t>(env.width);
+    envHeight = static_cast<uint32_t>(env.height);
+}
+
+void GpuScene::updateMaterials(const std::vector<scene::Material>& materials, float bumpIntensity) {
+    const std::vector<GpuMaterial> mats = toGpuMaterials(materials, bumpIntensity);
+    ctx_->upload(this->materials, mats.data(), mats.size() * sizeof(GpuMaterial));
 }
 
 void GpuScene::destroy() {

@@ -221,6 +221,7 @@ void Context::init(const ContextOptions& opts) {
     f12.scalarBlockLayout = VK_TRUE;
     f13.synchronization2 = VK_TRUE;
     f13.maintenance4 = VK_TRUE;
+    f13.dynamicRendering = VK_TRUE;  // ビューアの操作パネル（ImGui）の描画用
     fas.accelerationStructure = VK_TRUE;
     frq.rayQuery = VK_TRUE;
     f2.pNext = &f12;

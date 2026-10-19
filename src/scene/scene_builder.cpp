@@ -400,8 +400,6 @@ Scene buildScene(const SceneContext& ctx) {
             ++s.placeholders;
         }
     }
-    // 凹凸の強さの一括調整
-    for (auto& m : s.materials) m.bump_strength *= opts.bumpIntensity;
     log::info("scene: {} meshes, {} instances ({} models, {} placeholders), {} materials", s.meshes.size(),
               s.instances.size(), s.modelInstances, s.placeholders, s.materials.size());
     return s;

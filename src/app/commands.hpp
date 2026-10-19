@@ -30,6 +30,7 @@ struct ViewOptions {
     std::string screenshot;    // testFrames 用の保存先（表示中の画像そのもの）
     bool hidden = false;       // ウィンドウを表示しない（testFrames 指定時は自動）
     double testOrbitDeg = 0;   // 開発用：毎フレームこの角度だけカメラを回す（カメラ変更の経路の確認）
+    std::string testEnv;       // 開発用：途中でこの環境マップに切り替える（差し替えの経路の確認）
 };
 
 int cmdProbe();

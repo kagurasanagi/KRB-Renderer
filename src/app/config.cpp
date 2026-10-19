@@ -32,7 +32,7 @@ mask_on_substrate_um = 25    # 銅の間を埋めるので、銅の上より厚�
 silk_um = 15
 
 [surface]
-bump_intensity = 1.0         # 表面の微細な凹凸（ゆず肌・織り目・粒状感）の強さの倍率。0 で無効
+bump_intensity = 0.6         # 表面の微細な凹凸（ゆず肌・織り目・粒状感）の強さの倍率。0 で無効
 
 [placeholder]                # 3D モデルが見つからない部品の代替の箱
 height_mm = 1.0
@@ -68,7 +68,7 @@ width = 1920
 height = 1080
 spp = 64                     # 1 画素あたりのサンプル数（作業中の PC 向けに控えめ）
 max_depth = 8
-exposure_ev = 0.0
+exposure_ev = 0.7
 radiance_clamp = 10.0        # 間接光の放射輝度の上限（ホタル対策）。0 で無効（偏りのない結果）
 integrator = "pt"            # 今回はパストレーサーのみ
 )";

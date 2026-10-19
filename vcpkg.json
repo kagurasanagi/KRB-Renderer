@@ -15,6 +15,7 @@
     "cli11",
     "glm",
     "glfw3",
+    "imgui",
     { "name": "opencascade", "default-features": false }
   ]
 }

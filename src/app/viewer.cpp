@@ -1,12 +1,23 @@
-// リアルタイム表示（ウィンドウ）。オフライン描画と同じシーン・積分器で、フレームごとにサンプルを積み増して表示する
+// リアルタイム表示（ウィンドウ）。オフライン描画と同じシーン・積分器で、フレームごとにサンプルを積み増して表示する。
+// 操作パネル（Dear ImGui）で、環境マップ・露出・表面の凹凸などをその場で変えられる。
 #include <volk.h>
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <commdlg.h>
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#endif
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_vulkan.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <future>
 
 #include "app/commands.hpp"
 #include "app/prepare.hpp"
@@ -29,6 +40,7 @@ struct Swapchain {
     VkSwapchainKHR handle = VK_NULL_HANDLE;
     VkFormat format = VK_FORMAT_UNDEFINED;
     VkExtent2D extent{};
+    bool canReadBack = false;  // 画像を読み戻せる（テストで表示内容を保存する）
     std::vector<VkImage> images;
     std::vector<VkSemaphore> renderDone;  // 画像ごと（表示が終わるまで再利用しない）
 
@@ -56,6 +68,7 @@ struct Swapchain {
         extent.height = std::clamp(extent.height, caps.minImageExtent.height, caps.maxImageExtent.height);
         if (!(caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT))
             throw std::runtime_error("swapchain images cannot be a transfer destination");
+        canReadBack = (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
         uint32_t count = caps.minImageCount + 1;
         if (caps.maxImageCount) count = std::min(count, caps.maxImageCount);
 
@@ -67,7 +80,8 @@ struct Swapchain {
         ci.imageColorSpace = chosen.colorSpace;
         ci.imageExtent = extent;
         ci.imageArrayLayers = 1;
-        ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                        (canReadBack ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0);
         ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         ci.preTransform = caps.currentTransform;
         ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -95,17 +109,23 @@ struct Swapchain {
     }
 };
 
-// 入力で変わる表示の状態
+// 入力・操作パネルで変わる表示の状態
 struct ViewState {
     glm::vec3 target{0.0f};
     float distance = 100.0f;
     double elevation = 35.0, azimuth = 45.0, fov = 30.0;
     float exposure = 0.0f;
     float envRotationDeg = 0.0f;
+    float envIntensity = 1.0f;
+    float bumpIntensity = 1.0f;
+    int maxSpp = 1024;
     render::DisplayMode mode = render::DisplayMode::Beauty;
+    bool showPanel = true;
     bool dirty = true;  // カメラ・照明が変わった（累積をやり直す）
+    bool materialsDirty = false;
     bool saveRequested = false;
     bool resetRequested = false;
+    bool autoExposureRequested = false;
 
     // マウス
     bool rotating = false, panning = false;
@@ -114,9 +134,13 @@ struct ViewState {
     float tanHalfFovY = 0.27f;
 };
 
+bool uiWantsMouse() { return ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureMouse; }
+bool uiWantsKeyboard() { return ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureKeyboard; }
+
 void onMouseButton(GLFWwindow* w, int button, int action, int) {
     auto* s = static_cast<ViewState*>(glfwGetWindowUserPointer(w));
     const bool down = action == GLFW_PRESS;
+    if (down && uiWantsMouse()) return;  // パネルの上での操作はカメラに渡さない
     if (button == GLFW_MOUSE_BUTTON_LEFT) s->rotating = down;
     if (button == GLFW_MOUSE_BUTTON_RIGHT || button == GLFW_MOUSE_BUTTON_MIDDLE) s->panning = down;
     glfwGetCursorPos(w, &s->lastX, &s->lastY);
@@ -141,6 +165,7 @@ void onCursor(GLFWwindow* w, double x, double y) {
 }
 
 void onScroll(GLFWwindow* w, double, double yoff) {
+    if (uiWantsMouse()) return;
     auto* s = static_cast<ViewState*>(glfwGetWindowUserPointer(w));
     s->distance = std::max(1.0f, s->distance * static_cast<float>(std::pow(0.9, yoff)));
     s->dirty = true;
@@ -148,9 +173,12 @@ void onScroll(GLFWwindow* w, double, double yoff) {
 
 void onKey(GLFWwindow* w, int key, int, int action, int) {
     if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
+    if (uiWantsKeyboard()) return;
     auto* s = static_cast<ViewState*>(glfwGetWindowUserPointer(w));
     switch (key) {
         case GLFW_KEY_ESCAPE: glfwSetWindowShouldClose(w, GLFW_TRUE); break;
+        case GLFW_KEY_F1:
+        case GLFW_KEY_TAB: s->showPanel = !s->showPanel; break;
         case GLFW_KEY_R:
         case GLFW_KEY_F: s->resetRequested = true; break;
         case GLFW_KEY_S: s->saveRequested = true; break;
@@ -173,23 +201,116 @@ void onKey(GLFWwindow* w, int key, int, int action, int) {
     }
 }
 
-// 表示中の RGBA8 画像を読み戻して PNG に保存する
-bool saveDisplayImage(vk::Context& ctx, const vk::Image& img, const fs::path& p) {
-    const VkDeviceSize bytes = static_cast<VkDeviceSize>(img.width) * img.height * 4;
+// 画像（RGBA8 / BGRA8）を読み戻して PNG に保存する
+bool saveImage(vk::Context& ctx, VkImage image, VkImageLayout layout, uint32_t w, uint32_t h, bool bgra,
+               const fs::path& p) {
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(w) * h * 4;
     vk::Buffer rb = ctx.createBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, true);
     ctx.submitAndWait([&](VkCommandBuffer cmd) {
         VkBufferImageCopy region{};
         region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        region.imageExtent = {img.width, img.height, 1};
-        vkCmdCopyImageToBuffer(cmd, img.image, VK_IMAGE_LAYOUT_GENERAL, rb.buffer, 1, &region);
+        region.imageExtent = {w, h, 1};
+        vkCmdCopyImageToBuffer(cmd, image, layout, rb.buffer, 1, &region);
     });
     vmaInvalidateAllocation(ctx.allocator(), rb.alloc, 0, VK_WHOLE_SIZE);
-    std::string err;
-    const bool ok = io::savePngRgba8(p, static_cast<int>(img.width), static_cast<int>(img.height),
-                                     static_cast<const unsigned char*>(rb.mapped), err);
+    std::vector<unsigned char> px(static_cast<const unsigned char*>(rb.mapped),
+                                  static_cast<const unsigned char*>(rb.mapped) + bytes);
     ctx.destroyBuffer(rb);
+    if (bgra)
+        for (size_t i = 0; i < px.size(); i += 4) std::swap(px[i], px[i + 2]);
+    for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
+    std::string err;
+    const bool ok = io::savePngRgba8(p, static_cast<int>(w), static_cast<int>(h), px.data(), err);
     if (!ok) log::error("{}: {}", platform::pathToUtf8(p), err);
     return ok;
+}
+
+// 環境マップの読み込み（別スレッドで行い、終わったら GPU へ差し替える）
+struct EnvData {
+    std::string path;
+    io::ImageF image;
+    render::EnvDistribution dist;
+    std::string error;
+};
+
+std::unique_ptr<EnvData> loadEnvironment(std::string path) {
+    auto d = std::make_unique<EnvData>();
+    d->path = std::move(path);
+    if (!io::loadHdrImage(platform::u8path(d->path), d->image, d->error)) return d;
+    d->dist = render::buildEnvDistribution(d->image);
+    return d;
+}
+
+// 同じフォルダの .hdr / .exr の一覧
+std::vector<fs::path> listEnvironments(const fs::path& current) {
+    std::vector<fs::path> out;
+    std::error_code ec;
+    const fs::path dir = current.has_parent_path() ? current.parent_path() : fs::path(".");
+    for (const auto& e : fs::directory_iterator(dir, ec)) {
+        if (!e.is_regular_file()) continue;
+        std::string ext = platform::pathToUtf8(e.path().extension());
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (ext == ".hdr" || ext == ".exr") out.push_back(e.path());
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+#ifdef _WIN32
+// ファイルを選ぶ（Windows 標準のダイアログ。ユーザーがボタンを押したときだけ開く）
+std::optional<std::string> chooseEnvironmentFile(GLFWwindow* window, const fs::path& initialDir) {
+    std::wstring buf(4096, L'\0');
+    const std::wstring dir = initialDir.wstring();
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = glfwGetWin32Window(window);
+    ofn.lpstrFilter = L"HDR / OpenEXR (*.hdr;*.exr)\0*.hdr;*.exr\0All files\0*.*\0";
+    ofn.lpstrFile = buf.data();
+    ofn.nMaxFile = static_cast<DWORD>(buf.size());
+    ofn.lpstrInitialDir = dir.empty() ? nullptr : dir.c_str();
+    ofn.lpstrTitle = L"環境マップを選ぶ";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) return std::nullopt;
+    buf.resize(std::wcslen(buf.c_str()));
+    return platform::pathToUtf8(fs::path(buf));
+}
+#else
+std::optional<std::string> chooseEnvironmentFile(GLFWwindow*, const fs::path&) { return std::nullopt; }
+#endif
+
+// 画像全体の対数平均輝度から露出を決める（中間の灰色 0.18 に合わせる）
+float autoExposure(const io::ImageF& img) {
+    double sum = 0.0;
+    size_t n = 0;
+    for (size_t i = 0; i + 3 < img.rgba.size(); i += 4) {
+        const double l = 0.2126 * img.rgba[i] + 0.7152 * img.rgba[i + 1] + 0.0722 * img.rgba[i + 2];
+        sum += std::log(std::max(l, 1e-4));
+        ++n;
+    }
+    if (!n) return 0.0f;
+    const double avg = std::exp(sum / static_cast<double>(n));
+    return static_cast<float>(std::clamp(std::log2(0.18 / avg), -6.0, 6.0));
+}
+
+void setupImGuiStyle(GLFWwindow* window) {
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;  // パネルの配置をファイルに書かない
+    float xs = 1.0f, ys = 1.0f;
+    glfwGetWindowContentScale(window, &xs, &ys);
+    const float scale = std::max(1.0f, xs);
+    ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding = 6.0f;
+    style.FrameRounding = 4.0f;
+    style.Colors[ImGuiCol_WindowBg].w = 0.88f;
+    style.ScaleAllSizes(scale);
+    // 日本語を表示できる Windows のフォント（無ければ既定のフォント）
+    const char* fonts[] = {"C:/Windows/Fonts/YuGothM.ttc", "C:/Windows/Fonts/meiryo.ttc", "C:/Windows/Fonts/msgothic.ttc"};
+    for (const char* f : fonts) {
+        std::error_code ec;
+        if (fs::exists(f, ec) && io.Fonts->AddFontFromFileTTF(f, 16.0f * scale)) return;
+    }
+    io.Fonts->AddFontDefault();
 }
 
 }  // namespace
@@ -202,8 +323,6 @@ int cmdView(const ViewOptions& vo) {
     auto prep = prepareScene(o);
     if (!prep) return 1;
     ProjectConfig& cfg = prep->cfg;
-    // ビューアでは --spp を「ここまで積んだら止める」上限として使う（既定 1024）
-    const uint32_t maxSpp = static_cast<uint32_t>(o.spp ? *o.spp : 1024);
     const int winW = o.width ? *o.width : 1600, winH = o.height ? *o.height : 900;
 
     glfwSetErrorCallback([](int code, const char* msg) { log::error("GLFW {}: {}", code, msg); });
@@ -228,7 +347,13 @@ int cmdView(const ViewOptions& vo) {
     }
 
     ViewState st;
+    st.maxSpp = o.spp ? *o.spp : 1024;
+    st.exposure = cfg.exposureEv;
+    st.envRotationDeg = cfg.envRotationDeg;
+    st.envIntensity = cfg.envIntensity;
+    st.bumpIntensity = cfg.scene.bumpIntensity;
     glfwSetWindowUserPointer(window, &st);
+    // 先に自前のコールバックを登録し、ImGui はそれを呼び出す形で上に重ねる
     glfwSetMouseButtonCallback(window, onMouseButton);
     glfwSetCursorPosCallback(window, onCursor);
     glfwSetScrollCallback(window, onScroll);
@@ -248,7 +373,7 @@ int cmdView(const ViewOptions& vo) {
         vk::Context ctx;
         ctx.init(co);
         render::GpuScene gpu;
-        gpu.build(ctx, prep->scene, prep->env, prep->dist);
+        gpu.build(ctx, prep->scene, prep->env, prep->dist, st.bumpIntensity);
         prep->env.rgba.clear();
         prep->env.rgba.shrink_to_fit();
         writeMissingReport(prep->scene.missing, prep->board.file, {});  // ビューアではログだけ
@@ -269,15 +394,15 @@ int cmdView(const ViewOptions& vo) {
             st.tanHalfFovY = c.tanHalfFovY;
             st.dirty = true;
         };
-        st.exposure = cfg.exposureEv;
-        st.envRotationDeg = cfg.envRotationDeg;
         resetCamera(fbw, fbh);
 
         auto currentFrame = [&](int w, int h) {
             ProjectConfig c = cfg;
             c.envRotationDeg = st.envRotationDeg;
+            c.envIntensity = st.envIntensity;
             const scene::Camera cam = scene::orbitCamera(st.target, st.distance, st.elevation, st.azimuth, st.fov,
                                                          static_cast<float>(w) / static_cast<float>(h));
+            st.tanHalfFovY = cam.tanHalfFovY;
             return frameParams(c, cam, o.seed);
         };
 
@@ -288,6 +413,28 @@ int cmdView(const ViewOptions& vo) {
                   currentFrame(static_cast<int>(swap.extent.width), static_cast<int>(swap.extent.height)));
         render::Tonemapper tone;
         tone.init(ctx, prog.targets());
+
+        // ---- 操作パネル（ImGui）
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        setupImGuiStyle(window);
+        ImGui_ImplGlfw_InitForVulkan(window, true);
+        VkFormat swapFormat = swap.format;
+        ImGui_ImplVulkan_InitInfo ii{};
+        ii.ApiVersion = VK_API_VERSION_1_3;
+        ii.Instance = ctx.instance();
+        ii.PhysicalDevice = ctx.physical();
+        ii.Device = ctx.device();
+        ii.QueueFamily = ctx.queueFamily();
+        ii.Queue = ctx.queue();
+        ii.DescriptorPoolSize = IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE;
+        ii.MinImageCount = 2;
+        ii.ImageCount = static_cast<uint32_t>(swap.images.size());
+        ii.UseDynamicRendering = true;
+        ii.PipelineInfoMain.PipelineRenderingCreateInfo = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+        ii.PipelineInfoMain.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
+        ii.PipelineInfoMain.PipelineRenderingCreateInfo.pColorAttachmentFormats = &swapFormat;
+        if (!ImGui_ImplVulkan_Init(&ii)) throw std::runtime_error("ImGui Vulkan backend init failed");
 
         VkDevice dev = ctx.device();
         VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -312,9 +459,22 @@ int cmdView(const ViewOptions& vo) {
         vkGetPhysicalDeviceProperties(ctx.physical(), &devProps);
         const double tsPeriodMs = devProps.limits.timestampPeriod * 1e-6;
 
-        log::info("viewer: {}x{}, up to {} spp. mouse: L=rotate, R/M=pan, wheel=zoom; keys: R=reset, +/-=exposure, "
-                  "[ ]=rotate environment, 1/2/3=image/albedo/normal, S=save, Esc=quit",
-                  swap.extent.width, swap.extent.height, maxSpp);
+        log::info("viewer: {}x{}, up to {} spp. mouse: L=rotate, R/M=pan, wheel=zoom; keys: F1/Tab=panel, R=reset, "
+                  "+/-=exposure, [ ]=rotate environment, 1/2/3=image/albedo/normal, S=save, Esc=quit",
+                  swap.extent.width, swap.extent.height, st.maxSpp);
+
+        // 環境マップ
+        std::string envPath = cfg.hdr;
+        std::vector<fs::path> envList = listEnvironments(platform::u8path(envPath));
+        std::future<std::unique_ptr<EnvData>> envJob;
+        std::string envJobPath, envError;
+        auto startEnvLoad = [&](const std::string& path) {
+            if (envJob.valid() || path == envPath) return;
+            envJobPath = path;
+            envError.clear();
+            envJob = std::async(std::launch::async, loadEnvironment, path);
+            log::info("loading environment {}", path);
+        };
 
         uint32_t samplesPerFrame = 1;
         const double targetFrameMs = 10.0;  // 60fps（16.7 ms）に収まるよう、表示処理の分を残す
@@ -322,14 +482,15 @@ int cmdView(const ViewOptions& vo) {
         int frames = 0, saveIndex = 0;
         auto lastTitle = Clock::now();
         double lastFrameMs = 0.0, lastGpuMs = 0.0;
+        bool testEnvRequested = false;
 
         const fs::path outPng = platform::u8path(o.out);
         const fs::path outDir = outPng.has_parent_path() ? outPng.parent_path() : fs::path(".");
         const std::string stem = platform::pathToUtf8(outPng.stem());
 
         while (!glfwWindowShouldClose(window)) {
-            const bool converged = prog.samples() >= maxSpp && !st.dirty;
-            if (converged && vo.testFrames == 0)
+            const bool idle = prog.samples() >= static_cast<uint32_t>(st.maxSpp) && !st.dirty && !envJob.valid();
+            if (idle && vo.testFrames == 0)
                 glfwWaitEventsTimeout(0.25);  // 収束したら GPU を休ませ、入力を待つ
             else
                 glfwPollEvents();
@@ -340,8 +501,109 @@ int cmdView(const ViewOptions& vo) {
                 continue;
             }
             st.fbHeight = fbh;
+
+            // ---- 開発用テストの操作
             if (vo.testOrbitDeg != 0.0) {
                 st.azimuth += vo.testOrbitDeg;
+                st.dirty = true;
+            }
+            if (!vo.testEnv.empty() && !testEnvRequested && frames == 5) {
+                testEnvRequested = true;
+                startEnvLoad(vo.testEnv);
+            }
+
+            // ---- 操作パネル
+            ImGui_ImplVulkan_NewFrame();
+            ImGui_ImplGlfw_NewFrame();
+            ImGui::NewFrame();
+            if (st.showPanel) {
+                ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_FirstUseEver);
+                ImGui::SetNextWindowSize(ImVec2(0, 0), ImGuiCond_FirstUseEver);
+                ImGui::Begin("krbr", &st.showPanel, ImGuiWindowFlags_AlwaysAutoResize);
+                ImGui::Text("%u / %d spp   %.1f ms/frame (GPU %.1f ms)", prog.samples(), st.maxSpp, lastFrameMs,
+                            lastGpuMs);
+                ImGui::ProgressBar(std::min(1.0f, static_cast<float>(prog.samples()) / std::max(1, st.maxSpp)),
+                                   ImVec2(-1, 0), "");
+
+                ImGui::SeparatorText("環境マップ");
+                const std::string curName = platform::pathToUtf8(platform::u8path(envPath).filename());
+                ImGui::SetNextItemWidth(260);
+                if (ImGui::BeginCombo("##hdr", curName.c_str())) {
+                    for (const auto& p : envList) {
+                        const std::string name = platform::pathToUtf8(p.filename());
+                        const std::string full = platform::pathToUtf8(p);
+                        if (ImGui::Selectable(name.c_str(), full == envPath || name == curName)) startEnvLoad(full);
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("開く...")) {
+                    if (auto f = chooseEnvironmentFile(window, platform::u8path(envPath).parent_path())) startEnvLoad(*f);
+                }
+                if (envJob.valid()) ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1), "読み込み中: %s", envJobPath.c_str());
+                if (!envError.empty()) ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "%s", envError.c_str());
+                if (ImGui::SliderFloat("強さ", &st.envIntensity, 0.05f, 8.0f, "%.2f", ImGuiSliderFlags_Logarithmic))
+                    st.dirty = true;
+                if (ImGui::SliderFloat("回転", &st.envRotationDeg, -180.0f, 180.0f, "%.0f°")) st.dirty = true;
+
+                ImGui::SeparatorText("露出");
+                ImGui::SetNextItemWidth(200);
+                ImGui::SliderFloat("EV", &st.exposure, -6.0f, 6.0f, "%+.2f");
+                ImGui::SameLine();
+                if (ImGui::Button("自動")) st.autoExposureRequested = true;
+                ImGui::SameLine();
+                if (ImGui::Button("0")) st.exposure = 0.0f;
+
+                ImGui::SeparatorText("表面");
+                if (ImGui::SliderFloat("凹凸の強さ", &st.bumpIntensity, 0.0f, 2.0f, "%.2f")) st.materialsDirty = true;
+
+                ImGui::SeparatorText("表示");
+                int mode = static_cast<int>(st.mode);
+                ImGui::RadioButton("画像", &mode, 0);
+                ImGui::SameLine();
+                ImGui::RadioButton("アルベド", &mode, 1);
+                ImGui::SameLine();
+                ImGui::RadioButton("法線", &mode, 2);
+                st.mode = static_cast<render::DisplayMode>(mode);
+                ImGui::SliderInt("最大 spp", &st.maxSpp, 16, 16384, "%d", ImGuiSliderFlags_Logarithmic);
+
+                ImGui::SeparatorText("カメラ");
+                float fov = static_cast<float>(st.fov);
+                if (ImGui::SliderFloat("画角", &fov, 5.0f, 90.0f, "%.0f°")) {
+                    st.fov = fov;
+                    st.dirty = true;
+                }
+                ImGui::Text("仰角 %.0f°  方位 %.0f°", st.elevation, std::fmod(st.azimuth, 360.0));
+                if (ImGui::Button("視点を戻す (R)")) st.resetRequested = true;
+                ImGui::SameLine();
+                if (ImGui::Button("保存 (S)")) st.saveRequested = true;
+
+                ImGui::Separator();
+                ImGui::TextDisabled("左ドラッグ: 回転  右ドラッグ: 移動  ホイール: 拡大");
+                ImGui::TextDisabled("F1 / Tab: このパネルの表示切り替え");
+                ImGui::End();
+            }
+            ImGui::Render();
+
+            // ---- 状態の反映（GPU は前のフレームの完了を待っているので、ここで資源を触ってよい）
+            if (envJob.valid() && envJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                std::unique_ptr<EnvData> d = envJob.get();
+                if (d->error.empty()) {
+                    vkDeviceWaitIdle(dev);
+                    gpu.setEnvironment(d->image, d->dist);
+                    prog.rebuildIntegrator();
+                    envPath = d->path;
+                    envList = listEnvironments(platform::u8path(envPath));
+                    st.dirty = true;
+                    log::info("environment: {} ({}x{})", envPath, d->image.width, d->image.height);
+                } else {
+                    envError = d->error;
+                    log::error("environment {}: {}", d->path, d->error);
+                }
+            }
+            if (st.materialsDirty) {
+                gpu.updateMaterials(prep->scene.materials, st.bumpIntensity);
+                st.materialsDirty = false;
                 st.dirty = true;
             }
             if (st.resetRequested) {
@@ -351,7 +613,9 @@ int cmdView(const ViewOptions& vo) {
             if (needRecreate || static_cast<uint32_t>(fbw) != swap.extent.width ||
                 static_cast<uint32_t>(fbh) != swap.extent.height) {
                 vkDeviceWaitIdle(dev);
+                const size_t oldCount = swap.images.size();
                 swap.create(ctx, static_cast<uint32_t>(fbw), static_cast<uint32_t>(fbh));
+                if (swap.images.size() != oldCount) ImGui_ImplVulkan_SetMinImageCount(2);
                 prog.resize(swap.extent.width, swap.extent.height);
                 tone.init(ctx, prog.targets());
                 needRecreate = false;
@@ -360,6 +624,13 @@ int cmdView(const ViewOptions& vo) {
             if (st.dirty) {
                 prog.setFrame(currentFrame(static_cast<int>(swap.extent.width), static_cast<int>(swap.extent.height)));
                 st.dirty = false;
+            }
+            if (st.autoExposureRequested) {
+                st.autoExposureRequested = false;
+                if (prog.samples() > 0) {
+                    st.exposure = autoExposure(prog.readback().color);
+                    log::info("auto exposure: {:+.2f} EV", st.exposure);
+                }
             }
 
             uint32_t imageIndex = 0;
@@ -370,7 +641,9 @@ int cmdView(const ViewOptions& vo) {
             }
             if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) vk::check(ar, "vkAcquireNextImageKHR");
 
+            const uint32_t maxSpp = static_cast<uint32_t>(st.maxSpp);
             const uint32_t add = prog.samples() >= maxSpp ? 0 : std::min(samplesPerFrame, maxSpp - prog.samples());
+            const bool lastTestFrame = vo.testFrames > 0 && frames + 1 >= vo.testFrames && !envJob.valid();
             vkResetCommandBuffer(cmd, 0);
             VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
             bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -394,13 +667,58 @@ int cmdView(const ViewOptions& vo) {
             blit.dstOffsets[1] = {static_cast<int32_t>(swap.extent.width), static_cast<int32_t>(swap.extent.height), 1};
             vkCmdBlitImage(cmd, dispImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapImg,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
-            vk::imageBarrier(cmd, swapImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                             VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                             VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0);
             vk::imageBarrier(cmd, dispImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
                              VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
                              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT,
                              VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT);
+
+            // 操作パネルを画像の上に重ねて描く（動的レンダリング）
+            vk::imageBarrier(cmd, swapImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_BLIT_BIT,
+                             VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+            VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            vci.image = swapImg;
+            vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            vci.format = swap.format;
+            vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            VkImageView swapView;
+            vk::check(vkCreateImageView(dev, &vci, nullptr, &swapView), "vkCreateImageView");
+            VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+            att.imageView = swapView;
+            att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+            ri.renderArea = {{0, 0}, swap.extent};
+            ri.layerCount = 1;
+            ri.colorAttachmentCount = 1;
+            ri.pColorAttachments = &att;
+            vkCmdBeginRendering(cmd, &ri);
+            ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+            vkCmdEndRendering(cmd);
+
+            vk::Buffer shot;
+            if (lastTestFrame && swap.canReadBack && !vo.screenshot.empty()) {
+                // 表示内容（パネル込み）をテスト用に読み戻す
+                vk::imageBarrier(cmd, swapImg, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+                                 VK_ACCESS_2_TRANSFER_READ_BIT);
+                shot = ctx.createBuffer(static_cast<VkDeviceSize>(swap.extent.width) * swap.extent.height * 4,
+                                        VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, true);
+                VkBufferImageCopy region{};
+                region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                region.imageExtent = {swap.extent.width, swap.extent.height, 1};
+                vkCmdCopyImageToBuffer(cmd, swapImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, shot.buffer, 1, &region);
+                vk::imageBarrier(cmd, swapImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                                 VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                                 VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0);
+            } else {
+                vk::imageBarrier(cmd, swapImg, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                 VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0);
+            }
             vk::check(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
 
             const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -425,6 +743,7 @@ int cmdView(const ViewOptions& vo) {
             if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) needRecreate = true;
             else if (pr != VK_SUCCESS) vk::check(pr, "vkQueuePresentKHR");
             vk::check(vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+            vkDestroyImageView(dev, swapView, nullptr);
             lastFrameMs = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
             ++frames;
 
@@ -461,23 +780,44 @@ int cmdView(const ViewOptions& vo) {
                     log::error("save failed: {}", err);
             }
 
-            if (vo.testFrames > 0 && frames >= vo.testFrames) {
+            if (lastTestFrame) {
                 log::info("test: {} frames, {} spp, last frame {:.1f} ms (GPU {:.1f} ms, {} spp/frame), swapchain {}x{} "
-                          "format {}",
+                          "format {}, environment {}",
                           frames, prog.samples(), lastFrameMs, lastGpuMs, samplesPerFrame, swap.extent.width,
-                          swap.extent.height, static_cast<int>(swap.format));
+                          swap.extent.height, static_cast<int>(swap.format), envPath);
                 if (!vo.screenshot.empty()) {
                     const fs::path p = platform::u8path(vo.screenshot);
-                    if (saveDisplayImage(ctx, tone.output(), p))
+                    bool ok = false;
+                    if (shot.buffer) {
+                        vmaInvalidateAllocation(ctx.allocator(), shot.alloc, 0, VK_WHOLE_SIZE);
+                        std::vector<unsigned char> px(static_cast<const unsigned char*>(shot.mapped),
+                                                      static_cast<const unsigned char*>(shot.mapped) + shot.size);
+                        if (swap.format == VK_FORMAT_B8G8R8A8_UNORM)
+                            for (size_t i = 0; i < px.size(); i += 4) std::swap(px[i], px[i + 2]);
+                        for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
+                        std::string err;
+                        ok = io::savePngRgba8(p, static_cast<int>(swap.extent.width),
+                                              static_cast<int>(swap.extent.height), px.data(), err);
+                    } else {
+                        ok = saveImage(ctx, tone.output().image, VK_IMAGE_LAYOUT_GENERAL, tone.output().width,
+                                       tone.output().height, false, p);
+                    }
+                    if (ok)
                         log::info("wrote {}", platform::pathToUtf8(p));
                     else
                         rc = 1;
                 }
+                ctx.destroyBuffer(shot);
                 break;
             }
+            ctx.destroyBuffer(shot);
         }
 
         vkDeviceWaitIdle(dev);
+        if (envJob.valid()) envJob.wait();
+        ImGui_ImplVulkan_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
         vkDestroyQueryPool(dev, timestamps, nullptr);
         vkDestroyFence(dev, fence, nullptr);
         vkDestroySemaphore(dev, acquired, nullptr);

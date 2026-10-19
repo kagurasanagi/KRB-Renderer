@@ -53,6 +53,14 @@ void Progressive::resize(uint32_t width, uint32_t height) {
     createTargets();
 }
 
+void Progressive::rebuildIntegrator() {
+    vkDeviceWaitIdle(ctx_->device());
+    integrator_->destroy();
+    integrator_ = createIntegrator(integratorName_);
+    integrator_->setup(*ctx_, *scene_, targets_, frame_);
+    samples_ = 0;
+}
+
 void Progressive::setFrame(const FrameParams& frame) {
     frame_ = frame;
     integrator_->updateFrame(frame_);

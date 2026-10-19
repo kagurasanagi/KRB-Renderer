@@ -24,6 +24,7 @@ find_package(clipper2 CONFIG REQUIRED)
 find_package(CLI11 CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(glfw3 CONFIG REQUIRED)
+find_package(imgui CONFIG REQUIRED)
 find_path(STB_INCLUDE_DIRS "stb_image.h" REQUIRED)
 find_path(EARCUT_HPP_INCLUDE_DIRS "mapbox/earcut.hpp" REQUIRED)
 
@@ -54,14 +55,21 @@ add_custom_target(krbr_shaders DEPENDS ${SHADER_OUTPUTS})
 
 # ---------------------------------------------------------------- krbr
 file(GLOB_RECURSE KRBR_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
-add_executable(krbr ${KRBR_SOURCES})
+# ImGui のバックエンドは volk を使うよう自前でビルドする（vcpkg 版は Vulkan ローダーを直接リンクするため）
+set(IMGUI_BACKEND_SOURCES
+  "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui_backends/imgui_impl_glfw.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui_backends/imgui_impl_vulkan.cpp")
+add_executable(krbr ${KRBR_SOURCES} ${IMGUI_BACKEND_SOURCES})
 add_dependencies(krbr krbr_shaders)
-target_include_directories(krbr PRIVATE src ${STB_INCLUDE_DIRS} ${EARCUT_HPP_INCLUDE_DIRS})
+target_include_directories(krbr PRIVATE src third_party/imgui_backends ${STB_INCLUDE_DIRS} ${EARCUT_HPP_INCLUDE_DIRS})
 target_link_libraries(krbr PRIVATE
   Vulkan::Headers volk::volk GPUOpen::VulkanMemoryAllocator
   tomlplusplus::tomlplusplus nlohmann_json::nlohmann_json
-  unofficial::tinyexr::tinyexr Clipper2::Clipper2 CLI11::CLI11 glm::glm glfw)
-target_compile_definitions(krbr PRIVATE VK_NO_PROTOTYPES GLM_FORCE_DEPTH_ZERO_TO_ONE)
+  unofficial::tinyexr::tinyexr Clipper2::Clipper2 CLI11::CLI11 glm::glm glfw imgui::imgui)
+target_compile_definitions(krbr PRIVATE VK_NO_PROTOTYPES GLM_FORCE_DEPTH_ZERO_TO_ONE IMGUI_IMPL_VULKAN_USE_VOLK)
+if(WIN32)
+  target_link_libraries(krbr PRIVATE comdlg32)
+endif()
 if(WIN32)
   target_compile_definitions(krbr PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 endif()

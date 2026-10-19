@@ -83,6 +83,7 @@ int main(int argc, char** argv) {
     view->add_option("--screenshot", vo.screenshot, "development: save the displayed image (with --test-frames)");
     view->add_flag("--hidden", vo.hidden, "do not show the window");
     view->add_option("--test-orbit", vo.testOrbitDeg, "development: rotate the camera by this many degrees per frame");
+    view->add_option("--test-env", vo.testEnv, "development: switch to this environment map during the test");
 
     try {
         app.parse(static_cast<int>(cargs.size()), cargs.data());
