@@ -42,6 +42,8 @@ struct TempWorkspace {
 };
 
 inline fs::path sourceDir() { return platform::u8path(KRBR_SOURCE_DIR); }
-inline fs::path samplePcb() { return sourceDir() / "kicad" / "mini_dsp_radio.kicad_pcb"; }
+// テストで描く基板と環境マップ（CMake の KRBR_TEST_PCB / KRBR_TEST_HDR）
+inline fs::path samplePcb() { return platform::u8path(KRBR_TEST_PCB); }
+inline fs::path sampleHdr() { return platform::u8path(KRBR_TEST_HDR); }
 
 }  // namespace krbr::test

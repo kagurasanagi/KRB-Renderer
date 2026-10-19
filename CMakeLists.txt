@@ -40,8 +40,14 @@ file(GLOB SHADER_INCLUDES CONFIGURE_DEPENDS "${SHADER_SRC_DIR}/*.glsl")
 set(SHADER_SOURCES "${SHADER_SRC_DIR}/pathtrace.comp" "${SHADER_SRC_DIR}/tonemap.comp"
                    "${SHADER_SRC_DIR}/denoise_prep.comp" "${SHADER_SRC_DIR}/vcm_light.comp"
                    "${SHADER_SRC_DIR}/vcm_camera.comp")
+# 積分器（レイを飛ばすもの）は、ray query 版（.comp.spv）に加えて ray tracing pipeline 版（.rgen.spv）も作る。
+# ray_query を持たない GPU（GTX 10 系など）では後者と rt_*.spv を使う
+set(SHADER_RAY_SOURCES "${SHADER_SRC_DIR}/pathtrace.comp" "${SHADER_SRC_DIR}/vcm_light.comp"
+                       "${SHADER_SRC_DIR}/vcm_camera.comp")
+set(SHADER_RT_STAGE_SOURCES "${SHADER_SRC_DIR}/rt_hit.rchit" "${SHADER_SRC_DIR}/rt_miss.rmiss"
+                            "${SHADER_SRC_DIR}/rt_shadow.rmiss")
 set(SHADER_OUTPUTS)
-foreach(src ${SHADER_SOURCES})
+foreach(src ${SHADER_SOURCES} ${SHADER_RT_STAGE_SOURCES})
   get_filename_component(name ${src} NAME)
   set(out "${SHADER_OUT_DIR}/${name}.spv")
   add_custom_command(
@@ -50,6 +56,18 @@ foreach(src ${SHADER_SOURCES})
     COMMAND ${GLSLC} --target-env=vulkan1.3 -O -I ${SHADER_SRC_DIR} -o ${out} ${src}
     DEPENDS ${src} ${SHADER_INCLUDES}
     COMMENT "glslc ${name}"
+    VERBATIM)
+  list(APPEND SHADER_OUTPUTS ${out})
+endforeach()
+foreach(src ${SHADER_RAY_SOURCES})
+  get_filename_component(base ${src} NAME_WE)
+  set(out "${SHADER_OUT_DIR}/${base}.rgen.spv")
+  add_custom_command(
+    OUTPUT ${out}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUT_DIR}
+    COMMAND ${GLSLC} --target-env=vulkan1.3 -O -fshader-stage=rgen -DKRBR_RT_PIPELINE=1 -I ${SHADER_SRC_DIR} -o ${out} ${src}
+    DEPENDS ${src} ${SHADER_INCLUDES}
+    COMMENT "glslc ${base}.rgen (ray tracing pipeline)"
     VERBATIM)
   list(APPEND SHADER_OUTPUTS ${out})
 endforeach()
@@ -116,7 +134,11 @@ enable_testing()
 file(GLOB KRBR_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
 add_executable(krbr_tests ${KRBR_TEST_SOURCES})
 target_link_libraries(krbr_tests PRIVATE krbr_core doctest::doctest)
-target_compile_definitions(krbr_tests PRIVATE KRBR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+# テストが描く基板と環境マップ（このフォルダの外にある、ユーザー所有の読み取り専用データ）
+set(KRBR_TEST_PCB "E:/program/kachkojir_RK3506G2/kicad/kachkojir_RK3506G2.kicad_pcb" CACHE FILEPATH "テストで使う .kicad_pcb")
+set(KRBR_TEST_HDR "E:/desktop/hdr/brown_photostudio_02_4k.exr" CACHE FILEPATH "テストで使う環境マップ（.hdr / .exr）")
+target_compile_definitions(krbr_tests PRIVATE KRBR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+  KRBR_TEST_PCB="${KRBR_TEST_PCB}" KRBR_TEST_HDR="${KRBR_TEST_HDR}")
 add_test(NAME krbr_tests COMMAND krbr_tests)
 if(OIDN_RUNTIME_DLLS)
   add_custom_command(TARGET krbr_tests POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OIDN_RUNTIME_DLLS} $<TARGET_FILE_DIR:krbr_tests>)
