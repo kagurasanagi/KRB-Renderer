@@ -32,7 +32,7 @@ mask_on_substrate_um = 25    # 銅の間を埋めるので、銅の上より厚�
 silk_um = 15
 
 [surface]
-bump_intensity = 0.6         # 表面の微細な凹凸（ゆず肌・織り目・粒状感）の強さの倍率。0 で無効
+bump_intensity = 0.25        # 表面の微細な凹凸（ゆず肌・織り目・粒状感）の強さの倍率。0 で無効
 
 [placeholder]                # 3D モデルが見つからない部品の代替（縁を面取りした透明な水晶）
 height_mm = 1.0

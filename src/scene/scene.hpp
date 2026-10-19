@@ -122,7 +122,7 @@ struct SceneOptions {
     bool layerTextures = false;            // 層テクスチャを作る（relief = false のとき、または確認用の出力）
     bool reliefCopperFromStackup = true;   // 銅の厚みは stackup の値を使う
     geom::ReliefParams reliefParams;
-    float bumpIntensity = 0.6f;            // 表面の凹凸（バンプ）の強さの倍率。0 で無効（GPU へ送るときに掛ける）
+    float bumpIntensity = 0.25f;            // 表面の凹凸（バンプ）の強さの倍率。0 で無効（GPU へ送るときに掛ける）
 };
 
 struct SceneContext {

@@ -124,10 +124,10 @@ void setupBoardMaterials(Scene& s, const kicad::Board& board, const SceneOptions
     mask.base_color = srgbToLinear(maskSrgb) * 0.6f;
     mask.base_weight = o.maskScatter;  // シェーダではこの値を「散乱を選ぶ確率」として使う
     mask.specular_roughness = 0.5f;
-    mask.bump_pattern = BumpPattern::Noise;  // 塗膜のゆず肌
-    mask.bump_strength = 0.012f;
+    mask.bump_pattern = BumpPattern::Noise;  // 塗膜のゆず肌（光沢が強く映り込みが揺れやすいので、ごく弱く）
+    mask.bump_strength = 0.006f;
     mask.bump_scale = 0.45f;
-    mask.roughness_variation = 0.25f;
+    mask.roughness_variation = 0.1f;
 
     Material silk;
     silk.name = "silkscreen";

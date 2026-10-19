@@ -278,7 +278,7 @@ HDR ─────────────────────────�
 | シルク | インクのざらつき |
 | 部品（`model_map.toml` のプリセット） | 軽いむら |
 
-- 強さは `board.toml` の `[surface] bump_intensity` で一括して調整できます（0 で無効）。
+- 強さは `board.toml` の `[surface] bump_intensity` で一括して調整できます（既定 0.25 で、近づいて分かる程度。0 で無効）。レジストは光沢が強く、わずかな凹凸でも映り込みがまだらに揺れるので、個別にさらに弱くしています。
 - 個別の材質では、`bump_pattern` / `bump_strength` / `bump_scale` / `roughness_variation` で調整できます。これは OpenPBR にはない krbr 独自のパラメータです。
 - 模様はインスタンスごとにずらしているので、同じ部品が並んでも同じ模様にはなりません。
 

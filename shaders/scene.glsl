@@ -226,7 +226,7 @@ Shade surfaceAt(Hit hit, inout vec3 ns, inout Rng rng) {
         // レジストの表面はレジストの凹凸。下が基材なら織り目がうっすら浮き出る
         addDetail(mask, hit.pObj, nObj, seed, 1.0, d);
         Material base = materials[baseMat];
-        if (uint(base.params2.x) == BUMP_WEAVE) addDetail(base, hit.pObj, nObj, seed, 0.12, d);
+        if (uint(base.params2.x) == BUMP_WEAVE) addDetail(base, hit.pObj, nObj, seed, 0.05, d);
         float thickness = 0.0;
         if (kind == MAT_MASKED && F.maskParams2.w > 0.5 && abs(nObj.y) > 0.5) {
             // 距離場からレジストの厚みと、縁のなだらかな傾き（法線）を求める
