@@ -1,0 +1,9 @@
+[package]
+name = "krbr-core"
+description = "KRB-Renderer: ログ、パス、ハッシュなどの土台"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+xxhash-rust.workspace = true

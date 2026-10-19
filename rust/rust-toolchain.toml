@@ -1,0 +1,3 @@
+[toolchain]
+# MSVC の ABI で、C++ 側の DLL（OpenCASCADE の変換器、OIDN）とそろえる
+channel = "stable-x86_64-pc-windows-msvc"

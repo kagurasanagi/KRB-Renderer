@@ -1,0 +1,16 @@
+[package]
+name = "krbr"
+description = "KRB-Renderer (Rust): KiCad 連携 物理ベース レンダラー"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "krbr"
+path = "src/main.rs"
+
+[dependencies]
+krbr-core = { path = "../crates/krbr-core" }
+krbr-kicad = { path = "../crates/krbr-kicad" }
+clap.workspace = true
+anyhow.workspace = true

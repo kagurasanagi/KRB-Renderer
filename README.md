@@ -243,6 +243,25 @@ bump_scale = 0.1
 - **subsurface**：krbr では簡易な形で扱います。`subsurface_weight` の割合で光が拡散して中へ入り、`subsurface_radius`（mm）進むと `subsurface_color` の透過率になる吸収を受けながら進み、反対側の面やふちから拡散して出ます（FR4 の透光性に使用）。
 - fuzz・thin_film・anisotropy・geometry_opacity・thin_walled・transmission_scatter は値を GPU まで渡していますが、描画には反映していません（使われるとログで知らせます）。発光（`emission_luminance`、cd/m²）は、放射輝度 1.0 = 1000 cd/m² として描きます。発光は片面（三角形の巻き方で決まる表側）から、余弦分布で放たれます。発光する三角形は光源として直接サンプリングします（輝度 × 面積に比例して選ぶ）。
 
+## Rust 版（移植中）
+
+`rust/` に Rust への移植を進めています（cargo のワークスペース。`rust-toolchain.toml` で MSVC の stable を指定）。シェーダ（GLSL → SPIR-V）はそのまま使い、C++ の本体を順に置き換えます。設定・キャッシュの場所と XXH64 のキーは C++ 版と同じで、メッシュキャッシュを共有します。
+
+```
+cd rust
+cargo build --release
+targetelease\krbr.exe info E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --models
+cargo test
+```
+
+| 段階 | 内容 | 状況 |
+|---|---|---|
+| 1 | S 式パーサ、基板の構造（`krbr-kicad`）、3D モデルのパス解決、`info` | 済（C++ 版と同じ結果：250 部品・234 モデル解決） |
+| 2 | STEP → メッシュの変換器を C++ の薄い DLL に切り出し、Rust はキャッシュと DLL だけを読む | 未 |
+| 3 | 基板メッシュ、凹凸タイル、層の多角形、距離場（Clipper2、earcut） | 未 |
+| 4 | 描画（ash：デバイス、BLAS/TLAS、カーネル、累積、トーンマップ）。`render` が C++ 版と同じ画像になることを確認 | 未 |
+| 5 | ビューア（winit + egui）、監視、ノイズ除去（OIDN）、材質 CLI | 未 |
+
 ## テスト
 
 ```

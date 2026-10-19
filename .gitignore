@@ -7,3 +7,5 @@
 /.vs/
 *.user
 /third_party/oidn/
+# Rust 版のビルド生成物
+/rust/target/
