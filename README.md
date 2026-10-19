@@ -1,13 +1,15 @@
-# krbr — KiCad 連携 物理レンダラ（フェーズ1）
+# KRB-Renderer — KiCad 連携 物理ベース レンダラー
 
-KiCad の `.kicad_pcb` を読み込み、HDR 環境光で照らした基板を、Vulkan のレイトレーシング（`VK_KHR_ray_query`）を使った GPU パストレーサーで描画するツールです。
+**KRB-Renderer**（KiCad 連携 物理ベース レンダラー）は、KiCad の `.kicad_pcb` を読み込み、HDR 環境光で照らした基板を、Vulkan のレイトレーシング（`VK_KHR_ray_query`）を使った GPU パストレーサーで描画するツールです。
+
+コマンド名・設定フォルダ名・環境変数の接頭辞は、短い **`krbr`** のままです（`krbr.exe`、`<プロジェクト名>.krbr/`、`%APPDATA%\krbr\`、`KRBR_CONFIG_DIR` など）。リポジトリ名だけが KRB-Renderer です。
 
 ```
 # リアルタイム表示（既定。ウィンドウが開く）
-krbr kicad/mini_dsp_radio.kicad_pcb --hdr hdr/historic_cloister_passage_4k.exr
+krbr E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --hdr E:\desktop\hdr\brown_photostudio_02_4k.exr
 
 # ファイルへ出力（ウィンドウは開かない）
-krbr render kicad/mini_dsp_radio.kicad_pcb --hdr hdr/historic_cloister_passage_4k.exr --spp 256 --width 1920 --height 1080 --out out/board.png
+krbr render E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --hdr E:\desktop\hdr\brown_photostudio_02_4k.exr --spp 256 --width 1920 --height 1080 --out out/board.png
 ```
 
 ### リアルタイム表示（`krbr <pcb>` / `krbr view <pcb>`）
@@ -22,6 +24,7 @@ krbr render kicad/mini_dsp_radio.kicad_pcb --hdr hdr/historic_cloister_passage_4
 | 強さ・回転 | 環境マップの明るさと、縦軸まわりの回転 |
 | 露出 | EV のスライダー。「自動」は、いまの画像の対数平均輝度を中間の灰色（0.18）に合わせる |
 | 凹凸の強さ | 表面の微細な凹凸の倍率（`bump_intensity`） |
+| レジスト | レジストの色のプリセット（「設定どおり」か、KiCad の色名／JLCPCB の色）。色・粗さ・散乱をまとめて切り替え、累積をやり直す。基板を読み直しても選択は保たれる |
 | 表示 | 画像 / アルベド / 法線、最大 spp（2 の累乗） |
 | カメラ | 画角、視点を戻す、保存 |
 
@@ -35,6 +38,7 @@ krbr render kicad/mini_dsp_radio.kicad_pcb --hdr hdr/historic_cloister_passage_4
 | `[` / `]` | 環境マップを ±15° 回す |
 | `1` / `2` / `3` | 画像 / アルベド / 法線 の表示 |
 | `S` | 現在の累積を `--out`（既定 `out/view.png`）を元に `view_000.png` / `.exr` として保存 |
+| `D` | ノイズ除去を今かける（ノイズ除去が CPU のときだけ意味がある。下記） |
 | `Esc` | 終了 |
 
 ウィンドウのタイトルに、積んだサンプル数・フレーム時間・露出を表示します。
@@ -61,6 +65,7 @@ krbr render kicad/mini_dsp_radio.kicad_pcb --hdr hdr/historic_cloister_passage_4
 - Vulkan のデバイスと同じ GPU（UUID で選ぶ）の CUDA デバイスで動かし、Vulkan のバッファを外部メモリ（Win32 ハンドル）として OIDN と共有します。CPU を経由する転送はありません。共有できない環境では CPU デバイスに切り替えます。
 - 累積画像をサンプル数で割って入力を作るシェーダ（`denoise_prep.comp`）→ OIDN → 結果を画像へ写し、表示用のトーンマッピングにつなぎます。
 - ビューア：既定で有効（パネルで切り替え）。カメラを動かしている間は品質 fast で毎フレーム、止まったら high で 150 ms ごと、収束時にもう一度。1080p の high で約 20 ms、720p の fast で約 4 ms（RTX 3080 Ti）。
+  - ノイズ除去が **CPU** になるとき（CUDA が使えない GPU。GTX 1060 など）は 1 回に数秒かかり画面が止まるので、ビューアは**収束時（最大 spp に達したとき）と、`D` キー／パネルの「今かける」のときだけ**かけます（常に品質 high）。それ以外は蓄積中のノイズのある画像をそのまま表示します。
 - `krbr watch`：既定で有効（high）。`krbr render --denoise` で `<名前>_denoised.png / .exr` も書き出します。`--no-denoise` で無効にできます。
 
 ### ファイル出力（`krbr render`）
@@ -76,13 +81,30 @@ krbr render kicad/mini_dsp_radio.kicad_pcb --hdr hdr/historic_cloister_passage_4
 
 ## ビルド
 
-前提: Visual Studio 2026（MSVC）、Vulkan SDK（`glslc`）、vcpkg（`VCPKG_ROOT`）。
+前提（いずれも PATH や環境変数で見つかること）:
+
+| もの | 確認したもの | 備考 |
+|---|---|---|
+| Visual Studio 2022/2026 の C++ ツール | VS 2026 Build Tools 18.10（MSVC 14.51） | `scripts\build.cmd` が vswhere で探す。Community でも Build Tools でもよい |
+| CMake 3.25 以上 | 4.2 | |
+| Ninja | 1.13（`winget install Ninja-build.Ninja`） | VS 同梱 → PATH → winget の順で探す。Build Tools には同梱されないので別途入れる |
+| Vulkan SDK（`glslc`） | 1.4.350（`VULKAN_SDK`） | |
+| vcpkg | `VCPKG_ROOT`（無ければ `%USERPROFILE%\vcpkg`） | マニフェストの baseline のコミットがローカルの vcpkg にあること（無ければ `git -C %VCPKG_ROOT% pull`） |
+| KiCad 10 | `C:\Program Files\KiCad\10.0` | 3D モデルの既定フォルダと kicad-cli（シルクの線フォント）に使う |
 
 ```
 powershell -File scripts\get_oidn.ps1   # ノイズ除去（OIDN 2.5.1 の公式バイナリ）を third_party/oidn へ。無くてもビルドできる
-scripts\build.cmd          # MSVC 環境を読み込み、低優先度で configure + build
+scripts\build.cmd          # MSVC 環境を読み込み、低優先度で configure + build（初回は vcpkg の依存のビルドも行う。OpenCASCADE に時間がかかる）
+scripts\build.cmd --clean  # build\release を消してやり直す（それ以外の引数は cmake --build に渡す）
 build\release\krbr.exe probe
 ```
+
+テストが描く基板と環境マップは CMake のキャッシュ変数で指定します（既定はこの PC のもの。他の PC では `cmake -D` で差し替える）。
+
+| 変数 | 既定値 |
+|---|---|
+| `KRBR_TEST_PCB` | `E:/program/kachkojir_RK3506G2/kicad/kachkojir_RK3506G2.kicad_pcb` |
+| `KRBR_TEST_HDR` | `E:/desktop/hdr/brown_photostudio_02_4k.exr` |
 
 依存ライブラリは `vcpkg.json`（マニフェストモード）で `build/vcpkg_installed` に入ります。
 release だけをビルドする独自トリプレット `triplets/x64-windows-rel.cmake` を使います（OpenCASCADE のビルド時間を半分にするため）。
@@ -108,11 +130,41 @@ release だけをビルドする独自トリプレット `triplets/x64-windows-r
 | `krbr render <pcb> --hdr <file> [options]` | ファイルへ出力 |
 | `krbr watch <pcb> --hdr <file> [--out out/watch.png] [--spp 32]` | ヘッドレス：保存のたびに描き直して PNG を書き出す（ウィンドウは開かない） |
 | `krbr material list` | 材質ライブラリの一覧 |
+| `krbr mask list` | レジストの色のプリセット一覧（KiCad の色名と、JLCPCB の選択肢） |
 | `krbr material show <pcb> [--ref U3]` | 部品・部位ごとの材質と、どの段階で決まったか |
 | `krbr material set <pcb> --ref U3 [--part K] --material M` | 部品番号ごとの上書き（プロジェクトの overrides.toml） |
 | `krbr material set <pcb> --model <パス/ファイル名> [--part K] --material M [--global]` | 3D モデルごとの設定（プロジェクト、または `--global` で全体設定） |
 
-`render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X,Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--spectral` / `--rgb`（色の計算）, `--lens pinhole|thin|realistic`, `--f-number`, `--focal-length`, `--focus-distance`, `--blades`, `--init`, `--no-cache`, `--no-kicad-cli`, `--debug-layers`（層テクスチャを PNG で出力）, `--validate`, `--normal-priority`, `-v`。
+`render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X,Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--spectral` / `--rgb`（色の計算）, `--mask-color <プリセット名 または r,g,b>`（レジストの色。下記）, `--lens pinhole|thin|realistic`, `--f-number`, `--focal-length`, `--focus-distance`, `--blades`, `--init`, `--no-cache`, `--no-kicad-cli`, `--debug-layers`（層テクスチャを PNG で出力）, `--validate`, `--normal-priority`, `-v`。
+
+## GPU の要件と、この PC（GTX 1060）での状況
+
+描画には Vulkan 1.3 と `VK_KHR_acceleration_structure` に加えて、**`VK_KHR_ray_query` か `VK_KHR_ray_tracing_pipeline`** のどちらかが必要です。交差判定は `shaders/scene.glsl` の `rawTraceClosest` / `rawOccluded` に閉じていて、GPU に応じて次のどちらかで作ります（本文のシェーダは同じ。`shaders/stage.glsl` で切り替え）。
+
+| 方式 | 使う GPU | 仕組み |
+|---|---|---|
+| ray query（優先） | RTX など `ray_query` を持つもの | 計算シェーダの中で `rayQueryEXT` を辿る（`<名前>.comp.spv`） |
+| ray tracing pipeline | GTX 10 系など `ray_query` が無いもの | 同じ本文をレイ生成シェーダとして組み（`<名前>.rgen.spv`、`-DKRBR_RT_PIPELINE`）、`traceRayEXT` → 最近接ヒット `rt_hit.rchit`（交点の生の情報をペイロードへ）／ミス `rt_miss.rmiss`／影用ミス `rt_shadow.rmiss`。再帰はせず、シェーダバインディングテーブルは `render/kernel.cpp` が組む |
+
+| GPU | 状況 |
+|---|---|
+| RTX 3080 Ti（開発元の PC） | ray query。README の時間の数値はここで測ったもの |
+| GTX 1060 6GB（2026-10 からのこの PC、ドライバ 581） | `ray_query` なし → ray tracing pipeline。RT コアが無いのでドライバのエミュレーションで、RTX より大きく遅い（下記） |
+
+`krbr probe` でどちらになったかを表示します（`GPU: ... ray tracing pipeline (no ray_query)`）。
+
+GTX 1060 での実測（kachkojir_RK3506G2、135 万三角形、PT、深さ 8）：
+
+| 項目 | 時間 |
+|---|---|
+| `render` 640x360 | 40 ms/spp |
+| `render` / `watch` 1920x1080 | 約 180〜200 ms/spp（32 spp で 6 秒前後） |
+| ノイズ除去 1080p（OIDN、CPU の high） | 6〜8 秒 |
+| 保存から画像の更新（watch テスト、32 spp、ノイズ除去込み） | 13〜16 秒（RTX 3080 Ti では 0.63 秒） |
+
+白い炉テスト・積分器の一致・プリズムの分散などの GPU のテストは、ray tracing pipeline 版でも ray query 版と同じ値で通ります（25 件すべて合格）。watch テストの「保存から 1 秒以内」は、`ray_query` を持つ GPU が無い PC では 30 秒に緩めています（仕組みの検証が目的のため）。
+
+そのほか、この PC では OIDN の CUDA デバイス（Volta 以降が必要）が使えないので、ノイズ除去は CPU（Xeon E3-1290 V2、AVX2 なし）で行われ、1080p の high で 6〜8 秒かかります。VRAM が 6 GB なので、環境マップは 8k ではなく 4k を使ってください。
 
 ## 作業中の PC への配慮
 
@@ -138,6 +190,27 @@ release だけをビルドする独自トリプレット `triplets/x64-windows-r
 | `%LOCALAPPDATA%\krbr\cache\silk\` | kicad-cli によるシルク SVG のキャッシュ |
 
 ファイルが無ければ既定値を使います。優先順位は「コマンドライン ＞ 設定ファイル ＞ 既定値」です。
+
+### レジストの色
+
+レジストの色は次の順で決まります：`--mask-color` ＞ `board.toml` の `mask_color` ＞ `.kicad_pcb` の stackup の色（KiCad の基板設定で選んだ色）＞ 緑。
+
+`mask_color` と `--mask-color` には、sRGB の値（`[r, g, b]` / `r,g,b`）のほかに**プリセット名**を書けます。プリセットは色だけでなく、コートの粗さ（光沢／つや消し）と顔料の散乱（透明さ）もまとめて設定します。一覧は `krbr mask list`。
+
+| プリセット | 内容 |
+|---|---|
+| `green` `red` `blue` `yellow` `purple` `black` `white` `matte-black` | KiCad の stackup の色名と同じもの。stackup に色があれば自動でこれが使われる |
+| `jlcpcb-green` `jlcpcb-purple` `jlcpcb-red` `jlcpcb-yellow` `jlcpcb-blue` `jlcpcb-white` `jlcpcb-black` `jlcpcb-matte-black` `jlcpcb-matte-green` | JLCPCB の注文時に選べる色。白・黒は不透明寄り、matte は粗さを上げてある |
+
+ビューアでは操作パネルの「表面」→「レジスト」でその場で切り替えられます（材質だけを送り直すので一瞬で、累積はやり直し）。
+
+プリセットはシルクの色も決めます：黄・白のレジストでは黒、それ以外では白（`silk_color` を書いていればそちらが優先）。
+
+名前の大小・区切りは無視します（`JLCPCB Purple`、`jlcpcb:purple` も同じ）。メーカーの色は写真からの目分量で、実測ではありません。プリセットの後に `mask_roughness` / `mask_scatter` を書けば、その項目だけ上書きできます。
+
+```
+krbr render board.kicad_pcb --hdr studio.exr --mask-color jlcpcb-purple
+```
 全体設定とキャッシュの場所は、環境変数 `KRBR_CONFIG_DIR` / `KRBR_CACHE_DIR` で差し替えられます（テストで使用）。
 
 ### 材質システム（フェーズ2）
@@ -176,7 +249,7 @@ bump_scale = 0.1
 build\release\krbr_tests.exe
 ```
 
-doctest で、次をウィンドウを開かずに確かめます。
+doctest で、次をウィンドウを開かずに確かめます。基板を使うテストは `KRBR_TEST_PCB` の基板をコピーして使い、部品番号や座標は基板の中から選びます（KiCad 標準の色を持つ IC、`C_0603_1608Metric` のコンデンサ）。
 
 - 材質の TOML の往復、アッベ数からの屈折率、材質ライブラリの重ね方
 - 解決順序の5段階、パス・ハッシュでの照合、部位ごとの指定
@@ -247,7 +320,7 @@ HDR ─────────────────────────�
 | シルク | 下の面 ＋ 15 µm | シルク |
 
 - 銅の上のレジストの上面が、板厚の半分（t/2）に来るようにしています。部品はそこに載ります。
-- レジストでふさがれた（テンティング）ビアは、穴の上にもレジストの面を張ります。
+- レジストでふさがれた（テンティング）ビアは、穴の上にもレジストの面を張ります。実物ではレジストが穴に落ち込んで浅いくぼみになるので、ドリル径の円に余弦断面のすり鉢（既定の深さ 50 µm、`via_dimple_um`。0 で平ら）を作ります。KiCad の基板設定でテンティングを「いいえ」にしたビア（または `(tenting none)` のビア）は穴が開いたままです。
 - 材質の境界は形状そのもので決まるので、境界がぼやけません。
 - `enabled = false` にすると、以前の層テクスチャ方式（平らな面に R=銅, G=レジスト開口, B=シルク を描き、材質を確率的に選ぶ）になります。
 

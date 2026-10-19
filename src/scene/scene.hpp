@@ -110,9 +110,11 @@ struct SceneOptions {
     std::string finish = "auto";  // auto / ENIG / HASL / OSP
     glm::vec3 maskColor{0.05f, 0.42f, 0.16f};   // sRGB
     bool maskColorSet = false;                  // false なら stackup の色を使う
+    std::string maskPreset;                     // 使ったプリセットの名前（表示用。空なら色を直接指定）
     float maskRoughness = 0.18f;
     float maskScatter = 0.3f;                   // レジストの顔料自身が散乱する割合
     glm::vec3 silkColor{0.93f, 0.93f, 0.90f};   // sRGB
+    bool silkColorSet = false;                  // false ならレジストのプリセットに合わせる（黄・白なら黒）
     glm::vec3 fr4Color{0.62f, 0.58f, 0.42f};    // sRGB
     double placeholderHeight = 1.0;             // mm
     glm::vec3 placeholderColor{0.92f, 0.96f, 1.0f};  // sRGB：代替の水晶の、中を 5 mm 進んだときの透過の色
@@ -136,5 +138,7 @@ struct SceneContext {
 };
 
 Scene buildScene(const SceneContext& ctx);
+// レジストとシルクの材質だけを設定に合わせて作り直す（ビューアでの色の切り替え用。GPU への送り直しは呼び出し側）
+void updateMaskMaterial(Scene& s, const kicad::Board& board, const SceneOptions& o);
 
 }  // namespace krbr::scene

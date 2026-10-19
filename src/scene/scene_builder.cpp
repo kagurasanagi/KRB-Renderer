@@ -11,6 +11,7 @@
 #include "core/platform.hpp"
 #include "geom/relief.hpp"
 #include "raster/board_sdf.hpp"
+#include "scene/mask_presets.hpp"
 #include "scene/scene.hpp"
 
 namespace krbr::scene {
@@ -27,13 +28,8 @@ uint32_t addMaterial(Scene& s, Material m) {
 }
 
 glm::vec3 stackupColor(const std::string& name, glm::vec3 fallback) {
-    // KiCad の stackup の色名（"Green" など）または "#RRGGBBAA"
-    static const std::map<std::string, glm::vec3> named = {
-        {"Green", {0.05f, 0.42f, 0.16f}},  {"Red", {0.62f, 0.07f, 0.06f}},    {"Blue", {0.05f, 0.18f, 0.52f}},
-        {"Yellow", {0.80f, 0.68f, 0.10f}}, {"Purple", {0.30f, 0.10f, 0.42f}}, {"Black", {0.04f, 0.04f, 0.04f}},
-        {"White", {0.90f, 0.90f, 0.88f}},  {"Matte Black", {0.05f, 0.05f, 0.05f}},
-    };
-    if (auto it = named.find(name); it != named.end()) return it->second;
+    // KiCad の stackup の色名（"Green" など。プリセットと同じ表）または "#RRGGBBAA"
+    if (const MaskPreset* p = findMaskPreset(name)) return p->srgb;
     if (name.size() >= 7 && name[0] == '#') {
         auto hex = [&](size_t i) { return std::stoi(name.substr(i, 2), nullptr, 16) / 255.0f; };
         try {
@@ -42,6 +38,41 @@ glm::vec3 stackupColor(const std::string& name, glm::vec3 fallback) {
         }
     }
     return fallback;
+}
+
+glm::vec3 resolvedMaskColor(const kicad::Board& board, const SceneOptions& o) {
+    return o.maskColorSet ? o.maskColor : stackupColor(board.stackup.maskColorFront, o.maskColor);
+}
+
+Material makeMaskMaterial(glm::vec3 maskSrgb, float roughness, float scatter) {
+    Material mask;
+    mask.name = "solder_mask";
+    // コートとして使う：coat_color がレジストを通る光の色、base_* は顔料自身の散乱
+    mask.coat_weight = 1.0f;
+    // 設定の色は「銅の上で見えるレジストの色」とし、銅の平均反射率（約 0.7）で割って透過色にする
+    mask.coat_color = glm::min(srgbToLinear(maskSrgb) / 0.7f, glm::vec3(1.0f));
+    mask.coat_roughness = roughness;
+    mask.coat_ior = 1.5f;
+    mask.base_color = srgbToLinear(maskSrgb) * 0.6f;
+    mask.base_weight = scatter;  // シェーダではこの値を「散乱を選ぶ確率」として使う
+    mask.specular_roughness = 0.5f;
+    mask.bump_pattern = BumpPattern::Noise;  // 塗膜のゆず肌（光沢が強く映り込みが揺れやすいので、ごく弱く）
+    mask.bump_strength = 0.006f;
+    mask.bump_scale = 0.45f;
+    mask.roughness_variation = 0.1f;
+    return mask;
+}
+
+Material makeSilkMaterial(glm::vec3 silkSrgb) {
+    Material silk;
+    silk.name = "silkscreen";
+    silk.base_color = srgbToLinear(silkSrgb);
+    silk.specular_roughness = 0.65f;
+    silk.bump_pattern = BumpPattern::Noise;  // インクのざらつき
+    silk.bump_strength = 0.2f;
+    silk.bump_scale = 0.06f;
+    silk.roughness_variation = 0.3f;
+    return silk;
 }
 
 void setupBoardMaterials(Scene& s, const kicad::Board& board, const SceneOptions& o) {
@@ -111,32 +142,10 @@ void setupBoardMaterials(Scene& s, const kicad::Board& board, const SceneOptions
         fin.roughness_variation = 0.2f;
     }
 
-    const glm::vec3 maskSrgb =
-        o.maskColorSet ? o.maskColor : stackupColor(board.stackup.maskColorFront, o.maskColor);
-    Material mask;
-    mask.name = "solder_mask";
-    // コートとして使う：coat_color がレジストを通る光の色、base_* は顔料自身の散乱
-    mask.coat_weight = 1.0f;
-    // 設定の色は「銅の上で見えるレジストの色」とし、銅の平均反射率（約 0.7）で割って透過色にする
-    mask.coat_color = glm::min(srgbToLinear(maskSrgb) / 0.7f, glm::vec3(1.0f));
-    mask.coat_roughness = o.maskRoughness;
-    mask.coat_ior = 1.5f;
-    mask.base_color = srgbToLinear(maskSrgb) * 0.6f;
-    mask.base_weight = o.maskScatter;  // シェーダではこの値を「散乱を選ぶ確率」として使う
-    mask.specular_roughness = 0.5f;
-    mask.bump_pattern = BumpPattern::Noise;  // 塗膜のゆず肌（光沢が強く映り込みが揺れやすいので、ごく弱く）
-    mask.bump_strength = 0.006f;
-    mask.bump_scale = 0.45f;
-    mask.roughness_variation = 0.1f;
+    const glm::vec3 maskSrgb = resolvedMaskColor(board, o);
+    const Material mask = makeMaskMaterial(maskSrgb, o.maskRoughness, o.maskScatter);
 
-    Material silk;
-    silk.name = "silkscreen";
-    silk.base_color = srgbToLinear(o.silkColor);
-    silk.specular_roughness = 0.65f;
-    silk.bump_pattern = BumpPattern::Noise;  // インクのざらつき
-    silk.bump_strength = 0.2f;
-    silk.bump_scale = 0.06f;
-    silk.roughness_variation = 0.3f;
+    const Material silk = makeSilkMaterial(o.silkColor);
 
     s.boardMats.top = addMaterial(s, top);
     s.boardMats.bottom = addMaterial(s, bottom);
@@ -157,8 +166,8 @@ void setupBoardMaterials(Scene& s, const kicad::Board& board, const SceneOptions
     maskedCu.maskedBase = s.boardMats.copper;
     s.boardMats.maskOnFr4 = addMaterial(s, maskedFr4);
     s.boardMats.maskOnCopper = addMaterial(s, maskedCu);
-    log::info("board materials: finish {}, mask sRGB ({:.2f}, {:.2f}, {:.2f})", finish, maskSrgb.r, maskSrgb.g,
-              maskSrgb.b);
+    log::info("board materials: finish {}, mask sRGB ({:.2f}, {:.2f}, {:.2f}){}", finish, maskSrgb.r, maskSrgb.g,
+              maskSrgb.b, o.maskPreset.empty() ? "" : " [" + o.maskPreset + "]");
 }
 
 // KiCad の 3D ビューアと同じ並びで部品・モデルの変換を作る（KiCad 3D 座標、mm、Z 上向き）
@@ -329,12 +338,16 @@ void buildReliefTiles(Scene& s, const kicad::Board& board, const geom::ReliefPar
 
     // 面を張る範囲（表裏それぞれ、ふさがれたビアの穴を含める）
     geom::Paths base[2];
+    std::vector<geom::ReliefDimple> tentedVias[2];  // くぼみ（タイルごとに、かかるものだけ渡す）
     for (int side = 0; side < 2; ++side) {
         geom::Paths tented;
         const bool tentDefault = side == 0 ? board.setup.tentFront : board.setup.tentBack;
         for (const auto& v : board.vias) {
             const std::optional<bool> tent = side == 0 ? v.tentFront : v.tentBack;
-            if (tent.value_or(tentDefault) && v.drill > 0) geom::append(tented, geom::disc(v.pos, v.drill / 2));
+            if (tent.value_or(tentDefault) && v.drill > 0) {
+                geom::append(tented, geom::disc(v.pos, v.drill / 2));
+                tentedVias[side].push_back({v.pos, v.drill / 2, true});
+            }
         }
         base[side] = geom::reliefBase(s.board, tented);
     }
@@ -365,6 +378,15 @@ void buildReliefTiles(Scene& s, const kicad::Board& board, const geom::ReliefPar
             const geom::Paths tileBase = geom::intersect(base[side], rectPath);
             geom::ReliefInput in{geom::intersect(sp.copper, rectPath), geom::intersect(sp.maskOpen, rectPath),
                                  geom::intersect(sp.silk, rectPath), {}, &tileBase};
+            for (const auto& d : tentedVias[side]) {
+                // 円がこのタイルにかかるものは平らな面から除く。くぼみの面は中心を含むタイルだけが作る
+                if (d.pos.x + d.radius < rect.lo.x || d.pos.x - d.radius > rect.hi.x || d.pos.y + d.radius < rect.lo.y ||
+                    d.pos.y - d.radius > rect.hi.y)
+                    continue;
+                const bool centerHere = d.pos.x >= rect.lo.x && d.pos.x < rect.hi.x && d.pos.y >= rect.lo.y &&
+                                        d.pos.y < rect.hi.y;
+                in.dimples.push_back({d.pos, d.radius, centerHere});
+            }
             {
                 // 距離場（広い範囲で求め、タイルの画素だけを残す）
                 raster::Grid eg{G.origin + kicad::Vec2{ex0, ey0} / G.pxPerMm, G.pxPerMm, ex1 - ex0, ey1 - ey0};
@@ -496,6 +518,12 @@ kicad::Box2 ReliefTileCache::tileRect(int index) const {
     if (i == nx - 1) r.hi.x += 1.0;
     if (j == ny - 1) r.hi.y += 1.0;
     return r;
+}
+
+void updateMaskMaterial(Scene& s, const kicad::Board& board, const SceneOptions& o) {
+    if (s.boardMats.mask >= s.materials.size() || s.boardMats.silk >= s.materials.size()) return;
+    s.materials[s.boardMats.mask] = makeMaskMaterial(resolvedMaskColor(board, o), o.maskRoughness, o.maskScatter);
+    s.materials[s.boardMats.silk] = makeSilkMaterial(o.silkColor);  // レジストに合わせたシルクの色
 }
 
 Scene buildScene(const SceneContext& ctx) {

@@ -29,6 +29,7 @@
 #include "render/gpu_scene.hpp"
 #include "render/progressive.hpp"
 #include "render/tonemapper.hpp"
+#include "scene/mask_presets.hpp"
 #include "scene/raycast.hpp"
 
 namespace krbr::app {
@@ -126,7 +127,10 @@ struct ViewState {
     bool showPanel = true;
     bool dirty = true;  // カメラ・照明が変わった（累積をやり直す）
     bool materialsDirty = false;
+    int maskChoice = -1;        // レジストの色：-1 = 設定どおり、0.. = プリセットの添字
+    bool maskChanged = false;   // 選び直した（読み直し中でなければ反映する）
     bool saveRequested = false;
+    bool denoiseRequested = false;  // D キー／ボタン：ノイズ除去が CPU のとき、手動で 1 回かける
     bool resetRequested = false;
     bool autoExposureRequested = false;
     bool denoise = true;  // ノイズ除去した画像を表示する
@@ -195,6 +199,7 @@ void onKey(GLFWwindow* w, int key, int, int action, int) {
         case GLFW_KEY_R:
         case GLFW_KEY_F: s->resetRequested = true; break;
         case GLFW_KEY_S: s->saveRequested = true; break;
+        case GLFW_KEY_D: s->denoiseRequested = true; break;
         case GLFW_KEY_EQUAL:
         case GLFW_KEY_KP_ADD: s->exposure += 0.25f; break;  // 露出は表示だけなので累積はやり直さない
         case GLFW_KEY_MINUS:
@@ -371,6 +376,11 @@ int cmdView(const ViewOptions& vo) {
     st.envRotationDeg = cfg.envRotationDeg;
     st.envIntensity = cfg.envIntensity;
     st.bumpIntensity = cfg.scene.bumpIntensity;
+    const scene::SceneOptions sceneAsConfigured = cfg.scene;  // 「設定どおり」に戻すため
+    const auto& maskPresets = scene::maskPresets();
+    if (!cfg.scene.maskPreset.empty())
+        for (size_t i = 0; i < maskPresets.size(); ++i)
+            if (maskPresets[i].name == cfg.scene.maskPreset) st.maskChoice = static_cast<int>(i);
     glfwSetWindowUserPointer(window, &st);
     // 先に自前のコールバックを登録し、ImGui はそれを呼び出す形で上に重ねる
     glfwSetMouseButtonCallback(window, onMouseButton);
@@ -446,6 +456,8 @@ int cmdView(const ViewOptions& vo) {
             }
         };
         initDenoiser();
+        // ノイズ除去が CPU（CUDA が使えない GPU）なら、収束時と手動のときだけかける（毎フレームの更新で確認）
+        bool denoiseOnCpu = false;
         uint64_t accumEpoch = 0, denoisedEpoch = UINT64_MAX;  // 累積をやり直すたびに増やす
         uint32_t denoisedSamples = 0;
         double lastDenoiseMs = 0.0;
@@ -541,6 +553,7 @@ int cmdView(const ViewOptions& vo) {
         const std::string stem = platform::pathToUtf8(outPng.stem());
 
         while (!glfwWindowShouldClose(window)) {
+            denoiseOnCpu = denoiser.ready() && denoiser.deviceName() == "CPU";
             const bool idle = prog.samples() >= static_cast<uint32_t>(st.maxSpp) && !st.dirty && !envJob.valid() &&
                               !reloadJob.valid();
             if (idle && vo.testFrames == 0)
@@ -639,6 +652,12 @@ int cmdView(const ViewOptions& vo) {
                     if (denoiser.ready()) {
                         ImGui::SameLine();
                         ImGui::TextDisabled("%s, %.0f ms", denoiser.deviceName().c_str(), lastDenoiseMs);
+                        if (denoiseOnCpu) {
+                            // CPU では数秒かかるので、収束時と手動のときだけ
+                            ImGui::SameLine();
+                            if (ImGui::Button("今かける (D)")) st.denoiseRequested = true;
+                            ImGui::TextDisabled("CPU のため、収束時と D キーのときだけかけます");
+                        }
                     } else {
                         ImGui::SameLine();
                         ImGui::TextDisabled("使用できません");
@@ -717,6 +736,27 @@ int cmdView(const ViewOptions& vo) {
 
                 ImGui::SeparatorText("表面");
                 if (ImGui::SliderFloat("凹凸の強さ", &st.bumpIntensity, 0.0f, 2.0f, "%.2f")) st.materialsDirty = true;
+                {
+                    // レジストの色：設定どおり／プリセット（色・粗さ・散乱をまとめて切り替え、累積をやり直す）
+                    const char* current = st.maskChoice < 0 ? "設定どおり" : maskPresets[st.maskChoice].name.c_str();
+                    ImGui::SetNextItemWidth(200);
+                    if (ImGui::BeginCombo("レジスト", current)) {
+                        if (ImGui::Selectable("設定どおり", st.maskChoice < 0) && st.maskChoice != -1) {
+                            st.maskChoice = -1;
+                            st.maskChanged = true;
+                        }
+                        for (size_t i = 0; i < maskPresets.size(); ++i) {
+                            const bool sel = st.maskChoice == static_cast<int>(i);
+                            if (ImGui::Selectable(maskPresets[i].name.c_str(), sel) && !sel) {
+                                st.maskChoice = static_cast<int>(i);
+                                st.maskChanged = true;
+                            }
+                            if (ImGui::IsItemHovered() && !maskPresets[i].note.empty())
+                                ImGui::SetTooltip("%s", maskPresets[i].note.c_str());
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
 
                 ImGui::SeparatorText("表示");
                 int mode = static_cast<int>(st.mode);
@@ -808,6 +848,22 @@ int cmdView(const ViewOptions& vo) {
                 }
                 st.dirty = true;
             }
+            // レジストの色の切り替え。cfg.scene は読み直しの裏のスレッドも読むので、読み直し中は待つ
+            if (st.maskChanged && !reloadJob.valid()) {
+                st.maskChanged = false;
+                if (st.maskChoice < 0) {
+                    cfg.scene.maskColor = sceneAsConfigured.maskColor;
+                    cfg.scene.maskColorSet = sceneAsConfigured.maskColorSet;
+                    cfg.scene.maskRoughness = sceneAsConfigured.maskRoughness;
+                    cfg.scene.maskScatter = sceneAsConfigured.maskScatter;
+                    cfg.scene.maskPreset = sceneAsConfigured.maskPreset;
+                    cfg.scene.silkColor = sceneAsConfigured.silkColor;
+                } else {
+                    applyMaskColorSpec(cfg.scene, maskPresets[st.maskChoice].name, nullptr);
+                }
+                scene::updateMaskMaterial(prep->scene, prep->board, cfg.scene);
+                st.materialsDirty = true;
+            }
             if (st.materialsDirty) {
                 gpu.updateMaterials(prep->scene.materials, st.bumpIntensity);
                 st.materialsDirty = false;
@@ -872,14 +928,18 @@ int cmdView(const ViewOptions& vo) {
             // このフレームでノイズ除去するか（画像の表示のときだけ）
             const bool moving = Clock::now() - lastChangeAt < std::chrono::milliseconds(300);
             const uint32_t samplesAfter = prog.samples() + add;
+            // GPU（CUDA）：動かしている間は毎フレーム fast、止まったら 150 ms ごとに high、収束時にもう一度。
+            // CPU：数秒かかり画面が止まるので、収束時（最大 spp に達したとき）と D キー／ボタンのときだけ high でかける
+            const bool denoiseDue = denoiseOnCpu ? (samplesAfter >= maxSpp || st.denoiseRequested)
+                                                 : (moving || samplesAfter >= maxSpp ||
+                                                    Clock::now() - lastDenoiseAt > std::chrono::milliseconds(150));
             const bool wantDenoise = st.denoise && denoiser.ready() && st.mode == render::DisplayMode::Beauty &&
                                      samplesAfter > 0 &&
-                                     (denoisedEpoch != accumEpoch || denoisedSamples != samplesAfter) &&
-                                     (moving || samplesAfter >= maxSpp ||
-                                      Clock::now() - lastDenoiseAt > std::chrono::milliseconds(150));
+                                     (denoisedEpoch != accumEpoch || denoisedSamples != samplesAfter) && denoiseDue;
+            st.denoiseRequested = false;
             if (wantDenoise) {
-                // サンプルの追加と入力の準備を先に流し、OIDN（GPU）で除去してから表示のコマンドを作る
-                denoiser.setQuality(moving ? render::DenoiseQuality::Fast : render::DenoiseQuality::High);
+                // サンプルの追加と入力の準備を先に流し、OIDN で除去してから表示のコマンドを作る
+                denoiser.setQuality(moving && !denoiseOnCpu ? render::DenoiseQuality::Fast : render::DenoiseQuality::High);
                 ctx.submitAndWait([&](VkCommandBuffer c) {
                     vkCmdResetQueryPool(c, timestamps, 0, 2);
                     vkCmdWriteTimestamp2(c, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestamps, 0);

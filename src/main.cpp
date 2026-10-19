@@ -37,6 +37,7 @@ void addCommonOptions(CLI::App* c, krbr::app::RenderOptions& ro) {
     c->add_flag("--denoise,!--no-denoise", ro.denoise, "denoise with OIDN (default: on for view/watch, off for render)");
     c->add_flag("--spectral,!--rgb", ro.spectral, "spectral rendering (hero wavelengths) or RGB (default: RGB)");
     c->add_option("--lens", ro.lens, "camera lens: pinhole (default), thin, realistic");
+    c->add_option("--mask-color", ro.maskColor, "solder mask: preset name (see: krbr mask list) or r,g,b in sRGB");
     c->add_option("--f-number", ro.fNumber, "thin lens f-number");
     c->add_option("--focal-length", ro.focalLength, "thin lens focal length (mm)");
     c->add_option("--focus-distance", ro.focusDistance, "focus distance (mm, default: distance to the look-at point)");
@@ -52,7 +53,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> args(argv, argv + argc);
     for (size_t i = 1; i < args.size(); ++i) {
         if (!args[i].empty() && args[i][0] == '-') continue;
-        if (args[i] != "probe" && args[i] != "info" && args[i] != "render" && args[i] != "view" && args[i] != "material" && args[i] != "watch")
+        if (args[i] != "probe" && args[i] != "info" && args[i] != "render" && args[i] != "view" && args[i] != "material" && args[i] != "watch" && args[i] != "mask")
             args.insert(args.begin() + static_cast<std::ptrdiff_t>(i), "view");
         break;
     }
@@ -121,6 +122,9 @@ int main(int argc, char** argv) {
     mshow->add_option("pcb", showPcb, ".kicad_pcb file")->required()->check(CLI::ExistingFile);
     mshow->add_option("--ref", showRef, "only this reference");
     auto* mlist = material->add_subcommand("list", "list materials in the material library");
+    auto* mask = app.add_subcommand("mask", "solder mask color presets");
+    mask->require_subcommand(1);
+    auto* masklist = mask->add_subcommand("list", "list solder mask presets (KiCad names and manufacturers' choices)");
 
     try {
         app.parse(static_cast<int>(cargs.size()), cargs.data());
@@ -140,5 +144,6 @@ int main(int argc, char** argv) {
     if (*mset) return app::cmdMaterialSet(mso);
     if (*mshow) return app::cmdMaterialShow(showPcb, showRef);
     if (*mlist) return app::cmdMaterialList();
+    if (*masklist) return app::cmdMaskList();
     return 1;
 }

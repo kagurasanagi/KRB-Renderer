@@ -25,6 +25,7 @@ struct RenderOptions {
     std::optional<bool> denoise;  // ノイズ除去（render は既定で無効、view / watch は既定で有効）
     std::optional<bool> spectral;  // 分光モード（既定は設定ファイル、無ければ RGB）
     std::string lens;              // pinhole / thin / realistic（空なら設定ファイル）
+    std::string maskColor;         // レジストの色：プリセット名か r,g,b（空なら設定ファイル／stackup）
     std::optional<float> fNumber, focalLength, focusDistance;
     std::optional<int> blades;
 };
@@ -41,6 +42,7 @@ struct ViewOptions {
 };
 
 int cmdProbe();
+int cmdMaskList();
 int cmdView(const ViewOptions& o);
 int cmdInfo(const std::string& pcb, bool resolveModels);
 int cmdRender(const RenderOptions& o);

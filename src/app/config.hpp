@@ -41,6 +41,8 @@ struct ProjectConfig {
 fs::path projectConfigDir(const fs::path& pcbFile);
 // 既定値に、見つかった設定ファイルの内容を重ねる。失敗したファイルは警告して無視
 ProjectConfig loadProjectConfig(const fs::path& pcbFile);
+// レジストの色の指定（プリセット名 "jlcpcb-purple" など、または "r,g,b"）を SceneOptions に反映する
+bool applyMaskColorSpec(scene::SceneOptions& o, const std::string& spec, std::string* err);
 std::string defaultBoardToml();
 std::string defaultEnvironmentToml();
 // --init：既定の設定ファイルを書き出す（既存のファイルは上書きしない）

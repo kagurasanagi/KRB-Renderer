@@ -1,5 +1,8 @@
 #include "app/commands.hpp"
 
+#include "scene/mask_presets.hpp"
+#include <cstdio>
+
 #include "app/prepare.hpp"
 #include "app/report.hpp"
 #include "core/log.hpp"
@@ -12,6 +15,14 @@
 namespace krbr::app {
 
 namespace fs = std::filesystem;
+
+int cmdMaskList() {
+    std::printf("%-20s %-18s %-6s %-7s %s\n", "name", "sRGB", "rough", "scatter", "note");
+    for (const auto& p : scene::maskPresets())
+        std::printf("%-20s %.2f %.2f %.2f     %-6.2f %-7.2f %s\n", p.name.c_str(), p.srgb.r, p.srgb.g, p.srgb.b,
+                    p.roughness, p.scatter, p.note.c_str());
+    return 0;
+}
 
 int cmdProbe() {
     try {

@@ -1,6 +1,8 @@
 #pragma once
 // 基板表面の凹凸（銅箔・レジスト・シルクの厚み）を実際の形状として作る。
 // 領域ごとに上面と側壁を作り、側壁は基材の面まで下ろす（隣の高い領域の中に入る部分は見えない）。
+#include <vector>
+
 #include "geom/board_mesh.hpp"
 
 namespace krbr::geom {
@@ -10,6 +12,7 @@ struct ReliefParams {
     double maskOnCopper = 0.012;     // 銅の上のレジスト
     double maskOnSubstrate = 0.025;  // 基材の上のレジスト（銅の間を埋めるので厚い）
     double silk = 0.015;             // シルク
+    double viaDimple = 0.05;         // レジストでふさがれたビアのくぼみの深さ（0 で平ら）
 };
 
 // 凹凸メッシュの三角形ごとの材質区分
@@ -21,10 +24,18 @@ enum ReliefMat : uint32_t {
     ReliefSilk = 4,
 };
 
+// レジストでふさがれたビア：レジストが穴に落ち込んでできる浅いすり鉢状のくぼみ
+struct ReliefDimple {
+    Vec2 pos;           // 基板座標
+    double radius;      // ドリルの半径
+    bool build = true;  // くぼみの面を作る（タイル単位のときは中心を含むタイルだけ。平らな面からの除去は全タイル）
+};
+
 struct ReliefInput {
     Paths copper, maskOpen, silk;  // 面ごとの多角形（layer_art::collectSidePaths）
     Paths tentedHoles;             // レジストでふさがれたビアの穴（面を張る）
     const Paths* base = nullptr;   // 面を張る範囲を前もって求めてある場合（タイル単位で作るとき）
+    std::vector<ReliefDimple> dimples;  // ふさがれたビアのくぼみ
 };
 
 // 面を張る範囲：穴を開けた基板＋レジストでふさがれたビアの穴

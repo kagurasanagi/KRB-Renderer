@@ -89,6 +89,10 @@ std::unique_ptr<PreparedScene> prepareScene(const RenderOptions& o, const fs::pa
     if (o.envRotation) cfg.envRotationDeg = *o.envRotation;
     if (o.radianceClamp) cfg.radianceClamp = *o.radianceClamp;
     if (o.spectral) cfg.spectral = *o.spectral;
+    if (!o.maskColor.empty()) {
+        std::string err;
+        if (!applyMaskColorSpec(cfg.scene, o.maskColor, &err)) log::warn("--mask-color: {}", err);
+    }
     if (!o.lens.empty()) {
         cfg.lens.model = o.lens == "thin"        ? scene::LensModel::Thin
                          : o.lens == "realistic" ? scene::LensModel::Realistic

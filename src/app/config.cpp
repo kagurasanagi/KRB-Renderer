@@ -1,5 +1,9 @@
 #include "app/config.hpp"
 
+#include <cstdio>
+
+#include "scene/mask_presets.hpp"
+
 #include <toml++/toml.hpp>
 
 #include "core/log.hpp"
@@ -16,9 +20,10 @@ const char* kBoardToml = R"(# krbr: 基板の設定（このファイルが無�
 [board]
 finish = "auto"              # auto（stackup の copper_finish に従う）/ ENIG / HASL / OSP
 # mask_color = [0.05, 0.42, 0.16]   # 省略時は stackup の色、それも無ければ緑
+# mask_color = "jlcpcb-purple"       # またはプリセット名（色・粗さ・散乱をまとめて設定。krbr mask list で一覧）
 mask_roughness = 0.18
 mask_scatter = 0.3           # レジストの顔料自身が光を散らす割合
-silk_color = [0.93, 0.93, 0.90]
+# silk_color = [0.93, 0.93, 0.90]   # 省略時は白。レジストのプリセットが黄・白なら黒
 fr4_color = [0.62, 0.58, 0.42]
 clip_silk_by_mask = true     # レジストの開口部ではシルクを印刷しない
 texture_px_per_mm = 50       # 層テクスチャの解像度（50 = 20 µm/px）
@@ -30,6 +35,7 @@ enabled = true
 mask_on_copper_um = 12
 mask_on_substrate_um = 25    # 銅の間を埋めるので、銅の上より厚い
 silk_um = 15
+via_dimple_um = 50           # レジストでふさがれた（テンティング）ビアのくぼみの深さ。0 で平ら
 
 [surface]
 bump_intensity = 0.25        # 表面の微細な凹凸（ゆず肌・織り目・粒状感）の強さの倍率。0 で無効
@@ -123,6 +129,30 @@ fs::path projectConfigDir(const fs::path& pcbFile) {
 }
 
 std::string defaultBoardToml() { return kBoardToml; }
+
+bool applyMaskColorSpec(scene::SceneOptions& o, const std::string& spec, std::string* err) {
+    if (const scene::MaskPreset* p = scene::findMaskPreset(spec)) {
+        o.maskColor = p->srgb;
+        o.maskColorSet = true;
+        o.maskRoughness = p->roughness;
+        o.maskScatter = p->scatter;
+        o.maskPreset = p->name;
+        if (!o.silkColorSet) o.silkColor = p->silkSrgb;  // 黄・白のレジストでは黒いシルク
+        return true;
+    }
+    float r = 0, g = 0, bl = 0;
+    if (std::sscanf(spec.c_str(), "%f,%f,%f", &r, &g, &bl) == 3) {
+        o.maskColor = {r, g, bl};
+        o.maskColorSet = true;
+        o.maskPreset.clear();
+        return true;
+    }
+    if (err) {
+        *err = "'" + spec + "' is not a mask preset or r,g,b. Presets:";
+        for (const auto& p : scene::maskPresets()) *err += " " + p.name;
+    }
+    return false;
+}
 std::string defaultEnvironmentToml() { return kEnvironmentToml; }
 
 ProjectConfig loadProjectConfig(const fs::path& pcbFile) {
@@ -135,10 +165,15 @@ ProjectConfig loadProjectConfig(const fs::path& pcbFile) {
         auto b = root["board"];
         auto& o = c.scene;
         o.finish = b["finish"].value_or(o.finish);
-        o.maskColor = readColor(b["mask_color"], o.maskColor, &o.maskColorSet);
+        if (auto name = b["mask_color"].value<std::string>()) {
+            std::string err;
+            if (!applyMaskColorSpec(o, *name, &err)) log::warn("board.toml mask_color: {}", err);
+        } else {
+            o.maskColor = readColor(b["mask_color"], o.maskColor, &o.maskColorSet);
+        }
         readNum(b["mask_roughness"], o.maskRoughness);
         readNum(b["mask_scatter"], o.maskScatter);
-        o.silkColor = readColor(b["silk_color"], o.silkColor);
+        o.silkColor = readColor(b["silk_color"], o.silkColor, &o.silkColorSet);
         o.fr4Color = readColor(b["fr4_color"], o.fr4Color);
         o.layerArt.clipSilkByMask = b["clip_silk_by_mask"].value_or(o.layerArt.clipSilkByMask);
         readNum(b["texture_px_per_mm"], o.layerArt.pxPerMm);
@@ -152,6 +187,7 @@ ProjectConfig loadProjectConfig(const fs::path& pcbFile) {
         if (auto v = rel["mask_on_copper_um"].value<double>()) o.reliefParams.maskOnCopper = *v / 1000.0;
         if (auto v = rel["mask_on_substrate_um"].value<double>()) o.reliefParams.maskOnSubstrate = *v / 1000.0;
         if (auto v = rel["silk_um"].value<double>()) o.reliefParams.silk = *v / 1000.0;
+        if (auto v = rel["via_dimple_um"].value<double>()) o.reliefParams.viaDimple = *v / 1000.0;
         readNum(root["surface"]["bump_intensity"], o.bumpIntensity);
         auto ph = root["placeholder"];
         readNum(ph["height_mm"], o.placeholderHeight);
