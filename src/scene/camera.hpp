@@ -18,9 +18,15 @@ struct Camera {
     glm::vec3 forward{0, 0, -1}, right{1, 0, 0}, up{0, 1, 0};
     float tanHalfFovY = 0.27f;
     float aspect = 16.0f / 9.0f;
+    glm::vec3 target{0.0f};  // 注視点
+    float distance = 100.0f;  // 注視点までの距離（mm）
 };
 
 // 指定した点がすべて画面に収まるように距離と注視点を決める
 Camera frameCamera(const CameraParams& p, const std::vector<glm::vec3>& points);
+
+// 注視点のまわりを回るカメラ（ビューアの操作用）
+Camera orbitCamera(glm::vec3 target, float distance, double elevationDeg, double azimuthDeg, double fovDeg,
+                   float aspect);
 
 }  // namespace krbr::scene

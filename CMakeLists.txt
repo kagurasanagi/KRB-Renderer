@@ -23,6 +23,7 @@ find_package(tinyexr CONFIG REQUIRED)
 find_package(clipper2 CONFIG REQUIRED)
 find_package(CLI11 CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
+find_package(glfw3 CONFIG REQUIRED)
 find_path(STB_INCLUDE_DIRS "stb_image.h" REQUIRED)
 find_path(EARCUT_HPP_INCLUDE_DIRS "mapbox/earcut.hpp" REQUIRED)
 
@@ -35,7 +36,7 @@ find_program(GLSLC glslc HINTS "$ENV{VULKAN_SDK}/Bin" REQUIRED)
 set(SHADER_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
 set(SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/shaders")
 file(GLOB SHADER_INCLUDES CONFIGURE_DEPENDS "${SHADER_SRC_DIR}/*.glsl")
-set(SHADER_SOURCES "${SHADER_SRC_DIR}/pathtrace.comp")
+set(SHADER_SOURCES "${SHADER_SRC_DIR}/pathtrace.comp" "${SHADER_SRC_DIR}/tonemap.comp")
 set(SHADER_OUTPUTS)
 foreach(src ${SHADER_SOURCES})
   get_filename_component(name ${src} NAME)
@@ -59,7 +60,7 @@ target_include_directories(krbr PRIVATE src ${STB_INCLUDE_DIRS} ${EARCUT_HPP_INC
 target_link_libraries(krbr PRIVATE
   Vulkan::Headers volk::volk GPUOpen::VulkanMemoryAllocator
   tomlplusplus::tomlplusplus nlohmann_json::nlohmann_json
-  unofficial::tinyexr::tinyexr Clipper2::Clipper2 CLI11::CLI11 glm::glm)
+  unofficial::tinyexr::tinyexr Clipper2::Clipper2 CLI11::CLI11 glm::glm glfw)
 target_compile_definitions(krbr PRIVATE VK_NO_PROTOTYPES GLM_FORCE_DEPTH_ZERO_TO_ONE)
 if(WIN32)
   target_compile_definitions(krbr PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)

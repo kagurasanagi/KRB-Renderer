@@ -14,6 +14,7 @@
     "earcut-hpp",
     "cli11",
     "glm",
+    "glfw3",
     { "name": "opencascade", "default-features": false }
   ]
 }

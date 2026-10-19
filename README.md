@@ -1,11 +1,35 @@
 # krbr — KiCad 連携 物理レンダラ（フェーズ1）
 
-KiCad の `.kicad_pcb` を読み込み、HDR 環境光で照らした基板を、Vulkan のレイトレーシング（`VK_KHR_ray_query`）を使った GPU パストレーサーで描画するコマンドラインツールです。
-ウィンドウは一切開かず（サーフェス／スワップチェーンを作らない）、結果はファイルにだけ出力します。
+KiCad の `.kicad_pcb` を読み込み、HDR 環境光で照らした基板を、Vulkan のレイトレーシング（`VK_KHR_ray_query`）を使った GPU パストレーサーで描画するツールです。
 
 ```
+# リアルタイム表示（既定。ウィンドウが開く）
+krbr kicad/mini_dsp_radio.kicad_pcb --hdr hdr/historic_cloister_passage_4k.exr
+
+# ファイルへ出力（ウィンドウは開かない）
 krbr render kicad/mini_dsp_radio.kicad_pcb --hdr hdr/historic_cloister_passage_4k.exr --spp 256 --width 1920 --height 1080 --out out/board.png
 ```
+
+### リアルタイム表示（`krbr <pcb>` / `krbr view <pcb>`）
+
+フレームごとにサンプルを積み増して表示します。1フレームに積むサンプル数は、GPU のタイムスタンプで測った時間が約 10 ms に収まるように自動で調整します。`--spp`（既定 1024）まで積むと描画を止め、GPU を休ませて入力を待ちます。
+
+| 操作 | 内容 |
+|---|---|
+| 左ドラッグ | 回転（方位・仰角） |
+| 右／中ドラッグ | 平行移動 |
+| ホイール | 拡大・縮小 |
+| `R` / `F` | カメラを初期位置（基板全体が入る構図）に戻す |
+| `+` / `-` | 露出 ±0.25 EV（表示だけ。累積はやり直さない） |
+| `[` / `]` | 環境マップを ±15° 回す |
+| `1` / `2` / `3` | 画像 / アルベド / 法線 の表示 |
+| `S` | 現在の累積を `--out`（既定 `out/view.png`）を元に `view_000.png` / `.exr` として保存 |
+| `Esc` | 終了 |
+
+ウィンドウのタイトルに、積んだサンプル数・フレーム時間・露出を表示します。
+開発用に、非表示のウィンドウで描いて終了するテストモードがあります（`--test-frames N --screenshot path [--test-orbit 度]`）。画面には出ず、フォーカスも奪いません。
+
+### ファイル出力（`krbr render`）
 
 出力（`--out` と同じフォルダ）:
 
@@ -31,6 +55,7 @@ release だけをビルドする独自トリプレット `triplets/x64-windows-r
 | ライブラリ | 用途 |
 |---|---|
 | volk, Vulkan-Headers, VulkanMemoryAllocator | Vulkan（ローダーは動的読み込み） |
+| GLFW 3.4 | リアルタイム表示のウィンドウと入力 |
 | OpenCASCADE 8.0（TKDESTEP / TKXCAF / TKMesh / TKRWMesh） | STEP の読み込みと三角形分割（面の色つき） |
 | Clipper2, earcut.hpp | 多角形の和・差・オフセット、三角形分割 |
 | tinyexr, stb | EXR/HDR の入出力、PNG 出力 |
@@ -42,15 +67,17 @@ release だけをビルドする独自トリプレット `triplets/x64-windows-r
 |---|---|
 | `krbr probe` | Vulkan デバイスとレイトレーシング拡張の確認、ヘッドレスデバイスの作成 |
 | `krbr info <pcb> [--models]` | 基板の解析結果と 3D モデルのパス解決の確認（GPU は使わない） |
-| `krbr render <pcb> --hdr <file> [options]` | レンダリング |
+| `krbr <pcb> --hdr <file>`（= `krbr view`） | リアルタイム表示 |
+| `krbr render <pcb> --hdr <file> [options]` | ファイルへ出力 |
 
 `render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--init`, `--no-cache`, `--no-kicad-cli`, `--debug-layers`（層テクスチャを PNG で出力）, `--validate`, `--normal-priority`, `-v`。
 
 ## 作業中の PC への配慮
 
-- ウィンドウ・サーフェス・スワップチェーンを作りません。画像を自動で開くこともしません。
+- `render` / `probe` / `info` では、ウィンドウ・サーフェス・スワップチェーンを作りません。画像を自動で開くこともしません。
+- `view` は収束したら（`--spp` に達したら）描画を止めて入力を待つので、表示したままでも GPU をほとんど使いません。
 - プロセスは BELOW_NORMAL 優先度で動きます（`--normal-priority` で解除）。
-- GPU は**グラフィックスを持たない計算専用キュー**を、`VK_KHR_global_priority` が使えれば **LOW** で使います。
+- GPU は、`render` では**グラフィックスを持たない計算専用キュー**を使います。`view` では、画面へ表示できるキューを使います。どちらも `VK_KHR_global_priority` が使えれば **LOW** で作ります。
 - 1 サンプルずつ投入して完了を待つので、GPU を長時間占有しません。既定のサンプル数は 64 です。
 - `.kicad_pcb`、KiCad のライブラリ・設定は読み取りのみです。
   - kicad-cli はプロジェクトフォルダに `.kicad_prl` を作るので、基板を**一時フォルダへコピーしてから**呼び出します。
@@ -85,9 +112,9 @@ HDR ─────────────────────────�
 | raster | `rasterizer`, `layer_art`, `svg_reader` | 層ごとの多角形を基板面テクスチャ（R=銅, G=レジスト開口, B=シルク）へ描き込む。アンチエイリアス付き、マルチスレッド。kicad-cli の SVG の読み込み |
 | model | `model_mesh`, `step_loader`, `mesh_cache` | `IModelLoader`（形式ごとの読み込み器）、STEP（OCCT XCAF、面の色つき）、ディスクキャッシュ |
 | scene | `scene_builder`, `model_map`, `camera`, `material` | 材質（OpenPBR の名前）、部品の配置（KiCad 3D ビューアと同じ変換の順序）、代替の箱、カメラの自動調整 |
-| render | `vk/context`, `gpu_scene`, `env_map`, `integrator`, `path_tracer`, `renderer` | ヘッドレス Vulkan、BLAS/TLAS、環境マップの分布、積分器、サンプルの投入と読み戻し |
+| render | `vk/context`, `gpu_scene`, `env_map`, `integrator`, `path_tracer`, `progressive`, `renderer`, `tonemapper` | Vulkan（表示は必要なときだけ）、BLAS/TLAS、環境マップの分布、積分器、累積の管理（`Progressive`：オフラインとビューアで共通）、表示用のトーンマッピング |
 | io | `image_io` | HDR/EXR の読み込み、PNG（トーンマッピング）・EXR の書き出し |
-| app | `config`, `kicad_cli`, `report`, `commands` | 設定ファイル、kicad-cli の呼び出し、missing_models の出力、各コマンド |
+| app | `config`, `kicad_cli`, `report`, `prepare`, `commands`, `viewer` | 設定ファイル、kicad-cli の呼び出し、missing_models の出力、シーンの準備（render / view 共通）、各コマンド、リアルタイム表示（GLFW、スワップチェーン、操作） |
 | shaders | `pathtrace.comp`, `bsdf.glsl`, `env.glsl`, `sampling.glsl`, `common.glsl` | パストレーサー本体、BSDF、環境マップの重点的サンプリング |
 
 ### 座標系
@@ -118,7 +145,7 @@ HDR ─────────────────────────�
 |---|---|
 | **BDPT / VCM** | `render/integrator.hpp` の `Integrator` を実装し、`createIntegrator()` に名前を足します。`GpuScene`（ジオメトリ・材質・TLAS・環境マップの分布）と `RenderTargets`（RGBA32F の累積、A=サンプル数）は共通なので、レンダラや出力側は変更不要です。光源側の経路や画面への投影の書き込み（splat）用のバッファは、積分器が自分で持ちます。 |
 | **分光レンダリング** | BSDF は `shaders/bsdf.glsl` に、材質の取り出しは `shadeFromMaterial` / `boardShade` に閉じています。`Shade` を波長サンプルの値に置き換え、`envRadiance` をスペクトルに持ち上げる形で対応できます。材質のパラメータ名は OpenPBR に合わせています。 |
-| **KiCad の保存を監視してリアルタイム更新** | 解析（`kicad::loadBoard`）→ `scene::buildScene` → `GpuScene::build` が分かれていて、STEP の分割はキャッシュされます。変更時は基板メッシュと層テクスチャだけを作り直し、累積を 0 からやり直せば済みます（`recordSample(…, 0)` で累積が初期化されます）。 |
+| **KiCad の保存を監視してリアルタイム更新** | ビューア（`app/viewer.cpp`）のループに、ファイルの変更検知を足します。解析（`kicad::loadBoard`）→ `scene::buildScene` → `GpuScene::build` は分かれていて、STEP の分割はキャッシュされます。変更時はシーンを作り直して `Progressive::setFrame` で累積を 0 からやり直せば済みます。 |
 | **モデル形式の追加（VRML など）** | `model::IModelLoader` を実装して `ModelLibrary` に登録します。キャッシュはそのまま使えます。 |
 | **材質の対応表の拡充** | `model_map.toml` の `[presets.*]` と `[[rules]]`（ファイル名のワイルドカード、HSV の条件）。 |
 | **ノイズ除去** | `*_albedo.exr` / `*_normal.exr` を出しているので、OIDN などを後段に追加できます。 |

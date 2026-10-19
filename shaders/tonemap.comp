@@ -1,0 +1,52 @@
+#version 460
+// 表示用：累積画像を ACES（Hill 近似）でトーンマッピングし sRGB の RGBA8 にする。
+// io/image_io.cpp の savePngTonemapped と同じ式にそろえること
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D accumColor;
+layout(set = 0, binding = 1, rgba32f) uniform readonly image2D accumAlbedo;
+layout(set = 0, binding = 2, rgba32f) uniform readonly image2D accumNormal;
+layout(set = 0, binding = 3, rgba8) uniform writeonly image2D outImage;
+
+layout(push_constant) uniform Push {
+    float exposureScale;
+    uint mode;  // 0: 画像, 1: アルベド, 2: 法線
+    uint width;
+    uint height;
+} pc;
+
+vec3 acesFitted(vec3 c) {
+    const mat3 inM = mat3(0.59719, 0.07600, 0.02840, 0.35458, 0.90834, 0.13383, 0.04823, 0.01566, 0.83777);
+    const mat3 outM = mat3(1.60475, -0.10208, -0.00327, -0.53108, 1.10813, -0.07276, -0.07367, -0.00605, 1.07602);
+    vec3 v = inM * c;
+    vec3 a = v * (v + 0.0245786) - 0.000090537;
+    vec3 b = v * (0.983729 * v + 0.4329510) + 0.238081;
+    return outM * (a / b);
+}
+
+vec3 linearToSrgb(vec3 x) {
+    x = clamp(x, 0.0, 1.0);
+    return mix(12.92 * x, 1.055 * pow(x, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), x));
+}
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= pc.width || p.y >= pc.height) return;
+    ivec2 ip = ivec2(p);
+    vec3 c;
+    if (pc.mode == 1u) {
+        vec4 a = imageLoad(accumAlbedo, ip);
+        c = linearToSrgb(a.a > 0.0 ? a.rgb / a.a : vec3(0.0));
+    } else if (pc.mode == 2u) {
+        vec4 n = imageLoad(accumNormal, ip);
+        c = n.a > 0.0 ? n.rgb / n.a * 0.5 + 0.5 : vec3(0.0);
+    } else {
+        vec4 a = imageLoad(accumColor, ip);
+        vec3 l = a.a > 0.0 ? max(a.rgb / a.a, vec3(0.0)) * pc.exposureScale : vec3(0.0);
+        c = linearToSrgb(acesFitted(l));
+        // 量子化の縞を減らす小さなディザ
+        uint i = p.y * pc.width + p.x;
+        c += (float((i * 2654435761u) & 255u) / 255.0 - 0.5) / 255.0;
+    }
+    imageStore(outImage, ip, vec4(clamp(c, 0.0, 1.0), 1.0));
+}

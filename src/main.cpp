@@ -1,12 +1,56 @@
-// krbr: KiCad の基板を物理ベースでオフスクリーン描画するコマンドラインツール
+// krbr: KiCad の基板を物理ベースで描画するツール（既定はリアルタイム表示、render でファイル出力）
 #include <CLI/CLI.hpp>
+
+#include <string>
+#include <vector>
 
 #include "app/commands.hpp"
 #include "core/log.hpp"
 
+namespace {
+
+// render / view 共通のオプション
+void addCommonOptions(CLI::App* c, krbr::app::RenderOptions& ro) {
+    c->add_option("pcb", ro.pcb, ".kicad_pcb file")->required()->check(CLI::ExistingFile);
+    c->add_option("--hdr", ro.hdr, "equirectangular environment map (.hdr / .exr)");
+    c->add_option("--width", ro.width, "image / window width");
+    c->add_option("--height", ro.height, "image / window height");
+    c->add_option("--max-depth", ro.maxDepth, "maximum path depth");
+    c->add_option("--elevation", ro.elevation, "camera elevation above the board (deg, default 35)");
+    c->add_option("--azimuth", ro.azimuth, "camera azimuth (deg, default 45)");
+    c->add_option("--fov", ro.fov, "vertical field of view (deg, default 30)");
+    c->add_option("--exposure", ro.exposure, "exposure (EV)");
+    c->add_option("--env-intensity", ro.envIntensity, "environment intensity multiplier");
+    c->add_option("--env-rotation", ro.envRotation, "environment rotation around the vertical axis (deg)");
+    c->add_option("--clamp", ro.radianceClamp, "clamp per-sample radiance (0 = off)");
+    c->add_option("--integrator", ro.integrator, "integrator (pt)");
+    c->add_option("--seed", ro.seed, "random seed");
+    c->add_flag("--init", ro.init, "write default config files (<project>.krbr/*.toml) if missing");
+    c->add_flag("--no-cache", ro.noCache, "do not read or write the mesh cache");
+    c->add_flag("--no-kicad-cli", ro.noKicadCli, "do not call kicad-cli for stroke-font text");
+    c->add_flag("--validate", ro.validate, "enable Vulkan validation layer");
+    c->add_flag("--normal-priority", ro.normalPriority, "do not lower process priority");
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
     using namespace krbr;
-    CLI::App app{"krbr - physically based renderer for KiCad boards (offscreen, Vulkan ray tracing)"};
+
+    // サブコマンドを省略して `krbr board.kicad_pcb ...` と書いたら view とみなす
+    std::vector<std::string> args(argv, argv + argc);
+    for (size_t i = 1; i < args.size(); ++i) {
+        if (!args[i].empty() && args[i][0] == '-') continue;
+        if (args[i] != "probe" && args[i] != "info" && args[i] != "render" && args[i] != "view")
+            args.insert(args.begin() + static_cast<std::ptrdiff_t>(i), "view");
+        break;
+    }
+    std::vector<char*> cargs;
+    for (auto& a : args) cargs.push_back(a.data());
+
+    CLI::App app{"krbr - physically based renderer for KiCad boards (Vulkan ray tracing)\n"
+                 "  krbr <pcb> --hdr <env>          real-time viewer (window)\n"
+                 "  krbr render <pcb> --hdr <env>   offscreen render to PNG / EXR"};
     app.require_subcommand(1);
     bool verbose = false;
     app.add_flag("-v,--verbose", verbose, "debug log");
@@ -20,36 +64,34 @@ int main(int argc, char** argv) {
     info->add_flag("--models", infoModels, "resolve 3D model paths");
 
     app::RenderOptions ro;
-    auto* render = app.add_subcommand("render", "render a board to PNG (tone mapped) and EXR (linear)");
-    render->add_option("pcb", ro.pcb, ".kicad_pcb file")->required()->check(CLI::ExistingFile);
-    render->add_option("--hdr", ro.hdr, "equirectangular environment map (.hdr / .exr)");
+    auto* render = app.add_subcommand("render", "render offscreen to PNG (tone mapped) and EXR (linear)");
+    addCommonOptions(render, ro);
     render->add_option("--out,-o", ro.out, "output PNG path (EXR and AOVs are written next to it)")
         ->capture_default_str();
     render->add_option("--spp", ro.spp, "samples per pixel (default 64)");
-    render->add_option("--width", ro.width, "image width");
-    render->add_option("--height", ro.height, "image height");
-    render->add_option("--max-depth", ro.maxDepth, "maximum path depth");
-    render->add_option("--elevation", ro.elevation, "camera elevation above the board (deg, default 35)");
-    render->add_option("--azimuth", ro.azimuth, "camera azimuth (deg, default 45)");
-    render->add_option("--fov", ro.fov, "vertical field of view (deg, default 30)");
-    render->add_option("--exposure", ro.exposure, "exposure for the PNG (EV)");
-    render->add_option("--env-intensity", ro.envIntensity, "environment intensity multiplier");
-    render->add_option("--env-rotation", ro.envRotation, "environment rotation around the vertical axis (deg)");
-    render->add_option("--clamp", ro.radianceClamp, "clamp per-sample radiance (0 = off)");
-    render->add_option("--integrator", ro.integrator, "integrator (pt)");
-    render->add_option("--seed", ro.seed, "random seed");
-    render->add_flag("--init", ro.init, "write default config files (<project>.krbr/*.toml) if missing");
-    render->add_flag("--no-cache", ro.noCache, "do not read or write the mesh cache");
-    render->add_flag("--no-kicad-cli", ro.noKicadCli, "do not call kicad-cli for stroke-font text");
-    render->add_flag("--validate", ro.validate, "enable Vulkan validation layer");
-    render->add_flag("--normal-priority", ro.normalPriority, "do not lower process priority");
     render->add_flag("--debug-layers", ro.debugLayers, "also write the rasterized layer textures as PNG");
 
-    CLI11_PARSE(app, argc, argv);
+    app::ViewOptions vo;
+    vo.common.out = "out/view.png";
+    auto* view = app.add_subcommand("view", "real-time viewer window (default command)");
+    addCommonOptions(view, vo.common);
+    view->add_option("--spp", vo.common.spp, "stop accumulating at this many samples per pixel (default 1024)");
+    view->add_option("--out,-o", vo.common.out, "base path for images saved with the S key")->capture_default_str();
+    view->add_option("--test-frames", vo.testFrames, "development: render N frames in a hidden window, then exit");
+    view->add_option("--screenshot", vo.screenshot, "development: save the displayed image (with --test-frames)");
+    view->add_flag("--hidden", vo.hidden, "do not show the window");
+    view->add_option("--test-orbit", vo.testOrbitDeg, "development: rotate the camera by this many degrees per frame");
+
+    try {
+        app.parse(static_cast<int>(cargs.size()), cargs.data());
+    } catch (const CLI::ParseError& e) {
+        return app.exit(e);
+    }
     if (verbose) log::setLevel(log::Level::Debug);
 
     if (*probe) return app::cmdProbe();
     if (*info) return app::cmdInfo(infoPcb, infoModels);
     if (*render) return app::cmdRender(ro);
+    if (*view) return app::cmdView(vo);
     return 1;
 }

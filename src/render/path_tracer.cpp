@@ -29,24 +29,13 @@ public:
 
     void setup(vk::Context& ctx, const GpuScene& sc, const RenderTargets& targets, const FrameParams& fp) override {
         ctx_ = &ctx;
+        scene_ = &sc;
         targets_ = targets;
-        seed_ = fp.seed;
         VkDevice dev = ctx.device();
 
-        // ---- 定数
-        FrameUBO u{};
-        const auto& cam = fp.camera;
-        u.camPos = {cam.position, 0};
-        u.camRight = {cam.right * (cam.tanHalfFovY * cam.aspect), 0};
-        u.camUp = {cam.up * cam.tanHalfFovY, 0};
-        u.camForward = {cam.forward, 0};
-        u.boardMap = sc.boardMap;
-        u.envParams = {fp.envIntensity, fp.envRotationRad, fp.radianceClamp, 0};
-        u.dims = {targets.width, targets.height, sc.envDistW, sc.envDistH};
-        u.counts = {fp.maxDepth, fp.rrStartDepth, 0, 0};
-        u.boardMats = {sc.boardMats.mask, sc.boardMats.copper, sc.boardMats.finish, sc.boardMats.fr4};
-        u.boardMats2 = {sc.boardMats.silk, 0, 0, 0};
-        ubo_ = ctx.createDeviceBuffer(&u, sizeof(u), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+        // ---- 定数（カメラ操作で毎フレーム書き換えるので CPU から見えるメモリに置く）
+        ubo_ = ctx.createBuffer(sizeof(FrameUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true);
+        updateFrame(fp);
 
         // ---- 記述子
         const std::array<std::pair<uint32_t, VkDescriptorType>, 15> bindings = {{
@@ -141,6 +130,25 @@ public:
         vk::check(r, "vkCreateComputePipelines");
     }
 
+    void updateFrame(const FrameParams& fp) override {
+        seed_ = fp.seed;
+        const GpuScene& sc = *scene_;
+        FrameUBO u{};
+        const auto& cam = fp.camera;
+        u.camPos = {cam.position, 0};
+        u.camRight = {cam.right * (cam.tanHalfFovY * cam.aspect), 0};
+        u.camUp = {cam.up * cam.tanHalfFovY, 0};
+        u.camForward = {cam.forward, 0};
+        u.boardMap = sc.boardMap;
+        u.envParams = {fp.envIntensity, fp.envRotationRad, fp.radianceClamp, 0};
+        u.dims = {targets_.width, targets_.height, sc.envDistW, sc.envDistH};
+        u.counts = {fp.maxDepth, fp.rrStartDepth, 0, 0};
+        u.boardMats = {sc.boardMats.mask, sc.boardMats.copper, sc.boardMats.finish, sc.boardMats.fr4};
+        u.boardMats2 = {sc.boardMats.silk, 0, 0, 0};
+        std::memcpy(ubo_.mapped, &u, sizeof(u));
+        vmaFlushAllocation(ctx_->allocator(), ubo_.alloc, 0, VK_WHOLE_SIZE);
+    }
+
     void recordSample(VkCommandBuffer cmd, uint32_t sampleIndex) override {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout_, 0, 1, &set_, 0, nullptr);
@@ -172,6 +180,7 @@ public:
 
 private:
     vk::Context* ctx_ = nullptr;
+    const GpuScene* scene_ = nullptr;
     RenderTargets targets_;
     uint32_t seed_ = 0;
     vk::Buffer ubo_;

@@ -37,6 +37,7 @@ void writeMissingReport(const std::vector<scene::MissingModel>& missing, const s
         log::warn("{} 3D model(s) missing or failed; shown as placeholder boxes:", missing.size());
         for (const auto& m : missing) log::warn("  {:<6} {}  [{}]  {}", m.reference, m.footprint, m.reason, m.spec);
     }
+    if (outDir.empty()) return;
     const auto jsonPath = outDir / "missing_models.json";
     const auto txtPath = outDir / "missing_models.txt";
     if (!platform::writeTextFile(jsonPath, j.dump(2) + "\n")) log::warn("cannot write {}", platform::pathToUtf8(jsonPath));

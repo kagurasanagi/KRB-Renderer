@@ -50,6 +50,9 @@ struct DeviceInfo {
 struct ContextOptions {
     bool validation = false;
     bool lowQueuePriority = true;  // VK_KHR_global_priority が使えれば LOW で作る
+    // 画面表示する場合だけ指定する（指定しなければサーフェス・スワップチェーン系は一切有効にしない）
+    std::vector<const char*> instanceExtensions;
+    std::function<VkSurfaceKHR(VkInstance)> createSurface;
 };
 
 class Context {
@@ -89,9 +92,11 @@ public:
     void submitAndWait(const std::function<void(VkCommandBuffer)>& record);
 
     VkCommandPool commandPool() const { return pool_; }
+    VkSurfaceKHR surface() const { return surface_; }
 
 private:
     VkInstance instance_ = VK_NULL_HANDLE;
+    VkSurfaceKHR surface_ = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT messenger_ = VK_NULL_HANDLE;
     VkPhysicalDevice physical_ = VK_NULL_HANDLE;
     VkDevice device_ = VK_NULL_HANDLE;

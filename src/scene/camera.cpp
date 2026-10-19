@@ -57,7 +57,25 @@ Camera frameCamera(const CameraParams& p, const std::vector<glm::vec3>& points) 
         if (umin > umax) break;
         target += right * ((umax + umin) * 0.5 * tx * dist) + up * ((vmax + vmin) * 0.5 * ty * dist);
     }
-    cam.position = glm::vec3(target - fwd * dist);
+    return orbitCamera(glm::vec3(target), static_cast<float>(dist), p.elevationDeg, p.azimuthDeg, p.fovDeg,
+                       cam.aspect);
+}
+
+Camera orbitCamera(glm::vec3 target, float distance, double elevationDeg, double azimuthDeg, double fovDeg,
+                   float aspect) {
+    Camera cam;
+    const double el = glm::radians(elevationDeg), az = glm::radians(azimuthDeg);
+    const glm::dvec3 toCam{std::cos(el) * std::sin(az), std::sin(el), std::cos(el) * std::cos(az)};
+    const glm::dvec3 fwd = -glm::normalize(toCam);
+    glm::dvec3 worldUp{0, 1, 0};
+    if (std::abs(glm::dot(fwd, worldUp)) > 0.999) worldUp = {0, 0, -1};
+    const glm::dvec3 right = glm::normalize(glm::cross(fwd, worldUp));
+    const glm::dvec3 up = glm::cross(right, fwd);
+    cam.aspect = aspect;
+    cam.tanHalfFovY = static_cast<float>(std::tan(glm::radians(fovDeg) / 2));
+    cam.target = target;
+    cam.distance = distance;
+    cam.position = glm::vec3(glm::dvec3(target) - fwd * static_cast<double>(distance));
     cam.forward = glm::vec3(fwd);
     cam.right = glm::vec3(right);
     cam.up = glm::vec3(up);

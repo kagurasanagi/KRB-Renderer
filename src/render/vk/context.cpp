@@ -68,7 +68,8 @@ DeviceInfo queryInfo(VkPhysicalDevice pd) {
     return info;
 }
 
-VkInstance createInstance(bool validation, VkDebugUtilsMessengerEXT* messenger);
+VkInstance createInstance(bool validation, VkDebugUtilsMessengerEXT* messenger,
+                          const std::vector<const char*>& extraExts = {});
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                              VkDebugUtilsMessageTypeFlagsEXT, const VkDebugUtilsMessengerCallbackDataEXT* data,
@@ -80,7 +81,8 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBits
     return VK_FALSE;
 }
 
-VkInstance createInstance(bool validation, VkDebugUtilsMessengerEXT* messenger) {
+VkInstance createInstance(bool validation, VkDebugUtilsMessengerEXT* messenger,
+                          const std::vector<const char*>& extraExts) {
     ensureVolk();
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.pApplicationName = "krbr";
@@ -89,7 +91,8 @@ VkInstance createInstance(bool validation, VkDebugUtilsMessengerEXT* messenger) 
     app.apiVersion = VK_API_VERSION_1_3;
 
     std::vector<const char*> layers;
-    std::vector<const char*> exts;  // サーフェス拡張は意図的に含めない
+    // サーフェス拡張は、画面表示を頼まれたとき（extraExts）以外は含めない
+    std::vector<const char*> exts(extraExts.begin(), extraExts.end());
     if (validation) {
         uint32_t n = 0;
         vkEnumerateInstanceLayerProperties(&n, nullptr);
@@ -144,7 +147,11 @@ std::vector<DeviceInfo> Context::enumerate() {
 Context::~Context() { destroy(); }
 
 void Context::init(const ContextOptions& opts) {
-    instance_ = createInstance(opts.validation, &messenger_);
+    instance_ = createInstance(opts.validation, &messenger_, opts.instanceExtensions);
+    if (opts.createSurface) {
+        surface_ = opts.createSurface(instance_);
+        if (!surface_) throw std::runtime_error("window surface creation failed");
+    }
 
     uint32_t n = 0;
     vkEnumeratePhysicalDevices(instance_, &n, nullptr);
@@ -168,17 +175,30 @@ void Context::init(const ContextOptions& opts) {
     vkGetPhysicalDeviceQueueFamilyProperties(physical_, &qn, nullptr);
     std::vector<VkQueueFamilyProperties> qprops(qn);
     vkGetPhysicalDeviceQueueFamilyProperties(physical_, &qn, qprops.data());
-    int computeOnly = -1, anyCompute = -1;
+    int computeOnly = -1, anyCompute = -1, present = -1;
     for (uint32_t i = 0; i < qn; ++i) {
         if (!(qprops[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) continue;
         if (anyCompute < 0) anyCompute = static_cast<int>(i);
         if (!(qprops[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && computeOnly < 0) computeOnly = static_cast<int>(i);
+        if (surface_ && present < 0) {
+            VkBool32 ok = VK_FALSE;
+            vkGetPhysicalDeviceSurfaceSupportKHR(physical_, i, surface_, &ok);
+            if (ok) present = static_cast<int>(i);
+        }
     }
-    queueFamily_ = static_cast<uint32_t>(computeOnly >= 0 ? computeOnly : anyCompute);
+    if (surface_) {
+        // 画面表示：計算と表示の両方ができるファミリー（計算専用キューは表示できない）
+        if (present < 0) throw std::runtime_error("no queue family can present to the window");
+        queueFamily_ = static_cast<uint32_t>(present);
+        computeOnly = -1;
+    } else {
+        queueFamily_ = static_cast<uint32_t>(computeOnly >= 0 ? computeOnly : anyCompute);
+    }
 
     const auto exts = deviceExtensions(physical_);
     std::vector<const char*> devExts = {VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, VK_KHR_RAY_QUERY_EXTENSION_NAME,
                                         VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME};
+    if (surface_) devExts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     const char* prioExt = nullptr;
     if (opts.lowQueuePriority) {
         if (hasExt(exts, VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME))
@@ -278,6 +298,8 @@ void Context::destroy() {
         if (allocator_) vmaDestroyAllocator(allocator_);
         vkDestroyDevice(device_, nullptr);
     }
+    if (surface_) vkDestroySurfaceKHR(instance_, surface_, nullptr);
+    surface_ = VK_NULL_HANDLE;
     if (messenger_) vkDestroyDebugUtilsMessengerEXT(instance_, messenger_, nullptr);
     if (instance_) vkDestroyInstance(instance_, nullptr);
     fence_ = VK_NULL_HANDLE;

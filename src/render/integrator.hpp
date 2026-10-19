@@ -33,6 +33,8 @@ public:
     virtual const char* name() const = 0;
     virtual void setup(vk::Context& ctx, const GpuScene& scene, const RenderTargets& targets,
                        const FrameParams& params) = 0;
+    // カメラ・照明などを更新する（GPU がこの積分器の処理を実行していないときに呼ぶこと）
+    virtual void updateFrame(const FrameParams& params) = 0;
     // sampleIndex 番目のサンプルを cmd に記録する（0 番目で累積を初期化）
     virtual void recordSample(VkCommandBuffer cmd, uint32_t sampleIndex) = 0;
     virtual void destroy() = 0;
