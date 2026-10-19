@@ -38,7 +38,7 @@ public:
         updateFrame(fp);
 
         // ---- 記述子
-        const std::array<std::pair<uint32_t, VkDescriptorType>, 16> bindings = {{
+        const std::array<std::pair<uint32_t, VkDescriptorType>, 18> bindings = {{
             {0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR},
             {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
             {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
@@ -55,6 +55,8 @@ public:
             {13, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},
             {14, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},
             {15, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+            {16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+            {17, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
         }};
         std::vector<VkDescriptorSetLayoutBinding> lb;
         for (auto [b, t] : bindings) lb.push_back({b, t, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
@@ -64,7 +66,7 @@ public:
         vk::check(vkCreateDescriptorSetLayout(dev, &lci, nullptr, &setLayout_), "vkCreateDescriptorSetLayout");
 
         const VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
-                                              {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 9},
+                                              {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 11},
                                               {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2},
                                               {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3},
                                               {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}};
@@ -88,7 +90,8 @@ public:
             {sc.triMats.buffer, 0, VK_WHOLE_SIZE},        {sc.meshInfos.buffer, 0, VK_WHOLE_SIZE},
             {sc.materials.buffer, 0, VK_WHOLE_SIZE},      {sc.envMarginal.buffer, 0, VK_WHOLE_SIZE},
             {sc.envConditional.buffer, 0, VK_WHOLE_SIZE}, {sc.envPdf.buffer, 0, VK_WHOLE_SIZE},
-            {ubo_.buffer, 0, VK_WHOLE_SIZE},              {sc.instanceInfos.buffer, 0, VK_WHOLE_SIZE}};
+            {ubo_.buffer, 0, VK_WHOLE_SIZE},              {sc.instanceInfos.buffer, 0, VK_WHOLE_SIZE},
+            {sc.rgb2spec.buffer, 0, VK_WHOLE_SIZE},       {sc.rgb2specScale.buffer, 0, VK_WHOLE_SIZE}};
         VkDescriptorImageInfo envInfo{sc.envSampler, sc.envImage.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkDescriptorImageInfo boardInfo{sc.boardSampler, sc.boardImage.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkDescriptorImageInfo targetInfo[3] = {{VK_NULL_HANDLE, targets.color.view, VK_IMAGE_LAYOUT_GENERAL},
@@ -109,6 +112,8 @@ public:
         for (int i = 0; i < 8; ++i) write(bufBindings[i], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &bufInfos[i];
         write(14, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).pBufferInfo = &bufInfos[8];
         write(15, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &bufInfos[9];
+        write(16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &bufInfos[10];
+        write(17, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &bufInfos[11];
         write(6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo = &envInfo;
         write(10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo = &boardInfo;
         for (int i = 0; i < 3; ++i) write(11 + i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo = &targetInfo[i];
@@ -149,6 +154,9 @@ public:
         u.boardMats2 = {sc.boardMats.silk, sc.boardMats.copper, sc.boardMats.fr4, 0};
         u.maskParams = sc.maskParams;
         u.maskParams2 = sc.maskParams2;
+        u.spectral = {fp.spectral ? 1.0f : 0.0f, 1.0f / spectrum::cmfYIntegral(), 0, 0};
+        const glm::mat3 toXyz = spectrum::linearSrgbToXyz();
+        for (int i = 0; i < 3; ++i) u.rgbToXyz[i] = {toXyz[i], 0.0f};
         std::memcpy(ubo_.mapped, &u, sizeof(u));
         vmaFlushAllocation(ctx_->allocator(), ubo_.alloc, 0, VK_WHOLE_SIZE);
     }

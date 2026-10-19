@@ -2,7 +2,19 @@
 
 #include <stdexcept>
 
+#include "scene/spectrum.hpp"
+
 namespace krbr::render {
+
+void xyzToLinearSrgb(io::ImageF& img) {
+    const glm::mat3 m = spectrum::xyzToLinearSrgb();
+    for (size_t i = 0; i + 3 < img.rgba.size(); i += 4) {
+        const glm::vec3 c = m * glm::vec3(img.rgba[i], img.rgba[i + 1], img.rgba[i + 2]);
+        img.rgba[i] = c.r;
+        img.rgba[i + 1] = c.g;
+        img.rgba[i + 2] = c.b;
+    }
+}
 
 Progressive::~Progressive() { destroy(); }
 
@@ -103,6 +115,10 @@ AovImages Progressive::readback() {
         }
     }
     ctx_->destroyBuffer(rb);
+    if (xyzOutput()) {
+        xyzToLinearSrgb(out.color);
+        xyzToLinearSrgb(out.albedo);
+    }
     return out;
 }
 

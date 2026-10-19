@@ -13,8 +13,8 @@ RenderOutput renderOffscreen(vk::Context& ctx, const GpuScene& scene, const Rend
     RenderOutput out;
     Progressive prog;
     prog.init(ctx, scene, s.integrator, s.width, s.height, s.frame);
-    log::info("rendering {}x{}, {} spp, integrator '{}', max depth {}", s.width, s.height, s.spp,
-              prog.integratorName(), s.frame.maxDepth);
+    log::info("rendering {}x{}, {} spp, integrator '{}', max depth {}, {}", s.width, s.height, s.spp,
+              prog.integratorName(), s.frame.maxDepth, s.frame.spectral ? "spectral" : "RGB");
 
     // 1 サンプルずつ投入して完了を待つ。GPU を長時間占有しないので、作業中の画面描画が止まりにくい
     const auto t0 = std::chrono::steady_clock::now();
@@ -54,6 +54,7 @@ RenderOutput renderOffscreen(vk::Context& ctx, const GpuScene& scene, const Rend
                 out.denoised.height = static_cast<int>(img.height);
                 const float* p = static_cast<const float*>(rb.mapped);
                 out.denoised.rgba.assign(p, p + static_cast<size_t>(img.width) * img.height * 4);
+                if (prog.xyzOutput()) xyzToLinearSrgb(out.denoised);  // ノイズ除去は XYZ のままかけている
                 ctx.destroyBuffer(rb);
                 log::info("denoised in {:.0f} ms", out.denoiseMs);
             }

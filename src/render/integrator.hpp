@@ -25,6 +25,7 @@ struct FrameParams {
     uint32_t maxDepth = 8;
     uint32_t rrStartDepth = 3;
     uint32_t seed = 0;
+    bool spectral = false;  // 分光モード（代表波長方式。累積は CIE XYZ）
 };
 
 class Integrator {

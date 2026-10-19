@@ -112,7 +112,7 @@ release だけをビルドする独自トリプレット `triplets/x64-windows-r
 | `krbr material set <pcb> --ref U3 [--part K] --material M` | 部品番号ごとの上書き（プロジェクトの overrides.toml） |
 | `krbr material set <pcb> --model <パス/ファイル名> [--part K] --material M [--global]` | 3D モデルごとの設定（プロジェクト、または `--global` で全体設定） |
 
-`render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X,Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--init`, `--no-cache`, `--no-kicad-cli`, `--debug-layers`（層テクスチャを PNG で出力）, `--validate`, `--normal-priority`, `-v`。
+`render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X,Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--spectral` / `--rgb`（色の計算）, `--init`, `--no-cache`, `--no-kicad-cli`, `--debug-layers`（層テクスチャを PNG で出力）, `--validate`, `--normal-priority`, `-v`。
 
 ## 作業中の PC への配慮
 
@@ -166,7 +166,9 @@ bump_scale = 0.1
 - 3D モデルは、展開前のパス（`path`）か、ファイル内容の XXH64（`hash`）のどちらかが一致すれば同じとみなします。ファイルを別の場所に移しても、中身が同じなら設定が効きます。
 - 部位のキーは、XDE の名前、`kicad:<色名>`（KiCad 標準モデルの色。例 `kicad:metal_grey_pins`、`kicad:black_body`）、`#rrggbb`（STEP に書かれた色）です。`"*"` は全部位に一致します。
 - 材質ライブラリで `base_color` を書かない材質は、3D モデルの面の色を使います。
-- transmission・subsurface・fuzz・thin_film・anisotropy・geometry_opacity は値を GPU まで渡していますが、描画にはまだ反映していません（使われるとログで知らせます。transmission と分散はフェーズ5）。発光（`emission_luminance`、cd/m²）は、放射輝度 1.0 = 1000 cd/m² として描きます。
+- **透過（`transmission_weight`）**：ガラス・アクリルのような誘電体の屈折（粗さのある GGX の透過、Walter et al. 2007）。中では `transmission_color` / `transmission_depth` で吸収されます（depth が 0 なら、面を通るたびに色をかける）。閉じた形状で、面の向き（三角形の巻き方）が外向きであることを前提にしています。
+- **subsurface**：krbr では簡易な形で扱います。`subsurface_weight` の割合で光が拡散して中へ入り、`subsurface_radius`（mm）進むと `subsurface_color` の透過率になる吸収を受けながら進み、反対側の面やふちから拡散して出ます（FR4 の透光性に使用）。
+- fuzz・thin_film・anisotropy・geometry_opacity・thin_walled・transmission_scatter は値を GPU まで渡していますが、描画には反映していません（使われるとログで知らせます）。発光（`emission_luminance`、cd/m²）は、放射輝度 1.0 = 1000 cd/m² として描きます。
 
 ## テスト
 
@@ -181,6 +183,9 @@ doctest で、次をウィンドウを開かずに確かめます。
 - フェーズ3：基板のコピーを書き換え、保存から画像の更新まで 1 秒以内であること、作り直すタイルが周辺だけであること、変更のない保存では何も作り直さないこと、未分割のモデルは箱で先に更新し裏での分割後に差し替わること
 - フェーズ2の完了条件：一時フォルダに2つのプロジェクトを作り、全体設定で U2 の材質を変えると両方に反映されること、部品番号の上書きが優先されること（全体設定は `KRBR_CONFIG_DIR` で一時フォルダに向ける）
 - 距離場：半平面と 1 点からの距離、8bit への詰め方
+- 分光の土台：等色関数と白色点、RGB → スペクトルの往復（誤差 0.008 以下、値が 0..1 に収まること）、アッベ数からの屈折率
+- **プリズムの分散**（フェーズ5の完了条件）：下記
+- **分光モードの色の保存**：色のついた拡散を白い炉の中で RGB / 分光の両方で描き、チャンネルごとの差が 0.02 + 3% 以内であること（実測 0.0003 以下）
 - **白い炉テスト**：一様な白い環境光の中の球をオフスクリーンで描き、吸収のない材質で放射輝度が 1 になることを確かめます。エネルギーが増える（1 を超える）のは誤りとして扱います。粗さ 1 の金属は、単一散乱の GGX の理論値（数値積分で 0.409）と一致することを確かめます。
 
 | 材質 | 平均 | 備考 |
@@ -190,6 +195,10 @@ doctest で、次をウィンドウを開かずに確かめます。
 | 金属 粗さ 0.3 | 0.977 | 単一散乱による損失 |
 | 金属 粗さ 1.0 | 0.413 | 理論値 0.409（フェーズ8で多重散乱を補償する） |
 | 拡散の透過（吸収なし） | 0.9994 | 理想値 1（基材の透光性の仕組み） |
+| ガラス（粗さ 0） | 0.9998 | 理想値 1（反射＋屈折） |
+| ガラス 粗さ 0.3 | 0.962 | 単一散乱による損失 |
+| Lambert（分光） | 0.9996 | 理想値 1 |
+| アクリル（分光、分散あり） | 0.9994 | 理想値 1（代表波長以外を打ち切っても偏りがない） |
 | 白い誘電体 粗さ 0.3 | 0.906 | 層の重ね方の近似による損失 |
 | コートつき Lambert | 0.905 | 同上 |
 
@@ -209,11 +218,11 @@ HDR ─────────────────────────�
 | geom | `shapes`, `board_mesh` | パッド・配線・図形の多角形化（Clipper2、10 nm 単位の整数座標）。Edge.Cuts の輪郭の連結、穴あけ、上下面の三角形分割、側面・穴の内壁（メッキ穴は別材質） |
 | raster | `rasterizer`, `layer_art`, `svg_reader` | 層ごとの多角形を基板面テクスチャ（R=銅, G=レジスト開口, B=シルク）へ描き込む。アンチエイリアス付き、マルチスレッド。kicad-cli の SVG の読み込み |
 | model | `model_mesh`, `step_loader`, `mesh_cache` | `IModelLoader`（形式ごとの読み込み器）、STEP（OCCT XCAF、面の色つき）、ディスクキャッシュ |
-| scene | `scene_builder`, `model_map`, `camera`, `material` | 材質（OpenPBR の名前）、部品の配置（KiCad 3D ビューアと同じ変換の順序）、代替の箱、カメラの自動調整 |
+| scene | `scene_builder`, `model_map`, `camera`, `material`, `spectrum` | 材質（OpenPBR の名前）、部品の配置（KiCad 3D ビューアと同じ変換の順序）、代替の箱、カメラの自動調整、等色関数と RGB → スペクトルの表 |
 | render | `vk/context`, `gpu_scene`, `env_map`, `integrator`, `path_tracer`, `progressive`, `renderer`, `tonemapper` | Vulkan（表示は必要なときだけ）、BLAS/TLAS、環境マップの分布、積分器、累積の管理（`Progressive`：オフラインとビューアで共通）、表示用のトーンマッピング |
 | io | `image_io` | HDR/EXR の読み込み、PNG（トーンマッピング）・EXR の書き出し |
 | app | `config`, `kicad_cli`, `report`, `prepare`, `commands`, `viewer` | 設定ファイル、kicad-cli の呼び出し、missing_models の出力、シーンの準備（render / view 共通）、各コマンド、リアルタイム表示（GLFW、スワップチェーン、操作） |
-| shaders | `pathtrace.comp`, `bsdf.glsl`, `env.glsl`, `sampling.glsl`, `common.glsl` | パストレーサー本体、BSDF、環境マップの重点的サンプリング |
+| shaders | `pathtrace.comp`, `bsdf.glsl`, `spectral.glsl`, `env.glsl`, `sampling.glsl`, `common.glsl` | パストレーサー本体、BSDF、分光（波長のサンプリング・RGB → スペクトル・XYZ）、環境マップの重点的サンプリング |
 
 ### 座標系
 
@@ -250,7 +259,7 @@ HDR ─────────────────────────�
 
 **Beer–Lambert**：レジストはコートとして、厚み t と、コートの中で屈折した後の角度での光路長（入射と出射の 2 回）から透過率 `exp(-σ t (1/cosθi + 1/cosθo))` を求めます。σ はレジストの色（基準の厚みを垂直に往復したときの透過率）から決めます。顔料による散乱の割合も厚みに応じて変えるので、縁の薄いところでは下の銅の色が透けて明るく見えます。
 
-**FR4 の透光性**：むき出しの基材（とレジストの下の基材）では、一部の光（`transmission_weight` 0.15）が拡散して基材の中へ入り、`transmission_color` / `transmission_depth` で吸収されながら進み、反対側の面やふちから拡散して出ます（出るときは、その面のレジストの吸収を受ける）。銅の面では中へはね返ります。白い炉テスト（吸収のない白）で 0.9994。
+**FR4 の透光性**：むき出しの基材（とレジストの下の基材）では、一部の光（`subsurface_weight` 0.15）が拡散して基材の中へ入り、`subsurface_color` / `subsurface_radius` で吸収されながら進み、反対側の面やふちから拡散して出ます（出るときは、その面のレジストの吸収を受ける）。銅の面では中へはね返ります。白い炉テスト（吸収のない白）で 0.9994。
 
 **織り目・側面・穴の内壁**：基材の上面の織り目、側面の層、めっきされた穴の内壁（表面処理の金属）は「表面の微細な凹凸」を参照。
 
@@ -270,6 +279,26 @@ HDR ─────────────────────────�
 - 個別の材質では、`bump_pattern` / `bump_strength` / `bump_scale` / `roughness_variation` で調整できます。これは OpenPBR にはない krbr 独自のパラメータです。
 - 模様はインスタンスごとにずらしているので、同じ部品が並んでも同じ模様にはなりません。
 
+### 分光レンダリング（フェーズ5）
+
+`--spectral`（設定 `[render] spectral = true`、ビューアのパネルの「色の計算」）で切り替えます。既定は RGB です。
+
+- **代表波長方式**：1 本のパスに 4 波長を載せます。代表波長を可視域に重みをつけて選び（pbrt-v4 と同じ分布、360〜830 nm）、残りの 3 つは 1/4 ずつずらして層化します。
+- **分散**：分散のある透明な材質（アッベ数、または Sellmeier）に当たったら、代表波長の屈折率で方向を決め、残りの 3 波長を打ち切ります（代表波長の重みを 4 倍にするので偏りはない）。屈折率は Cauchy の式 n(λ) = A + B/λ²（nF・nC・nd から求める）で計算します。
+- **RGB → スペクトル**：Jakob & Hanika（2019）のシグモイド多項式。係数の表（64³ × 3）は初回に約 1.5 秒で作り、キャッシュ（`%LOCALAPPDATA%\krbr\cache\spectral`）に置きます。材質の色は CPU で係数にして GPU へ送り、環境マップ（HDR）の色はシェーダで表を引きます。発光と環境光は上限のない色として扱います（最大の成分で割ってから変換し、倍率をかける）。
+- **出力**：CIE 1931 の等色関数（Wyman ほか 2013 の解析的な近似）で XYZ にして累積します。白色点は等エネルギー白色（E）とし、表示のリニア sRGB（D65）へは Bradford の色順応で変換します。RGB(1,1,1) は平坦なスペクトルになり、そのまま白に戻ります。
+- **ノイズ除去**は XYZ のままかけ（アルベドも XYZ にして渡す）、表示・保存の直前に sRGB に変換します。
+- 速さは RGB モードとほぼ同じです（1280×720 の基板で 1 サンプル約 2.5 ms）。基板の見た目はほとんど同じですが、レジストの吸収（Beer–Lambert）を波長ごとに計算するので、緑がわずかに鮮やかになります。
+
+**検証シーン**（`tests/test_prism.cpp`）：頂角 12° のくさび形のプリズム（上がアクリル nd 1.491・アッベ数 57、下がポリカーボネート nd 1.585・アッベ数 30）越しに、遠くの縦縞の光源を見ます。結果は `out/p5_prisms_spectral.png`（分光）と `out/p5_prisms_rgb.png`（RGB）です。
+
+| | 赤と青のずれ（画素） |
+|---|---|
+| RGB アクリル / ポリカーボネート | 0.02 / 0.00 |
+| 分光 アクリル | 13.5 |
+| 分光 ポリカーボネート | 29.9 |
+| 比 | 2.22（(nF − nC) の比からの期待値 2.26） |
+
 ### ホタル対策
 
 小さく明るい光源（HDR の中の電球など）が、拡散反射から光沢反射を経由して作る光の粒（ホタル）を抑えるため、**間接光だけ**に放射輝度の上限をかけています（既定 10、`--clamp` / `radiance_clamp`）。直接光のハイライトは制限しません。`0` にすると、偏りのない結果になります。
@@ -285,7 +314,6 @@ HDR ─────────────────────────�
 | 拡張 | 入り口 |
 |---|---|
 | **BDPT / VCM** | `render/integrator.hpp` の `Integrator` を実装し、`createIntegrator()` に名前を足します。`GpuScene`（ジオメトリ・材質・TLAS・環境マップの分布）と `RenderTargets`（RGBA32F の累積、A=サンプル数）は共通なので、レンダラや出力側は変更不要です。光源側の経路や画面への投影の書き込み（splat）用のバッファは、積分器が自分で持ちます。 |
-| **分光レンダリング** | BSDF は `shaders/bsdf.glsl` に、材質の取り出しは `shadeFromMaterial` / `boardShade` に閉じています。`Shade` を波長サンプルの値に置き換え、`envRadiance` をスペクトルに持ち上げる形で対応できます。材質のパラメータ名は OpenPBR に合わせています。 |
 | **KiCad の保存を監視してリアルタイム更新** | ビューア（`app/viewer.cpp`）のループに、ファイルの変更検知を足します。解析（`kicad::loadBoard`）→ `scene::buildScene` → `GpuScene::build` は分かれていて、STEP の分割はキャッシュされます。変更時はシーンを作り直して `Progressive::setFrame` で累積を 0 からやり直せば済みます。 |
 | **モデル形式の追加（VRML など）** | `model::IModelLoader` を実装して `ModelLibrary` に登録します。キャッシュはそのまま使えます。 |
 | **材質の対応表の拡充** | `model_map.toml` の `[presets.*]` と `[[rules]]`（ファイル名のワイルドカード、HSV の条件）。 |
@@ -297,5 +325,5 @@ HDR ─────────────────────────�
 - パッドの `padstack`（層ごとに形が違うパッド）は既定の形だけを使います。内層は描きません。
 - 線フォント（KiCad 標準のストロークフォント）の文字は `render_cache` を持たないため、kicad-cli の SVG 出力から取り込みます。kicad-cli が無ければ、その文字は描かれません（警告を出します）。
 - レジストの縁の丸みは法線（見え方）だけで表し、形状は垂直な段差のままです。
-- 透明・半透明（LED のレンズなど）や透過は扱いません。
+- 透明な物体は、環境光の直接サンプリング（NEE）の光をさえぎります。透明な物体越しの光（集光模様など）は BSDF のサンプリングだけで届くので、収束が遅くなります（フェーズ6の BDPT / VCM で改善します）。
 - プロセスの終了時に、NVIDIA ドライバの GPU コンテキストの解放で数秒かかることがあります。この間、CPU と GPU はほとんど使いません。

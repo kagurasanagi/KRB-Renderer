@@ -38,7 +38,7 @@ std::vector<GpuMaterial> toGpuMaterials(const std::vector<scene::Material>& mate
     std::vector<GpuMaterial> mats;
     for (auto m : materials) {
         m.bump_strength *= bumpIntensity;
-        mats.push_back(toGpu(m));
+        mats.push_back(toGpu(m, spectrum::loadedRgb2SpecTable()));
     }
     return mats;
 }
@@ -47,6 +47,7 @@ std::vector<GpuMaterial> toGpuMaterials(const std::vector<scene::Material>& mate
 void GpuScene::build(vk::Context& ctx, const scene::Scene& sc, const io::ImageF& env, const EnvDistribution& dist,
                      float bumpIntensity) {
     ctx_ = &ctx;
+    buildSpectralTable();  // 材質の分光の係数に使うので、形状より先に
     buildGeometry(sc, bumpIntensity);
     setEnvironment(env, dist);
     buildBoardTexture(sc);
@@ -330,6 +331,16 @@ void GpuScene::setEnvironment(const io::ImageF& env, const EnvDistribution& dist
     envHeight = static_cast<uint32_t>(env.height);
 }
 
+void GpuScene::buildSpectralTable() {
+    // RGB → スペクトルの表（初回は数秒かけて作り、キャッシュに置く）。シェーダは vec4（xyz: 係数）の並びとして読む
+    const spectrum::Rgb2SpecTable& t = spectrum::rgb2specTable();
+    const size_t n = t.data.size() / 3;
+    std::vector<glm::vec4> data(n);
+    for (size_t i = 0; i < n; ++i) data[i] = {t.data[i * 3], t.data[i * 3 + 1], t.data[i * 3 + 2], 0.0f};
+    rgb2spec = ctx_->createDeviceBuffer(data.data(), data.size() * sizeof(glm::vec4), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    rgb2specScale = ctx_->createDeviceBuffer(t.scale.data(), t.scale.size() * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+}
+
 void GpuScene::updateMaterials(const std::vector<scene::Material>& materials, float bumpIntensity) {
     const std::vector<GpuMaterial> mats = toGpuMaterials(materials, bumpIntensity);
     ctx_->upload(this->materials, mats.data(), mats.size() * sizeof(GpuMaterial));
@@ -354,7 +365,7 @@ void GpuScene::destroy() {
     VkDevice dev = ctx_->device();
     vkDeviceWaitIdle(dev);
     destroyGeometry();
-    for (vk::Buffer* b : {&envMarginal, &envConditional, &envPdf}) ctx_->destroyBuffer(*b);
+    for (vk::Buffer* b : {&envMarginal, &envConditional, &envPdf, &rgb2spec, &rgb2specScale}) ctx_->destroyBuffer(*b);
     ctx_->destroyImage(envImage);
     ctx_->destroyImage(boardImage);
     if (envSampler) vkDestroySampler(dev, envSampler, nullptr);

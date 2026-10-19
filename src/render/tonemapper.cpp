@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include "core/platform.hpp"
+#include "scene/spectrum.hpp"
 
 namespace krbr::render {
 
@@ -12,6 +13,7 @@ struct TonemapPush {
     uint32_t mode;
     uint32_t width;
     uint32_t height;
+    glm::vec4 xyzToRgb[3];
 };
 }  // namespace
 
@@ -86,10 +88,12 @@ void Tonemapper::init(vk::Context& ctx, const RenderTargets& targets) {
     vk::check(r, "vkCreateComputePipelines(tonemap)");
 }
 
-void Tonemapper::record(VkCommandBuffer cmd, float exposureEv, DisplayMode mode) {
+void Tonemapper::record(VkCommandBuffer cmd, float exposureEv, DisplayMode mode, bool xyzInput) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout_, 0, 1, &set_, 0, nullptr);
-    TonemapPush pc{std::exp2(exposureEv), static_cast<uint32_t>(mode), targets_.width, targets_.height};
+    TonemapPush pc{std::exp2(exposureEv), static_cast<uint32_t>(mode), targets_.width, targets_.height, {}};
+    const glm::mat3 m = spectrum::xyzToLinearSrgb();
+    for (int i = 0; i < 3; ++i) pc.xyzToRgb[i] = {m[i], xyzInput ? 1.0f : 0.0f};
     vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
     vkCmdDispatch(cmd, (targets_.width + 7) / 8, (targets_.height + 7) / 8, 1);
 }

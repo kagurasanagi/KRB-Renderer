@@ -29,6 +29,7 @@ struct ProjectConfig {
     int maxDepth = 8;
     float exposureEv = 0.7f;
     float radianceClamp = 10.0f;  // 間接光だけに効く上限（ホタル対策）
+    bool spectral = false;        // 分光モード（代表波長方式、4 波長）
     std::string integrator = "pt";
 
     std::vector<fs::path> loadedFiles;

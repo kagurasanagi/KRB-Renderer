@@ -35,6 +35,7 @@ void addCommonOptions(CLI::App* c, krbr::app::RenderOptions& ro) {
     c->add_flag("--validate", ro.validate, "enable Vulkan validation layer");
     c->add_flag("--normal-priority", ro.normalPriority, "do not lower process priority");
     c->add_flag("--denoise,!--no-denoise", ro.denoise, "denoise with OIDN (default: on for view/watch, off for render)");
+    c->add_flag("--spectral,!--rgb", ro.spectral, "spectral rendering (hero wavelengths) or RGB (default: RGB)");
 }
 
 }  // namespace

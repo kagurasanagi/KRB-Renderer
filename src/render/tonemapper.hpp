@@ -11,7 +11,8 @@ public:
     ~Tonemapper();
     // 出力（RGBA8、GENERAL レイアウト）を作る。targets が変わったら init し直す
     void init(vk::Context& ctx, const RenderTargets& targets);
-    void record(VkCommandBuffer cmd, float exposureEv, DisplayMode mode);
+    // xyzInput: 累積が CIE XYZ（分光モード）なら true
+    void record(VkCommandBuffer cmd, float exposureEv, DisplayMode mode, bool xyzInput = false);
     const vk::Image& output() const { return out_; }
     void destroy();
 

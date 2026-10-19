@@ -25,6 +25,7 @@ public:
 
     vk::Buffer vertices, indices, triMats, meshInfos, materials, instanceInfos;
     vk::Buffer envMarginal, envConditional, envPdf;
+    vk::Buffer rgb2spec, rgb2specScale;  // RGB → スペクトルの表（分光モード用）
     vk::Image envImage, boardImage;
     VkSampler envSampler = VK_NULL_HANDLE, boardSampler = VK_NULL_HANDLE;
     VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
@@ -37,6 +38,7 @@ public:
 
 private:
     void buildGeometry(const scene::Scene& sc, float bumpIntensity);
+    void buildSpectralTable();
     void buildBoardTexture(const scene::Scene& sc);
     void destroyGeometry();
     void updateSdfTiles(const scene::Scene& sc);

@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "scene/material.hpp"
+#include "scene/spectrum.hpp"
 
 namespace krbr::render {
 
@@ -30,8 +31,12 @@ struct GpuMaterial {
     glm::vec4 emission;   // rgb: 放射輝度（emission_color × emission_luminance × kEmissionScale）, a: geometry_opacity
     glm::vec4 transmission;  // transmission_weight, dispersion abbe number, dispersion scale, thin_walled
     glm::vec4 transmission2;  // rgb: transmission_color, a: transmission_depth（mm）
+    glm::vec4 subsurface;     // rgb: subsurface_color（radius だけ進んだときの透過率）, a: subsurface_radius（mm）
+    glm::vec4 params3;        // x: subsurface_weight, y, z: Cauchy の A, B（n(λ) = A + B/λ²、λ は nm）, w: 1 なら分散あり
+    // 分光モード用：各色の RGB → スペクトルの係数（シグモイド多項式）。発光の w は倍率
+    glm::vec4 specBase, specSpecular, specCoat, specTrans, specSubsurface, specEmission;
 };
-static_assert(sizeof(GpuMaterial) == 144);
+static_assert(sizeof(GpuMaterial) == 272);
 
 // 発光の単位：放射輝度 1.0 を 1000 cd/m² とみなす（HDR の画素値と同じ尺度）
 constexpr float kEmissionScale = 1.0f / 1000.0f;
@@ -40,7 +45,8 @@ struct GpuInstanceInfo {
     uint32_t mesh, materialBase, pad0, pad1;
 };
 
-inline GpuMaterial toGpu(const scene::Material& m) {
+// spec: RGB → スペクトルの表（nullptr なら分光用の係数は 0 のまま）
+inline GpuMaterial toGpu(const scene::Material& m, const spectrum::Rgb2SpecTable* spec) {
     GpuMaterial g;
     g.baseColor = {m.base_color, m.base_weight};
     g.specColor = {m.specular_color, m.specular_weight};
@@ -56,6 +62,24 @@ inline GpuMaterial toGpu(const scene::Material& m) {
     g.transmission = {m.transmission_weight, m.transmission_dispersion_abbe_number, m.transmission_dispersion_scale,
                       m.geometry_thin_walled ? 1.0f : 0.0f};
     g.transmission2 = {m.transmission_color, m.transmission_depth};
+    g.subsurface = {m.subsurface_color, m.subsurface_radius};
+    // 分散：nF, nC から Cauchy の式の係数を求める（Sellmeier の指定があってもこの近似で扱う）
+    const float nF = m.iorAt(486.1f), nC = m.iorAt(656.3f), nd = m.iorAt(587.6f);
+    const bool dispersive = std::abs(nF - nC) > 1e-6f;
+    const float B = dispersive ? (nF - nC) / (1.0f / (486.1f * 486.1f) - 1.0f / (656.3f * 656.3f)) : 0.0f;
+    const float A = nd - B / (587.6f * 587.6f);
+    g.params3 = {m.subsurface_weight, A, B, dispersive ? 1.0f : 0.0f};
+    if (spec) {
+        auto coef = [&](glm::vec3 c) { return glm::vec4(spec->lookup(c), 0.0f); };
+        g.specBase = coef(m.base_color);
+        g.specSpecular = coef(m.specular_color);
+        g.specCoat = coef(m.coat_color);
+        g.specTrans = coef(m.transmission_color);
+        g.specSubsurface = coef(m.subsurface_color);
+        g.specEmission = spec->unbounded(glm::vec3(g.emission));
+    } else {
+        g.specBase = g.specSpecular = g.specCoat = g.specTrans = g.specSubsurface = g.specEmission = glm::vec4(0.0f);
+    }
     return g;
 }
 
@@ -72,6 +96,8 @@ struct FrameUBO {
     glm::uvec4 boardMats2;
     glm::vec4 maskParams;   // x: 銅の上の厚み, y: 基材の上の厚み, z: 縁の厚み, w: 縁からの変化の距離（mm）
     glm::vec4 maskParams2;  // x: 壁ぎわのたまり, y: その距離, z: 銅の厚み, w: 1 なら距離場が使える
+    glm::vec4 spectral;     // x: 1 なら分光モード（累積は XYZ）, y: 1 / ∫ȳ dλ
+    glm::vec4 rgbToXyz[3];  // リニア sRGB → XYZ（列ごと。アルベドを XYZ で書くため）
 };
 
 struct PushConstants {

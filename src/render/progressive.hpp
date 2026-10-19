@@ -9,8 +9,11 @@
 namespace krbr::render {
 
 struct AovImages {
-    io::ImageF color, albedo, normal;  // サンプル数で割った値
+    io::ImageF color, albedo, normal;  // サンプル数で割った値（色とアルベドはリニア sRGB）
 };
+
+// CIE XYZ（分光モードの累積）→ リニア sRGB（その場で書き換える）
+void xyzToLinearSrgb(io::ImageF& img);
 
 class Progressive {
 public:
@@ -31,9 +34,11 @@ public:
     uint32_t samples() const { return samples_; }
     const RenderTargets& targets() const { return targets_; }
     const FrameParams& frame() const { return frame_; }
+    // 累積（とノイズ除去の結果）が CIE XYZ か（分光モード）。表示や保存の前に RGB へ変換する
+    bool xyzOutput() const { return frame_.spectral; }
     const char* integratorName() const { return integrator_ ? integrator_->name() : "?"; }
 
-    // 現在の累積を読み戻す（GPU が待機中に呼ぶこと）
+    // 現在の累積を読み戻す（GPU が待機中に呼ぶこと）。分光モードでも RGB に変換して返す
     AovImages readback();
     void destroy();
 

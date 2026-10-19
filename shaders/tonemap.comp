@@ -13,7 +13,15 @@ layout(push_constant) uniform Push {
     uint mode;  // 0: 画像, 1: アルベド, 2: 法線
     uint width;
     uint height;
+    vec4 xyzToRgb0;  // 入力が XYZ（分光モード）のとき、リニア sRGB への変換の列。w = 1 なら変換する
+    vec4 xyzToRgb1;
+    vec4 xyzToRgb2;
 } pc;
+
+vec3 toRgb(vec3 c) {
+    if (pc.xyzToRgb0.w < 0.5) return c;
+    return mat3(pc.xyzToRgb0.xyz, pc.xyzToRgb1.xyz, pc.xyzToRgb2.xyz) * c;
+}
 
 vec3 acesFitted(vec3 c) {
     const mat3 inM = mat3(0.59719, 0.07600, 0.02840, 0.35458, 0.90834, 0.13383, 0.04823, 0.01566, 0.83777);
@@ -36,13 +44,13 @@ void main() {
     vec3 c;
     if (pc.mode == 1u) {
         vec4 a = imageLoad(accumAlbedo, ip);
-        c = linearToSrgb(a.a > 0.0 ? a.rgb / a.a : vec3(0.0));
+        c = linearToSrgb(a.a > 0.0 ? toRgb(a.rgb / a.a) : vec3(0.0));
     } else if (pc.mode == 2u) {
         vec4 n = imageLoad(accumNormal, ip);
         c = n.a > 0.0 ? n.rgb / n.a * 0.5 + 0.5 : vec3(0.0);
     } else {
         vec4 a = imageLoad(accumColor, ip);
-        vec3 l = a.a > 0.0 ? max(a.rgb / a.a, vec3(0.0)) * pc.exposureScale : vec3(0.0);
+        vec3 l = a.a > 0.0 ? max(toRgb(a.rgb / a.a), vec3(0.0)) * pc.exposureScale : vec3(0.0);
         c = linearToSrgb(acesFitted(l));
         // 量子化の縞を減らす小さなディザ
         uint i = p.y * pc.width + p.x;

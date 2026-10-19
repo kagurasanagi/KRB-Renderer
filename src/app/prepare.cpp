@@ -88,6 +88,7 @@ std::unique_ptr<PreparedScene> prepareScene(const RenderOptions& o, const fs::pa
     if (o.envIntensity) cfg.envIntensity = *o.envIntensity;
     if (o.envRotation) cfg.envRotationDeg = *o.envRotation;
     if (o.radianceClamp) cfg.radianceClamp = *o.radianceClamp;
+    if (o.spectral) cfg.spectral = *o.spectral;
     if (!o.integrator.empty()) cfg.integrator = o.integrator;
     if (!o.hdr.empty()) cfg.hdr = o.hdr;
     if (cfg.hdr.empty()) {
@@ -237,6 +238,7 @@ render::FrameParams frameParams(const ProjectConfig& cfg, const scene::Camera& c
     f.envIntensity = cfg.envIntensity;
     f.envRotationRad = glm::radians(cfg.envRotationDeg);
     f.radianceClamp = cfg.radianceClamp;
+    f.spectral = cfg.spectral;
     f.maxDepth = static_cast<uint32_t>(std::max(1, cfg.maxDepth));
     f.seed = seed;
     return f;

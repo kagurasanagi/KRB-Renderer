@@ -59,9 +59,10 @@ void setupBoardMaterials(Scene& s, const kicad::Board& board, const SceneOptions
     fr4.specular_roughness = 0.55f;
     fr4.specular_ior = 1.5f;
     // わずかな透光性：入った光は基材の中で吸収されながら進み、反対側やふちから拡散して出る
-    fr4.transmission_weight = 0.15f;
-    fr4.transmission_color = {0.85f, 0.72f, 0.38f};
-    fr4.transmission_depth = 1.0f;
+    // 透光性：拡散して中へ入り、吸収されながら進む（krbr では subsurface をこの簡易な形で扱う）
+    fr4.subsurface_weight = 0.15f;
+    fr4.subsurface_color = {0.85f, 0.72f, 0.38f};
+    fr4.subsurface_radius = 1.0f;
     fr4.bump_pattern = BumpPattern::Weave;  // ガラス繊維の織り（7628 程度のピッチ）
     fr4.bump_strength = 0.12f;
     fr4.bump_scale = 0.45f;
@@ -611,8 +612,9 @@ Scene buildScene(const SceneContext& ctx) {
     {
         std::map<std::string, std::vector<std::string>> unsupported;
         for (const auto& m : s.materials) {
-            if (m.transmission_weight > 0) unsupported["transmission (phase 5)"].push_back(m.name);
-            if (m.subsurface_weight > 0) unsupported["subsurface"].push_back(m.name);
+            if (m.transmission_weight > 0 && m.geometry_thin_walled) unsupported["thin_walled"].push_back(m.name);
+            if (m.transmission_weight > 0 && glm::length(m.transmission_scatter) > 0)
+                unsupported["transmission_scatter"].push_back(m.name);
             if (m.fuzz_weight > 0) unsupported["fuzz"].push_back(m.name);
             if (m.thin_film_weight > 0) unsupported["thin_film"].push_back(m.name);
             if (m.geometry_opacity < 1) unsupported["geometry_opacity"].push_back(m.name);

@@ -70,6 +70,7 @@ spp = 64                     # 1 画素あたりのサンプル数（作業中�
 max_depth = 8
 exposure_ev = 0.7
 radiance_clamp = 10.0        # 間接光の放射輝度の上限（ホタル対策）。0 で無効（偏りのない結果）
+spectral = false             # true で分光レンダリング（代表波長方式。分散による色の分かれを再現する）
 integrator = "pt"            # 今回はパストレーサーのみ
 )";
 
@@ -179,6 +180,7 @@ ProjectConfig loadProjectConfig(const fs::path& pcbFile) {
         readNum(r["max_depth"], c.maxDepth);
         readNum(r["exposure_ev"], c.exposureEv);
         readNum(r["radiance_clamp"], c.radianceClamp);
+        c.spectral = r["spectral"].value_or(c.spectral);
         c.integrator = r["integrator"].value_or(c.integrator);
     }
     for (const auto& f : c.loadedFiles) log::info("config: {}", platform::pathToUtf8(f));

@@ -23,6 +23,7 @@ struct RenderOptions {
     bool normalPriority = false;
     bool debugLayers = false;
     std::optional<bool> denoise;  // ノイズ除去（render は既定で無効、view / watch は既定で有効）
+    std::optional<bool> spectral;  // 分光モード（既定は設定ファイル、無ければ RGB）
 };
 
 struct ViewOptions {

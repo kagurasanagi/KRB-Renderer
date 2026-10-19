@@ -69,7 +69,7 @@ struct WatchRunner::Impl {
         vk::Buffer rb = ctx.createBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, true);
         ctx.submitAndWait([&](VkCommandBuffer cmd) {
             if (denoised) denoiser.recordOutput(cmd);
-            tm.record(cmd, prep->cfg.exposureEv, render::DisplayMode::Beauty);
+            tm.record(cmd, prep->cfg.exposureEv, render::DisplayMode::Beauty, prog.xyzOutput());
             vk::memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                               VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
             VkBufferImageCopy region{};

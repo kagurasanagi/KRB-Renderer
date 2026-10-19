@@ -129,6 +129,7 @@ struct ViewState {
     bool resetRequested = false;
     bool autoExposureRequested = false;
     bool denoise = true;  // ノイズ除去した画像を表示する
+    bool spectral = false;  // 分光モード（代表波長方式）
 
     // マウス
     bool rotating = false, panning = false;
@@ -352,6 +353,7 @@ int cmdView(const ViewOptions& vo) {
     ViewState st;
     st.maxSpp = o.spp ? *o.spp : 1024;
     st.exposure = cfg.exposureEv;
+    st.spectral = cfg.spectral;
     st.envRotationDeg = cfg.envRotationDeg;
     st.envIntensity = cfg.envIntensity;
     st.bumpIntensity = cfg.scene.bumpIntensity;
@@ -403,6 +405,7 @@ int cmdView(const ViewOptions& vo) {
             ProjectConfig c = cfg;
             c.envRotationDeg = st.envRotationDeg;
             c.envIntensity = st.envIntensity;
+            c.spectral = st.spectral;
             const scene::Camera cam = scene::orbitCamera(st.target, st.distance, st.elevation, st.azimuth, st.fov,
                                                          static_cast<float>(w) / static_cast<float>(h));
             st.tanHalfFovY = cam.tanHalfFovY;
@@ -628,6 +631,16 @@ int cmdView(const ViewOptions& vo) {
                     }
                 }
 
+                ImGui::SeparatorText("色の計算");
+                int colorMode = st.spectral ? 1 : 0;
+                ImGui::RadioButton("RGB", &colorMode, 0);
+                ImGui::SameLine();
+                ImGui::RadioButton("分光（4 波長）", &colorMode, 1);
+                if ((colorMode == 1) != st.spectral) {
+                    st.spectral = colorMode == 1;
+                    st.dirty = true;
+                }
+
                 ImGui::SeparatorText("表面");
                 if (ImGui::SliderFloat("凹凸の強さ", &st.bumpIntensity, 0.0f, 2.0f, "%.2f")) st.materialsDirty = true;
 
@@ -787,7 +800,7 @@ int cmdView(const ViewOptions& vo) {
             }
             if (wantDenoise && denoisedEpoch == accumEpoch) denoiser.recordOutput(cmd);
             render::Tonemapper& tm = showDenoised ? toneDenoised : tone;
-            tm.record(cmd, st.exposure, st.mode);
+            tm.record(cmd, st.exposure, st.mode, prog.xyzOutput());
             const VkImage dispImg = tm.output().image, swapImg = swap.images[imageIndex];
             vk::imageBarrier(cmd, dispImg, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,

@@ -37,8 +37,17 @@ struct Material {
     vec4 params1;     // x: coat_ior, y: kind, z: side（基板面: 0=表, 1=裏）/ 下の材質, w: レジストの材質
     vec4 params2;     // x: 凹凸の模様, y: 強さ（傾き）, z: 大きさ（mm）, w: 粗さのむら
     vec4 emission;    // rgb: 放射輝度, a: geometry_opacity
-    vec4 transmission;  // x: transmission_weight, y: アッベ数, z: 分散の倍率, w: thin_walled（フェーズ5で使う）
+    vec4 transmission;  // x: transmission_weight, y: アッベ数, z: 分散の倍率, w: thin_walled
     vec4 transmission2; // rgb: transmission_color, a: transmission_depth（mm）
+    vec4 subsurface;    // rgb: subsurface_color（radius 進んだときの透過率）, a: subsurface_radius（mm）
+    vec4 params3;       // x: subsurface_weight, y, z: Cauchy の A, B（λ は nm）, w: 1 なら分散あり
+    // 分光モード用の RGB → スペクトルの係数（xyz）。specEmission.w は倍率
+    vec4 specBase;
+    vec4 specSpecular;
+    vec4 specCoat;
+    vec4 specTrans;
+    vec4 specSubsurface;
+    vec4 specEmission;
 };
 
 struct InstanceInfo {
@@ -76,9 +85,16 @@ layout(set = 0, binding = 14, std140) uniform Frame {
     uvec4 boardMats2; // x: シルク, y: 銅, z: 基材
     vec4 maskParams;  // x: 銅の上のレジストの厚み, y: 基材の上, z: 銅の縁の上, w: 縁から中央への変化の距離（mm）
     vec4 maskParams2; // x: 銅の壁ぎわのたまり, y: その距離, z: 銅の厚み, w: 1 なら層テクスチャは距離場
+    vec4 spectral;    // x: 1 なら分光モード（累積は XYZ）, y: 1 / ∫ȳ dλ
+    vec4 rgbToXyz0;   // リニア sRGB → XYZ の列
+    vec4 rgbToXyz1;
+    vec4 rgbToXyz2;
 } F;
 
 layout(set = 0, binding = 15, std430) readonly buffer Instances { InstanceInfo instanceInfos[]; };
+// RGB → スペクトルの表（Jakob & Hanika 2019）：64 x 64 x (3 x 64) の係数と、明るさの格子
+layout(set = 0, binding = 16, std430) readonly buffer Rgb2Spec { vec4 rgb2specData[]; };
+layout(set = 0, binding = 17, std430) readonly buffer Rgb2SpecScale { float rgb2specScale[]; };
 
 layout(push_constant) uniform Push {
     uint sampleIndex;
