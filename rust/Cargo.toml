@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/krbr-core", "crates/krbr-kicad", "crates/krbr-model", "krbr"]
+members = ["crates/krbr-core", "crates/krbr-kicad", "crates/krbr-model", "crates/krbr-geom", "krbr"]
 
 [workspace.package]
 version = "0.1.0"

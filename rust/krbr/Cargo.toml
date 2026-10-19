@@ -13,5 +13,6 @@ path = "src/main.rs"
 krbr-core = { path = "../crates/krbr-core" }
 krbr-kicad = { path = "../crates/krbr-kicad" }
 krbr-model = { path = "../crates/krbr-model" }
+krbr-geom = { path = "../crates/krbr-geom" }
 clap.workspace = true
 anyhow.workspace = true

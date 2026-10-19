@@ -2,7 +2,10 @@
 //! C++ 版の `core/` に相当し、ファイルの置き場所と XXH64 のキーは C++ 版と同じにしてある（キャッシュを共有するため）。
 
 pub mod log;
+pub mod mesh;
 pub mod platform;
+
+pub use mesh::{Bounds3, Mesh};
 
 /// XXH64（seed 0）。C++ 版の `krbr::xxh64` と同じ値になる
 pub fn xxh64(data: &[u8]) -> u64 {

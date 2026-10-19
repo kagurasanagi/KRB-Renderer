@@ -28,6 +28,11 @@ enum Command {
         #[arg(long)]
         models: bool,
     },
+    /// build the board geometry and the relief tiles (no GPU) and print statistics
+    Geom {
+        /// .kicad_pcb file
+        pcb: PathBuf,
+    },
     /// load every 3D model of a board (mesh cache, else the STEP converter DLL) and print statistics
     Models {
         /// .kicad_pcb file
@@ -36,6 +41,22 @@ enum Command {
         #[arg(long)]
         no_cache: bool,
     },
+}
+
+fn cmd_geom(pcb: &PathBuf) -> anyhow::Result<()> {
+    use krbr_geom::{build_board_geometry, tiles::build_relief_tiles, BoardBuildOptions, LayerArtOptions, ReliefParams, ReliefTileCache};
+    let board = load_board(pcb)?;
+    let mut rp = ReliefParams::default();
+    if board.stackup.copper_thickness > 0.0 {
+        rp.copper = board.stackup.copper_thickness;
+    }
+    let opts = BoardBuildOptions { core_half: rp.core_half(board.stackup.thickness), caps: false };
+    let geo = build_board_geometry(&board, &opts);
+    let mut cache = ReliefTileCache::default();
+    let rebuilt = build_relief_tiles(&mut cache, &board, &geo, &rp, &LayerArtOptions::default());
+    let tris: usize = (0..2).map(|s| cache.tiles[s].iter().map(|m| m.triangle_count()).sum::<usize>()).sum();
+    info!("geom: {} tiles rebuilt, {} relief triangles, sdf {}x{} px", rebuilt, tris, cache.sdf_grid.width, cache.sdf_grid.height);
+    Ok(())
 }
 
 fn cmd_models(pcb: &PathBuf, no_cache: bool) -> anyhow::Result<()> {
@@ -132,6 +153,7 @@ fn main() {
     }
     let result = match &cli.command {
         Command::Info { pcb, models } => cmd_info(pcb, *models),
+        Command::Geom { pcb } => cmd_geom(pcb),
         Command::Models { pcb, no_cache } => cmd_models(pcb, *no_cache),
     };
     if let Err(e) = result {
