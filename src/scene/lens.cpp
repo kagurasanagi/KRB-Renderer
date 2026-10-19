@@ -155,9 +155,8 @@ LensSystem LensSystem::stoppedDown(float fNumber) const {
     const float scale = nominal / fNumber;
     for (auto& surf : s.surfaces)
         if (surf.radius == 0.0f) surf.aperture *= scale;
-    // フィルムから光線を出す「後ろの開口」も同じ割合で縮める（射出瞳の近似）。絞りでさえぎられる光線を
-    // 減らして、絞ったときのノイズを抑える。明るさは centerWeight が同じ開口で正規化する
-    s.surfaces.back().aperture *= scale;
+    // 後ろの開口（フィルムから光線を出す円）は縮めない。縮めると画面の端の光線が絞りを通れなくなり、
+    // 周辺が黒く欠ける（射出瞳は後ろの面には無い）。絞ると通らない光線が増えてノイズは増えるが、収束はする
     return s;
 }
 
