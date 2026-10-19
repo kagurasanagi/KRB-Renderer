@@ -260,10 +260,13 @@ bump_scale = 0.1
 ```
 cd rust
 cargo build --release
-target
-elease\krbr.exe info E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --models
+target\release\krbr.exe info E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --models
+target\release\krbr.exe E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --hdr E:\desktop\hdr\brown_photostudio_02_4k.exr   # ビューア
+target\release\krbr.exe render E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --hdr E:\desktop\hdr\brown_photostudio_02_4k.exr --out out\rs.png
 cargo test
 ```
+
+Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフォルダの `shaders\`、環境変数 `KRBR_SHADER_DIR`、開発中は `<リポジトリ>\build\release\shaders` の順で探します。STEP 変換器 DLL は exe と同じフォルダの `step\krbr_step.dll` です（`build\release\step\` をコピーしておく）。ビューアの操作パネルは egui なので見た目は C++ 版（Dear ImGui）と違いますが、項目・操作・キーは同じです。
 
 | 段階 | 内容 | 状況 |
 |---|---|---|
@@ -271,7 +274,7 @@ cargo test
 | 2 | STEP → メッシュの変換器を C++ の薄い DLL（`stepkrbr_step.dll`）に切り出し、Rust はキャッシュと DLL だけを読む（`krbr-model`、`krbr models`） | 済（C++ 版と同じキャッシュを共有：38 モデル・21 万三角形） |
 | 3 | 基板メッシュ、凹凸タイル、層の多角形、距離場（`krbr-geom`：Clipper2・earcut の crate、`krbr geom`） | 済（外形・穴の数は C++ 版と一致。凹凸は 168 万三角形、C++ 版 150 万：Clipper2 の丸め継ぎ目の分割数の違い） |
 | 4 | 描画（`krbr-scene`：材質・割り当て・分光・設定、`krbr-render`：ash でデバイス・BLAS/TLAS・カーネル（ray query / RT パイプライン）・累積・読み戻し・PNG/EXR）。`krbr render` | 済（同じシェーダ・同じカメラで C++ 版と同じ画像。未移植：kicad-cli の線フォントのシルク、ノイズ除去、層テクスチャ方式、`--init`） |
-| 5 | ビューア（winit + egui）、監視、ノイズ除去（OIDN）、材質 CLI | 未 |
+| 5 | ビューア（winit + egui、`krbr-app`）、監視、ノイズ除去（OIDN）、材質 CLI | ビューアは済（`krbr <pcb> --hdr ...` でウィンドウ。パネル・マウス操作・キー・保存・テストモードは C++ 版と同じ。未：保存の監視と差分更新、ノイズ除去、環境マップの「開く...」ダイアログ、`material` / `mask list` / `--init`、kicad-cli のシルク） |
 
 ## テスト
 

@@ -24,11 +24,17 @@ pub struct DeviceInfo {
     pub device_uuid: [u8; 16],
 }
 
-#[derive(Debug, Clone, Default)]
+/// サーフェスを作る関数（ウィンドウ表示のときだけ）。インスタンスができた後に呼ばれる
+pub type SurfaceFactory = Box<dyn Fn(&ash::Entry, &ash::Instance) -> Result<vk::SurfaceKHR, String>>;
+
+#[derive(Default)]
 pub struct ContextOptions {
     pub validation: bool,
     /// VK_KHR_global_priority が使えれば LOW で作る
     pub low_queue_priority: bool,
+    /// 画面表示する場合だけ指定する（指定しなければサーフェス・スワップチェーン系は一切有効にしない）
+    pub instance_extensions: Vec<*const c_char>,
+    pub create_surface: Option<SurfaceFactory>,
 }
 
 #[derive(Debug, Default)]
@@ -124,11 +130,11 @@ unsafe extern "system" fn debug_callback(
     vk::FALSE
 }
 
-fn create_instance(entry: &ash::Entry, validation: bool) -> Result<(ash::Instance, bool), String> {
+fn create_instance(entry: &ash::Entry, validation: bool, extra_exts: &[*const c_char]) -> Result<(ash::Instance, bool), String> {
     let app_name = CString::new("krbr").unwrap();
     let app = vk::ApplicationInfo::default().application_name(&app_name).application_version(vk::make_api_version(0, 0, 1, 0)).engine_name(&app_name).api_version(vk::API_VERSION_1_3);
     let mut layers: Vec<*const c_char> = Vec::new();
-    let mut exts: Vec<*const c_char> = Vec::new();
+    let mut exts: Vec<*const c_char> = extra_exts.to_vec();
     let mut with_validation = false;
     let layer_name = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
     if validation {
@@ -164,6 +170,9 @@ pub struct Context {
     pub as_device: khr::acceleration_structure::Device,
     pub rt_device: Option<khr::ray_tracing_pipeline::Device>,
     pub use_rt_pipeline: bool,
+    pub surface: vk::SurfaceKHR,
+    pub surface_loader: Option<khr::surface::Instance>,
+    pub swapchain_loader: Option<khr::swapchain::Device>,
     debug: Option<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
 }
 
@@ -172,7 +181,7 @@ impl Context {
     pub fn enumerate() -> Result<Vec<DeviceInfo>, String> {
         // 安全性：Vulkan ローダーの読み込み
         let entry = unsafe { ash::Entry::load() }.map_err(|e| format!("Vulkan loader not found: {e}"))?;
-        let (instance, _) = create_instance(&entry, false)?;
+        let (instance, _) = create_instance(&entry, false, &[])?;
         let out = unsafe { instance.enumerate_physical_devices() }.unwrap_or_default().into_iter().map(|pd| query_info(&instance, pd)).collect();
         unsafe { instance.destroy_instance(None) };
         Ok(out)
@@ -180,7 +189,11 @@ impl Context {
 
     pub fn new(opts: &ContextOptions) -> Result<Self, String> {
         let entry = unsafe { ash::Entry::load() }.map_err(|e| format!("Vulkan loader not found: {e}"))?;
-        let (instance, with_validation) = create_instance(&entry, opts.validation)?;
+        let (instance, with_validation) = create_instance(&entry, opts.validation, &opts.instance_extensions)?;
+        let (surface, surface_loader) = match &opts.create_surface {
+            Some(f) => (f(&entry, &instance)?, Some(khr::surface::Instance::new(&entry, &instance))),
+            None => (vk::SurfaceKHR::null(), None),
+        };
         let debug = if with_validation {
             let du = ash::ext::debug_utils::Instance::new(&entry, &instance);
             let mci = vk::DebugUtilsMessengerCreateInfoEXT::default()
@@ -211,9 +224,10 @@ impl Context {
         };
         let use_rt_pipeline = !info.ray_query;
 
-        // キュー：グラフィックスを持たない計算専用ファミリーを優先
+        // キュー：グラフィックスを持たない計算専用ファミリーを優先（デスクトップ描画と競合しにくい）。
+        // 画面表示するときは、計算と表示の両方ができるファミリー
         let qprops = unsafe { instance.get_physical_device_queue_family_properties(physical) };
-        let (mut compute_only, mut any_compute) = (None, None);
+        let (mut compute_only, mut any_compute, mut present) = (None, None, None);
         for (i, q) in qprops.iter().enumerate() {
             if !q.queue_flags.contains(vk::QueueFlags::COMPUTE) {
                 continue;
@@ -224,12 +238,25 @@ impl Context {
             if !q.queue_flags.contains(vk::QueueFlags::GRAPHICS) && compute_only.is_none() {
                 compute_only = Some(i as u32);
             }
+            if let Some(sl) = &surface_loader {
+                if present.is_none() && q.queue_flags.contains(vk::QueueFlags::GRAPHICS) && unsafe { sl.get_physical_device_surface_support(physical, i as u32, surface) }.unwrap_or(false) {
+                    present = Some(i as u32);
+                }
+            }
         }
-        let queue_family = compute_only.or(any_compute).ok_or("no compute queue")?;
+        let queue_family = if surface_loader.is_some() {
+            compute_only = None;
+            present.ok_or("no queue family can present to the window")?
+        } else {
+            compute_only.or(any_compute).ok_or("no compute queue")?
+        };
 
         let exts = unsafe { instance.enumerate_device_extension_properties(physical) }.unwrap_or_default();
         let mut dev_exts: Vec<*const c_char> = vec![khr::acceleration_structure::NAME.as_ptr(), khr::deferred_host_operations::NAME.as_ptr()];
         dev_exts.push(if use_rt_pipeline { khr::ray_tracing_pipeline::NAME.as_ptr() } else { khr::ray_query::NAME.as_ptr() });
+        if surface_loader.is_some() {
+            dev_exts.push(khr::swapchain::NAME.as_ptr());
+        }
         if info.atomic_float_add {
             dev_exts.push(ash::ext::shader_atomic_float::NAME.as_ptr());
         }
@@ -314,6 +341,7 @@ impl Context {
         let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default(), None) }.map_err(|e| format!("{e:?}"))?;
         let as_device = khr::acceleration_structure::Device::new(&instance, &device);
         let rt_device = use_rt_pipeline.then(|| khr::ray_tracing_pipeline::Device::new(&instance, &device));
+        let swapchain_loader = surface_loader.as_ref().map(|_| khr::swapchain::Device::new(&instance, &device));
 
         krbr_core::info!(
             "GPU: {} (Vulkan {}.{}.{}), queue family {}{}{}, {}",
@@ -326,7 +354,7 @@ impl Context {
             if low_prio { ", low global priority" } else { "" },
             if use_rt_pipeline { "ray tracing pipeline (no ray_query)" } else { "ray query" }
         );
-        Ok(Self { entry, instance, physical, device, queue, queue_family, allocator: Arc::new(Mutex::new(allocator)), pool, fence, info, as_props, rt_props, as_device, rt_device, use_rt_pipeline, debug })
+        Ok(Self { entry, instance, physical, device, queue, queue_family, allocator: Arc::new(Mutex::new(allocator)), pool, fence, info, as_props, rt_props, as_device, rt_device, use_rt_pipeline, surface, surface_loader, swapchain_loader, debug })
     }
 
     /// レイを飛ばすシェーダの段階（バリア用）
@@ -495,6 +523,9 @@ impl Drop for Context {
                 }
             }
             self.device.destroy_device(None);
+            if let (Some(sl), true) = (&self.surface_loader, self.surface != vk::SurfaceKHR::null()) {
+                sl.destroy_surface(self.surface, None);
+            }
             if let Some((du, m)) = self.debug.take() {
                 du.destroy_debug_utils_messenger(m, None);
             }

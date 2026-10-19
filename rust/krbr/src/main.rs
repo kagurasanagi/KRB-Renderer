@@ -1,8 +1,6 @@
 //! krbr（Rust 版）のコマンドライン。移植の進み具合に合わせてサブコマンドを増やす。
 //! フェーズ1：`info`（基板の解析と 3D モデルのパス解決。GPU は使わない）
 
-mod render_cmd;
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -32,6 +30,8 @@ enum Command {
     },
     /// render offscreen to PNG (tone mapped) and EXR (linear)
     Render(RenderArgs),
+    /// real-time viewer window (default command when the first argument is a .kicad_pcb)
+    View(ViewArgs),
     /// build the board geometry and the relief tiles (no GPU) and print statistics
     Geom {
         /// .kicad_pcb file
@@ -125,9 +125,27 @@ struct RenderArgs {
     mask_color: String,
 }
 
+#[derive(Args, Debug)]
+struct ViewArgs {
+    #[command(flatten)]
+    render: RenderArgs,
+    /// development: render N frames in a hidden window, then exit
+    #[arg(long, default_value_t = 0)]
+    test_frames: u32,
+    /// development: save the displayed image (with --test-frames)
+    #[arg(long)]
+    screenshot: Option<PathBuf>,
+    /// do not show the window
+    #[arg(long)]
+    hidden: bool,
+    /// development: rotate the camera by this many degrees per frame
+    #[arg(long, default_value_t = 0.0)]
+    test_orbit: f64,
+}
+
 impl RenderArgs {
-    fn to_options(&self) -> render_cmd::RenderOptions {
-        render_cmd::RenderOptions {
+    fn to_options(&self) -> krbr_app::RenderOptions {
+        krbr_app::RenderOptions {
             pcb: self.pcb.clone(),
             hdr: self.hdr.clone(),
             out: self.out.clone(),
@@ -298,13 +316,29 @@ fn cmd_info(pcb: &PathBuf, models: bool) -> anyhow::Result<()> {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    // サブコマンドを省略して `krbr board.kicad_pcb ...` と書いたら view とみなす
+    let mut args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().skip(1).position(|a| !a.starts_with('-')) {
+        let i = i + 1;
+        if args[i].to_lowercase().ends_with(".kicad_pcb") {
+            args.insert(i, "view".into());
+        }
+    }
+    let cli = Cli::parse_from(args);
     if cli.verbose {
         log::set_level(log::Level::Debug);
     }
     let result = match &cli.command {
         Command::Info { pcb, models } => cmd_info(pcb, *models),
-        Command::Render(args) => render_cmd::cmd_render(&args.to_options()),
+        Command::Render(args) => krbr_app::cmd_render(&args.to_options()),
+        Command::View(args) => {
+            let vo = krbr_app::ViewOptions { common: args.render.to_options(), test_frames: args.test_frames, screenshot: args.screenshot.clone(), hidden: args.hidden, test_orbit_deg: args.test_orbit };
+            krbr_app::run_viewer(vo).map(|rc| {
+                if rc != 0 {
+                    std::process::exit(rc);
+                }
+            })
+        }
         Command::Geom { pcb } => cmd_geom(pcb),
         Command::Diff { a, b } => cmd_diff(a, b),
         Command::Models { pcb, no_cache } => cmd_models(pcb, *no_cache),

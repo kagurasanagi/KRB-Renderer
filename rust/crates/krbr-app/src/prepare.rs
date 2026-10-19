@@ -217,7 +217,7 @@ pub fn cmd_render(o: &RenderOptions) -> anyhow::Result<()> {
     let cam = initial_camera(&prep, o, cfg.width, cfg.height);
     info!("camera: elevation {:.1} deg, azimuth {:.1} deg, fov {:.1} deg, position ({:.1}, {:.1}, {:.1}) mm", cfg.elevation_deg, cfg.azimuth_deg, cfg.fov_deg, cam.position.x, cam.position.y, cam.position.z);
 
-    let ctx = Context::new(&ContextOptions { validation: o.validate, low_queue_priority: true }).map_err(|e| anyhow::anyhow!(e))?;
+    let ctx = Context::new(&ContextOptions { validation: o.validate, low_queue_priority: true, ..Default::default() }).map_err(|e| anyhow::anyhow!(e))?;
     let result = {
         let mut gpu = GpuScene::new(&ctx);
         gpu.build(&prep.scene, &prep.env, &prep.dist, cfg.scene.bump_intensity);

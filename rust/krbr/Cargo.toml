@@ -16,6 +16,7 @@ krbr-model = { path = "../crates/krbr-model" }
 krbr-geom = { path = "../crates/krbr-geom" }
 krbr-scene = { path = "../crates/krbr-scene" }
 krbr-render = { path = "../crates/krbr-render" }
+krbr-app = { path = "../crates/krbr-app" }
 glam.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 clap.workspace = true

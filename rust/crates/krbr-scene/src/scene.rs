@@ -736,6 +736,43 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
     s
 }
 
+/// シーン中の三角形との最初の交点までの距離（Ctrl + クリックでピントを合わせる用）。Möller–Trumbore
+pub fn raycast(s: &Scene, origin: Vec3, dir: Vec3) -> Option<f32> {
+    let mut best = 1e30f32;
+    for i in &s.instances {
+        // オブジェクト座標で交差を求める（t は変換しても同じ値になる）
+        let inv = i.xform.inverse();
+        let o = inv.transform_point3(origin);
+        let d = inv.transform_vector3(dir);
+        let m = &s.meshes[i.mesh as usize].mesh;
+        for t in m.indices.chunks_exact(3) {
+            let (a, b, c) = (m.positions[t[0] as usize], m.positions[t[1] as usize], m.positions[t[2] as usize]);
+            let (e1, e2) = (b - a, c - a);
+            let p = d.cross(e2);
+            let det = e1.dot(p);
+            if det.abs() < 1e-12 {
+                continue;
+            }
+            let inv_det = 1.0 / det;
+            let tv = o - a;
+            let u = tv.dot(p) * inv_det;
+            if !(0.0..=1.0).contains(&u) {
+                continue;
+            }
+            let q = tv.cross(e1);
+            let v = d.dot(q) * inv_det;
+            if v < 0.0 || u + v > 1.0 {
+                continue;
+            }
+            let tt = e2.dot(q) * inv_det;
+            if tt > 1e-4 && tt < best {
+                best = tt;
+            }
+        }
+    }
+    (best < 1e30).then_some(best)
+}
+
 /// 読み込んだ設定ファイルなど、シーンを作るのに要るもの一式（C++ 版の PreparedScene の一部）
 pub struct MaterialSetup {
     pub library: crate::material_library::MaterialLibrary,

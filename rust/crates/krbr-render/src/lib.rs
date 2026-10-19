@@ -8,6 +8,7 @@ pub mod image_io;
 pub mod integrator;
 pub mod kernel;
 pub mod renderer;
+pub mod tonemapper;
 pub mod vk;
 
 pub use env_map::{build_env_distribution, EnvDistribution};
