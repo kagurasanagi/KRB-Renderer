@@ -6,6 +6,7 @@
 
 #include "render/gpu_scene.hpp"
 #include "scene/camera.hpp"
+#include "scene/lens.hpp"
 
 namespace krbr::render {
 
@@ -28,6 +29,7 @@ struct FrameParams {
     bool spectral = false;  // 分光モード（代表波長方式。累積は CIE XYZ）
     float vcmRadius = 0.0f;  // VCM の近傍の半径の初期値（mm）。0 ならシーンの大きさから決める
     float vcmAlpha = 0.75f;  // 繰り返すたびに半径を縮める割合（r_i = r_0 · i^((α−1)/2)）
+    scene::LensParams lens;
 };
 
 class Integrator {

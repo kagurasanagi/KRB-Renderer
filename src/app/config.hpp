@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "scene/lens.hpp"
 #include "scene/scene.hpp"
 
 namespace krbr::app {
@@ -32,6 +33,7 @@ struct ProjectConfig {
     bool spectral = false;        // 分光モード（代表波長方式、4 波長）
     std::string integrator = "pt";
     float vcmRadius = 0.0f;  // VCM の近傍の半径の初期値（mm）。0 で自動
+    scene::LensParams lens;
 
     std::vector<fs::path> loadedFiles;
 };

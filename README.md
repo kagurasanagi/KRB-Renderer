@@ -112,7 +112,7 @@ release だけをビルドする独自トリプレット `triplets/x64-windows-r
 | `krbr material set <pcb> --ref U3 [--part K] --material M` | 部品番号ごとの上書き（プロジェクトの overrides.toml） |
 | `krbr material set <pcb> --model <パス/ファイル名> [--part K] --material M [--global]` | 3D モデルごとの設定（プロジェクト、または `--global` で全体設定） |
 
-`render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X,Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--spectral` / `--rgb`（色の計算）, `--init`, `--no-cache`, `--no-kicad-cli`, `--debug-layers`（層テクスチャを PNG で出力）, `--validate`, `--normal-priority`, `-v`。
+`render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X,Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--spectral` / `--rgb`（色の計算）, `--lens pinhole|thin|realistic`, `--f-number`, `--focal-length`, `--focus-distance`, `--blades`, `--init`, `--no-cache`, `--no-kicad-cli`, `--debug-layers`（層テクスチャを PNG で出力）, `--validate`, `--normal-priority`, `-v`。
 
 ## 作業中の PC への配慮
 
@@ -221,11 +221,11 @@ HDR ─────────────────────────�
 | geom | `shapes`, `board_mesh` | パッド・配線・図形の多角形化（Clipper2、10 nm 単位の整数座標）。Edge.Cuts の輪郭の連結、穴あけ、上下面の三角形分割、側面・穴の内壁（メッキ穴は別材質） |
 | raster | `rasterizer`, `layer_art`, `svg_reader` | 層ごとの多角形を基板面テクスチャ（R=銅, G=レジスト開口, B=シルク）へ描き込む。アンチエイリアス付き、マルチスレッド。kicad-cli の SVG の読み込み |
 | model | `model_mesh`, `step_loader`, `mesh_cache` | `IModelLoader`（形式ごとの読み込み器）、STEP（OCCT XCAF、面の色つき）、ディスクキャッシュ |
-| scene | `scene_builder`, `model_map`, `camera`, `material`, `spectrum` | 材質（OpenPBR の名前）、部品の配置（KiCad 3D ビューアと同じ変換の順序）、代替の箱、カメラの自動調整、等色関数と RGB → スペクトルの表 |
+| scene | `scene_builder`, `model_map`, `camera`, `lens`, `raycast`, `material`, `spectrum` | 材質（OpenPBR の名前）、部品の配置（KiCad 3D ビューアと同じ変換の順序）、代替の箱、カメラの自動調整、等色関数と RGB → スペクトルの表 |
 | render | `vk/context`, `gpu_scene`, `env_map`, `integrator`, `kernel`, `path_tracer`, `progressive`, `renderer`, `tonemapper` | Vulkan（表示は必要なときだけ）、BLAS/TLAS、環境マップの分布、積分器、累積の管理（`Progressive`：オフラインとビューアで共通）、表示用のトーンマッピング |
 | io | `image_io` | HDR/EXR の読み込み、PNG（トーンマッピング）・EXR の書き出し |
 | app | `config`, `kicad_cli`, `report`, `prepare`, `commands`, `viewer` | 設定ファイル、kicad-cli の呼び出し、missing_models の出力、シーンの準備（render / view 共通）、各コマンド、リアルタイム表示（GLFW、スワップチェーン、操作） |
-| shaders | `pathtrace.comp`, `vcm_light.comp`, `vcm_camera.comp`, `ptcore.glsl`, `bidir.glsl`, `scene.glsl`, `lights.glsl`, `bsdf.glsl`, `spectral.glsl`, `env.glsl`, `sampling.glsl`, `common.glsl` | パストレーサー、BDPT / VCM の光源側・カメラ側、交点と材質の組み立て、光源（環境光・発光面）、BSDF、分光、環境マップの重点的サンプリング |
+| shaders | `pathtrace.comp`, `vcm_light.comp`, `vcm_camera.comp`, `camera.glsl`, `ptcore.glsl`, `bidir.glsl`, `scene.glsl`, `lights.glsl`, `bsdf.glsl`, `spectral.glsl`, `env.glsl`, `sampling.glsl`, `common.glsl` | パストレーサー、BDPT / VCM の光源側・カメラ側、交点と材質の組み立て、光源（環境光・発光面）、BSDF、分光、環境マップの重点的サンプリング |
 
 ### 座標系
 
@@ -310,6 +310,37 @@ HDR ─────────────────────────�
 | VCM | 0.066 |
 
 VCM（1024 回）の集光点のまわりの平均は 0.2023 で、PT（16384 spp）の 0.1974 と 2.5% 以内で一致します。画像は `out/p6_caustic_vcm_1024.png`、`out/p6_caustic_pt_16384.png` などです。
+
+### カメラとレンズ（フェーズ7）
+
+`environment.toml` の `[lens]`、`--lens`、ビューアのパネルの「レンズ」で選びます。既定はピンホールです。ビューアでは **Ctrl + クリック**した点にピントを合わせます（CPU で全三角形と交差を調べる）。
+
+| 種類 | 内容 |
+|---|---|
+| pinhole | 被写界深度なし |
+| thin | 薄レンズ。焦点距離・F 値（絞りの半径 = 焦点距離 / 2F）・ピントの距離。絞りの形は羽根の枚数・回転・丸み（多角形と円の間）。周辺減光（cos⁴θ）、口径食、軸上色収差・倍率色収差（分光モード） |
+| realistic | 実際のレンズ設計データ（球面の並び、pbrt と同じ書式。内蔵は double Gauss 50mm f/2）で光線を追跡。最終出力向け |
+
+- **薄レンズ**：絞りの中の点を一様に選び（円からの棄却法）、ピントの面（前方に垂直、距離 = ピントの距離）の点へ向かう光線にします。レンズ上の点を固定すると、画像の 1 画素あたりの確率密度はピンホールと同じ形（像面までの距離² / cos³θ）になるので、BDPT / VCM の「光源側の頂点をカメラへ直接つなぐ」戦略は、同じ分布でレンズ上の点を選び、ピントの面を経由して写る画素を求めるだけで使えます。
+- **口径食**：絞りの前に、同じ大きさの円形の開口を置きます。画面の隅で、2 つの開口が絞りの直径 × `optical_vignetting` だけずれる距離です。画面の端のボケは 2 つの円の重なり（レモン形、キャッツアイ）になります。
+- **軸上色収差**：焦点距離を f(λ) = f · (nd − 1) / (n(λ) − 1)（ガラスは nd 1.5168、アッベ数は `abbe_number`）とし、フィルムの位置は d 線で決めます。波長ごとにピントの距離が変わります。
+- **倍率色収差**：像の大きさを 1 + k · (n(λ) − nd) / (nF − nC) 倍にします（k = `lateral_ca`）。
+- 色収差は波長で光線が変わるので、カメラで代表波長以外を打ち切ります（色の粒が増えるので、サンプル数を多めに）。
+- **実レンズ**：フィルムの点から後ろの面の有効径の中の点へ光線を出し、各面で屈折させ（有効径の外や全反射は光が通らない）、明るさは cos⁴θ · 面積 / 距離² を、フィルムの中央の平均で割って、ピンホールと同じ明るさにそろえます。ピントは光軸の近くの光線を追って求め、フィルムの大きさは、ピントの距離での倍率で設定の画角になるように決めます。BDPT / VCM では、カメラへ直接つなぐ戦略を使いません（その分の MIS の項を 0 にする）。
+
+**検証**（`tests/test_camera.cpp`）：
+
+| 項目 | 結果 |
+|---|---|
+| 羽根 6 枚のボケ：頂点の方向 / 辺の方向の半径（正六角形で 1.155） | 1.13（回転 30° でも頂点の向きが追従）、円形の絞りでは 1.00 |
+| 画面の隅のボケ：中心方向 / 直交方向の広がり | 口径食 0.6 で 0.63（レモン形）、口径食なしで 1.00 |
+| 自然な周辺減光：隅 / 中央 | 0.6718（cos⁴ の理論値 0.6716） |
+| 軸上色収差（アッベ数 20）：青 / 赤のボケの半径 | 1.29（なしで 1.00） |
+| 倍率色収差 0.01：青と赤の像のずれ（画面の端） | 3.5 画素（なしで 0.00） |
+| 薄レンズでの積分器の一致：平均 | PT 0.07913 / BDPT 0.07924 / VCM 0.07924 |
+| 実レンズ：一様な環境光での中央の明るさ | 0.99 |
+
+完了条件の確認用の画像は `out/p7_showcase.png`（7 枚羽根、口径食、周辺減光、軸上・倍率色収差。ボケは暗いので +4 EV で保存）です。
 
 ### 分光レンダリング（フェーズ5）
 

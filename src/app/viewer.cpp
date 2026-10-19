@@ -29,6 +29,7 @@
 #include "render/gpu_scene.hpp"
 #include "render/progressive.hpp"
 #include "render/tonemapper.hpp"
+#include "scene/raycast.hpp"
 
 namespace krbr::app {
 
@@ -134,6 +135,8 @@ struct ViewState {
 
     // マウス
     bool rotating = false, panning = false;
+    bool focusPick = false;  // Ctrl + クリック：その点にピントを合わせる
+    double pickX = 0, pickY = 0;
     double lastX = 0, lastY = 0;
     int fbHeight = 1;
     float tanHalfFovY = 0.27f;
@@ -142,10 +145,15 @@ struct ViewState {
 bool uiWantsMouse() { return ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureMouse; }
 bool uiWantsKeyboard() { return ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureKeyboard; }
 
-void onMouseButton(GLFWwindow* w, int button, int action, int) {
+void onMouseButton(GLFWwindow* w, int button, int action, int mods) {
     auto* s = static_cast<ViewState*>(glfwGetWindowUserPointer(w));
     const bool down = action == GLFW_PRESS;
     if (down && uiWantsMouse()) return;  // パネルの上での操作はカメラに渡さない
+    if (down && button == GLFW_MOUSE_BUTTON_LEFT && (mods & GLFW_MOD_CONTROL)) {
+        glfwGetCursorPos(w, &s->pickX, &s->pickY);
+        s->focusPick = true;
+        return;
+    }
     if (button == GLFW_MOUSE_BUTTON_LEFT) s->rotating = down;
     if (button == GLFW_MOUSE_BUTTON_RIGHT || button == GLFW_MOUSE_BUTTON_MIDDLE) s->panning = down;
     glfwGetCursorPos(w, &s->lastX, &s->lastY);
@@ -653,6 +661,45 @@ int cmdView(const ViewOptions& vo) {
                                                          : "双方向＋近傍のまとめ（透明な物体越しの集光模様も収束）");
                 }
 
+                ImGui::SeparatorText("レンズ");
+                {
+                    scene::LensParams& L = cfg.lens;
+                    bool ch = false;
+                    int lm = static_cast<int>(L.model);
+                    ch |= ImGui::RadioButton("ピンホール", &lm, 0);
+                    ImGui::SameLine();
+                    ch |= ImGui::RadioButton("薄レンズ", &lm, 1);
+                    ImGui::SameLine();
+                    ch |= ImGui::RadioButton("実レンズ", &lm, 2);
+                    L.model = static_cast<scene::LensModel>(lm);
+                    if (L.model != scene::LensModel::Pinhole) {
+                        ch |= ImGui::SliderFloat("F 値", &L.fNumber, 0.7f, 22.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+                        float focus = L.focusDistanceMm > 0 ? L.focusDistanceMm : st.distance;
+                        if (ImGui::SliderFloat("ピント (mm)", &focus, 5.0f, 5000.0f, "%.1f", ImGuiSliderFlags_Logarithmic)) {
+                            L.focusDistanceMm = focus;
+                            ch = true;
+                        }
+                        ImGui::TextDisabled("Ctrl + クリック：その点にピントを合わせる");
+                    }
+                    if (L.model == scene::LensModel::Thin) {
+                        ch |= ImGui::SliderFloat("焦点距離 (mm)", &L.focalLengthMm, 10.0f, 300.0f, "%.0f",
+                                                 ImGuiSliderFlags_Logarithmic);
+                        ch |= ImGui::SliderInt("羽根の枚数", &L.blades, 0, 12, L.blades < 3 ? "円" : "%d");
+                        if (L.blades >= 3) {
+                            ch |= ImGui::SliderFloat("羽根の回転", &L.bladeRotationDeg, 0.0f, 360.0f, "%.0f°");
+                            ch |= ImGui::SliderFloat("羽根の丸み", &L.bladeRoundness, 0.0f, 1.0f, "%.2f");
+                        }
+                        ch |= ImGui::Checkbox("周辺減光 (cos⁴)", &L.naturalVignetting);
+                        ch |= ImGui::SliderFloat("口径食", &L.opticalVignetting, 0.0f, 1.0f, "%.2f");
+                        ch |= ImGui::SliderFloat("軸上色収差 (アッベ数)", &L.abbeNumber, 0.0f, 80.0f,
+                                                 L.abbeNumber > 0 ? "%.0f" : "なし");
+                        ch |= ImGui::SliderFloat("倍率色収差", &L.lateralCA, 0.0f, 0.02f, "%.4f");
+                        if ((L.abbeNumber > 0 || L.lateralCA > 0) && !st.spectral)
+                            ImGui::TextDisabled("色収差は分光モードで有効");
+                    }
+                    if (ch) st.dirty = true;
+                }
+
                 ImGui::SeparatorText("色の計算");
                 int colorMode = st.spectral ? 1 : 0;
                 ImGui::RadioButton("RGB", &colorMode, 0);
@@ -754,6 +801,22 @@ int cmdView(const ViewOptions& vo) {
                 gpu.updateMaterials(prep->scene.materials, st.bumpIntensity);
                 st.materialsDirty = false;
                 st.dirty = true;
+            }
+            if (st.focusPick) {
+                st.focusPick = false;
+                int ww = 1, wh = 1;
+                glfwGetWindowSize(window, &ww, &wh);
+                const scene::Camera c = scene::orbitCamera(st.target, st.distance, st.elevation, st.azimuth, st.fov,
+                                                           static_cast<float>(ww) / static_cast<float>(std::max(1, wh)));
+                const float nx = static_cast<float>(2.0 * st.pickX / ww - 1.0), ny = static_cast<float>(2.0 * st.pickY / wh - 1.0);
+                const glm::vec3 dir = glm::normalize(c.forward + nx * c.tanHalfFovY * c.aspect * c.right -
+                                                     ny * c.tanHalfFovY * c.up);
+                if (auto t = scene::raycast(prep->scene, c.position, dir)) {
+                    cfg.lens.focusDistanceMm = *t * glm::dot(dir, c.forward);
+                    if (cfg.lens.model == scene::LensModel::Pinhole) cfg.lens.model = scene::LensModel::Thin;
+                    lastUpdate = std::format("ピントを {:.1f} mm に合わせた", cfg.lens.focusDistanceMm);
+                    st.dirty = true;
+                }
             }
             if (st.resetRequested) {
                 resetCamera(fbw, fbh);

@@ -95,6 +95,12 @@ layout(set = 0, binding = 14, std140) uniform Frame {
     vec4 lightParams; // x: 環境光を選ぶ確率, y: 発光三角形の Σ(輝度 × 面積), z: シーンを囲む球の半径, w: 発光三角形の数
     vec4 sceneCenter;
     vec4 vcmParams;   // x: 近傍の半径の初期値（mm）, y: α, z: 光源側の経路の数, w: 1 なら merging を使う
+    vec4 lens0;       // レンズ（camera.glsl、C++ 側 render/kernel.cpp の fillLens を参照）
+    vec4 lens1;
+    vec4 lens2;
+    vec4 lens3;
+    vec4 lens4;
+    vec4 lensSurfaces[16];
 } F;
 
 layout(set = 0, binding = 15, std430) readonly buffer Instances { InstanceInfo instanceInfos[]; };

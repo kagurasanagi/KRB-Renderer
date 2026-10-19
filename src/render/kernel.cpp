@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <map>
+#include <mutex>
 #include <numbers>
 #include <stdexcept>
 
+#include "core/log.hpp"
 #include "core/platform.hpp"
 #include "scene/spectrum.hpp"
 
@@ -92,7 +94,60 @@ FrameUBO makeFrameUbo(const GpuScene& sc, const RenderTargets& targets, const Fr
     u.sceneCenter = {sc.sceneCenter, 0.0f};
     const float radius = fp.vcmRadius > 0 ? fp.vcmRadius : 0.003f * sc.sceneRadius;
     u.vcmParams = {radius, fp.vcmAlpha, static_cast<float>(targets.width) * targets.height, 0.0f};
+    fillLens(u, fp);
     return u;
+}
+
+namespace {
+// 実レンズのデータは、ファイル名ごとに一度だけ読む
+const scene::LensSystem& lensSystemFor(const std::string& file) {
+    static std::mutex m;
+    static std::map<std::string, scene::LensSystem> cache;
+    std::lock_guard lock(m);
+    auto it = cache.find(file);
+    if (it != cache.end()) return it->second;
+    scene::LensSystem sys = scene::LensSystem::doubleGauss50();
+    if (!file.empty()) {
+        std::string err;
+        if (!scene::LensSystem::load(platform::u8path(file), sys, err)) {
+            log::error("lens: {}; using {}", err, scene::LensSystem::doubleGauss50().name);
+            sys = scene::LensSystem::doubleGauss50();
+        }
+    }
+    return cache.emplace(file, std::move(sys)).first->second;
+}
+}  // namespace
+
+void fillLens(FrameUBO& u, const FrameParams& fp) {
+    const scene::LensParams& L = fp.lens;
+    const auto& cam = fp.camera;
+    const float focus = L.focusDistanceMm > 0 ? L.focusDistanceMm : cam.distance;
+    const float f = std::max(L.focalLengthMm, 1.0f);
+    const float a = 0.5f * f / std::max(L.fNumber, 0.5f);
+    u.lens0 = {static_cast<float>(L.model), a, focus, static_cast<float>(L.blades >= 3 ? L.blades : 0)};
+    // 口径食：画面の隅で、前の開口（半径 a）が絞りに対して直径 × opticalVignetting だけずれる距離に置く
+    const float tanCorner = cam.tanHalfFovY * std::sqrt(1.0f + cam.aspect * cam.aspect);
+    const float D = L.opticalVignetting > 0 ? L.opticalVignetting * 2.0f * a / std::max(tanCorner, 1e-4f) : 0.0f;
+    u.lens1 = {glm::radians(L.bladeRotationDeg), std::clamp(L.bladeRoundness, 0.0f, 1.0f), D, a};
+    const float v = focus > f * 1.0001f ? 1.0f / (1.0f / f - 1.0f / focus) : 1e9f;
+    u.lens2 = {L.naturalVignetting ? 1.0f : 0.0f, L.lateralCA, v, f};
+    constexpr float nd = 1.5168f;  // BK7 相当
+    u.lens3 = {nd, L.abbeNumber > 0 ? (nd - 1.0f) / L.abbeNumber : 0.0f, 0.0f, 0.0f};
+    if (L.model == scene::LensModel::Realistic) {
+        const scene::LensSystem& sys = lensSystemFor(L.lensFile);
+        const float frontToFocus = std::max(focus, 1.0f);
+        const float filmDist = sys.filmDistanceFor(frontToFocus);
+        const float fe = sys.effectiveFocalLength();
+        const auto zs = sys.vertexZ();
+        const size_t n = std::min<size_t>(sys.surfaces.size(), 16);
+        for (size_t i = 0; i < n; ++i)
+            u.lensSurfaces[i] = {sys.surfaces[i].radius, zs[i], sys.surfaces[i].ior, 0.5f * sys.surfaces[i].aperture};
+        // フィルムの大きさは、ピントの距離での倍率で設定の画角になるように（近くにピントを合わせても構図が変わらない）
+        const float halfH = fe * cam.tanHalfFovY * (frontToFocus > fe * 1.01f ? frontToFocus / (frontToFocus - fe) : 1.0f);
+        u.lens3.z = 1.0f / std::max(sys.centerWeight(filmDist), 1e-12f);
+        u.lens3.w = static_cast<float>(n);
+        u.lens4 = {halfH * cam.aspect, halfH, zs[n - 1] - filmDist, 0.5f * sys.surfaces[n - 1].aperture};
+    }
 }
 
 namespace {

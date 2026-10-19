@@ -16,16 +16,19 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 #include "lights.glsl"
 #include "ptcore.glsl"
 #include "bidir.glsl"
+#include "camera.glsl"
 
 // 光源側の頂点をカメラへつなぐ（光線の追跡で画面へ足し込む）
-void connectToCamera(SubPath sp, Shade s, vec3 pos, vec3 ng, vec3 ns, vec3 wo, VcmConst vc, float contProb) {
-    vec3 toCam = F.camPos.xyz - pos;
+void connectToCamera(SubPath sp, Shade s, vec3 pos, vec3 ng, vec3 ns, vec3 wo, VcmConst vc, float contProb,
+                     inout Rng rng) {
+    CameraConnection cc;
+    if (!connectToLens(pos, rng, cc)) return;
+    vec3 toCam = cc.lensPos - pos;
     float dist2 = dot(toCam, toCam);
     float dist = sqrt(dist2);
     vec3 dirToCam = toCam / dist;
-    vec2 raster;
-    float cosAtCamera;
-    if (!projectToRaster(-dirToCam, raster, cosAtCamera)) return;
+    vec2 raster = cc.raster;
+    float cosAtCamera = cc.cosAtCamera;
     if (dot(dirToCam, ng) <= 0.0) return;
     vec3 t, b;
     basis(ns, t, b);
@@ -36,18 +39,18 @@ void connectToCamera(SubPath sp, Shade s, vec3 pos, vec3 ng, vec3 ns, vec3 wo, V
     float revPdfW = bsdfPdf(s, l, v) * contProb;
 
     // 画像の 1 画素あたり → 面の上の面積あたりへの変換
-    float imagePointToCameraDist = imagePlaneDist() / cosAtCamera;
+    float imagePointToCameraDist = imagePlaneDist() * cc.imageScale / cosAtCamera;
     float imageToSolidAngle = imagePointToCameraDist * imagePointToCameraDist / cosAtCamera;
     float imageToSurface = imageToSolidAngle * l.z / dist2;
     float cameraPdfA = imageToSurface;
     float wLight = Mis(cameraPdfA / lightPathCount()) * (vc.vmWeight + sp.dVCM + sp.dVC * Mis(revPdfW));
     float misWeight = 1.0 / (wLight + 1.0);
-    vec4 c = misWeight * sp.throughput * f * (imageToSurface / lightPathCount());
-    c = maskTerminated(c, sp.terminated);
+    vec4 c = misWeight * sp.throughput * f * (imageToSurface / lightPathCount()) * cc.weight;
+    c = maskTerminated(c, sp.terminated || cameraIsChromatic());
     if (sp.pathLength + 1u >= 3u) c = clampRadiance(c);
     if (c.x + c.y + c.z + c.w <= 0.0) return;
     vec3 p0 = offsetRay(pos, ng);
-    vec3 d = F.camPos.xyz - p0;
+    vec3 d = cc.lensPos - p0;
     float dl = length(d);
     if (occludedDist(p0, d / dl, dl)) return;
     vec3 o = toOutputColor(c);
@@ -132,7 +135,7 @@ void main() {
                 prev = idx;
                 pathHead[pathIdx] = idx;
             }
-            if (sp.pathLength + 1u <= maxPathLength()) connectToCamera(sp, s, hit.pos, ng, nsS, wo, vc, contProb);
+            if (sp.pathLength + 1u <= maxPathLength()) connectToCamera(sp, s, hit.pos, ng, nsS, wo, vc, contProb, rng);
         }
         if (sp.pathLength + 2u > maxPathLength()) break;
         if (!scatterSubPath(sp, s, hit.pos, ng, nsS, wo, frontFace, delta, contProb, true, vc, rng)) break;

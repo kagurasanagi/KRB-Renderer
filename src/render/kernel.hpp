@@ -25,6 +25,8 @@ std::vector<KernelBinding> sceneBindings(const GpuScene& sc, const RenderTargets
 
 // フレームの定数（カメラ・環境光・光源の選び方など）
 FrameUBO makeFrameUbo(const GpuScene& sc, const RenderTargets& targets, const FrameParams& fp);
+// レンズの値（makeFrameUbo から呼ぶ）
+void fillLens(FrameUBO& u, const FrameParams& fp);
 
 // 計算シェーダ 1 本（記述子の組は 1 つ、プッシュ定数は PushConstants）
 class ComputeKernel {

@@ -89,6 +89,15 @@ std::unique_ptr<PreparedScene> prepareScene(const RenderOptions& o, const fs::pa
     if (o.envRotation) cfg.envRotationDeg = *o.envRotation;
     if (o.radianceClamp) cfg.radianceClamp = *o.radianceClamp;
     if (o.spectral) cfg.spectral = *o.spectral;
+    if (!o.lens.empty()) {
+        cfg.lens.model = o.lens == "thin"        ? scene::LensModel::Thin
+                         : o.lens == "realistic" ? scene::LensModel::Realistic
+                                                 : scene::LensModel::Pinhole;
+    }
+    if (o.fNumber) cfg.lens.fNumber = *o.fNumber;
+    if (o.focalLength) cfg.lens.focalLengthMm = *o.focalLength;
+    if (o.focusDistance) cfg.lens.focusDistanceMm = *o.focusDistance;
+    if (o.blades) cfg.lens.blades = *o.blades;
     if (!o.integrator.empty()) cfg.integrator = o.integrator;
     if (!o.hdr.empty()) cfg.hdr = o.hdr;
     if (cfg.hdr.empty()) {
@@ -240,6 +249,7 @@ render::FrameParams frameParams(const ProjectConfig& cfg, const scene::Camera& c
     f.radianceClamp = cfg.radianceClamp;
     f.spectral = cfg.spectral;
     f.vcmRadius = cfg.vcmRadius;
+    f.lens = cfg.lens;
     f.maxDepth = static_cast<uint32_t>(std::max(1, cfg.maxDepth));
     f.seed = seed;
     return f;

@@ -36,6 +36,11 @@ void addCommonOptions(CLI::App* c, krbr::app::RenderOptions& ro) {
     c->add_flag("--normal-priority", ro.normalPriority, "do not lower process priority");
     c->add_flag("--denoise,!--no-denoise", ro.denoise, "denoise with OIDN (default: on for view/watch, off for render)");
     c->add_flag("--spectral,!--rgb", ro.spectral, "spectral rendering (hero wavelengths) or RGB (default: RGB)");
+    c->add_option("--lens", ro.lens, "camera lens: pinhole (default), thin, realistic");
+    c->add_option("--f-number", ro.fNumber, "thin lens f-number");
+    c->add_option("--focal-length", ro.focalLength, "thin lens focal length (mm)");
+    c->add_option("--focus-distance", ro.focusDistance, "focus distance (mm, default: distance to the look-at point)");
+    c->add_option("--blades", ro.blades, "number of aperture blades (0 = circular)");
 }
 
 }  // namespace

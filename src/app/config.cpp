@@ -73,6 +73,20 @@ radiance_clamp = 10.0        # 間接光の放射輝度の上限（ホタル対�
 spectral = false             # true で分光レンダリング（代表波長方式。分散による色の分かれを再現する）
 integrator = "pt"            # pt（パストレーサー）/ bdpt（双方向）/ vcm（透明な物体越しの集光模様も扱う）
 # vcm_radius = 0.0           # VCM の近傍の半径の初期値（mm）。0 でシーンの大きさの 0.3%
+
+[lens]
+model = "pinhole"            # pinhole / thin（薄レンズ：被写界深度・ボケ）/ realistic（実レンズのデータで追跡。最終出力向け）
+focal_length_mm = 50.0       # thin：焦点距離（絞りの大きさ = 焦点距離 / F 値）
+f_number = 2.8
+focus_distance_mm = 0.0      # ピントを合わせる距離。0 で注視点まで
+blades = 0                   # 絞りの羽根の枚数（0 で円）
+blade_rotation_deg = 0.0
+blade_roundness = 0.0        # 0：多角形、1：円
+natural_vignetting = false   # cos⁴θ の周辺減光
+optical_vignetting = 0.0     # 口径食（0..1）。画面の端のボケがレモン形になる
+abbe_number = 0.0            # 軸上色収差（分光モード）：レンズのアッベ数。0 で無効
+lateral_ca = 0.0             # 倍率色収差（分光モード）：F 線と C 線の像の大きさの差（例 0.003）
+# lens_file = "lenses/dgauss.50mm.dat"   # realistic：pbrt 形式のレンズデータ。省略で内蔵の double Gauss 50mm f/2
 )";
 
 glm::vec3 readColor(const toml::node_view<const toml::node>& n, glm::vec3 def, bool* set = nullptr) {
@@ -183,6 +197,27 @@ ProjectConfig loadProjectConfig(const fs::path& pcbFile) {
         readNum(r["radiance_clamp"], c.radianceClamp);
         c.spectral = r["spectral"].value_or(c.spectral);
         c.integrator = r["integrator"].value_or(c.integrator);
+        auto l = root["lens"];
+        if (auto m = l["model"].value<std::string>()) {
+            if (*m == "thin") c.lens.model = scene::LensModel::Thin;
+            else if (*m == "realistic") c.lens.model = scene::LensModel::Realistic;
+            else c.lens.model = scene::LensModel::Pinhole;
+        }
+        readNum(l["focal_length_mm"], c.lens.focalLengthMm);
+        readNum(l["f_number"], c.lens.fNumber);
+        readNum(l["focus_distance_mm"], c.lens.focusDistanceMm);
+        readNum(l["blades"], c.lens.blades);
+        readNum(l["blade_rotation_deg"], c.lens.bladeRotationDeg);
+        readNum(l["blade_roundness"], c.lens.bladeRoundness);
+        c.lens.naturalVignetting = l["natural_vignetting"].value_or(c.lens.naturalVignetting);
+        readNum(l["optical_vignetting"], c.lens.opticalVignetting);
+        readNum(l["abbe_number"], c.lens.abbeNumber);
+        readNum(l["lateral_ca"], c.lens.lateralCA);
+        if (auto f = l["lens_file"].value<std::string>(); f && !f->empty()) {
+            fs::path p = platform::u8path(*f);
+            if (p.is_relative()) p = dir / p;
+            c.lens.lensFile = platform::pathToUtf8(p.lexically_normal());
+        }
         readNum(r["vcm_radius"], c.vcmRadius);
     }
     for (const auto& f : c.loadedFiles) log::info("config: {}", platform::pathToUtf8(f));

@@ -15,6 +15,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 #include "scene.glsl"
 #include "lights.glsl"
 #include "ptcore.glsl"
+#include "camera.glsl"
 
 void main() {
     uvec2 px = gl_GlobalInvocationID.xy;
@@ -27,17 +28,19 @@ void main() {
     vec2 jitter = rnd2(rng);
     vec2 ndc = (vec2(px) + jitter) / vec2(F.dims.xy) * 2.0 - 1.0;
 
+    CameraRay cr = generateCameraRay(ndc, rng);
     PtState st;
-    st.origin = F.camPos.xyz;
-    st.dir = normalize(F.camForward.xyz + ndc.x * F.camRight.xyz - ndc.y * F.camUp.xyz);
-    st.beta = spectral ? vec4(1.0) : vec4(1.0, 1.0, 1.0, 0.0);
+    st.origin = cr.origin;
+    st.dir = cr.dir;
+    st.beta = (spectral ? vec4(1.0) : vec4(1.0, 1.0, 1.0, 0.0)) * cr.weight;
     st.prevPdf = 0.0;
     st.inside = false;
     st.insideSigma = vec4(0.0);
     st.mediumSigma = vec4(0.0);
-    st.terminated = false;
+    st.terminated = cameraIsChromatic();  // 色収差：波長で光線が変わるので代表波長だけを追う
+    if (st.terminated) st.beta = vec4(4.0 * st.beta.x, 0.0, 0.0, 0.0);
     vec3 albedo = vec3(0.0), normal = vec3(0.0);
-    vec4 L = ptTrace(st, 0u, rng, albedo, normal);
+    vec4 L = cr.weight > 0.0 ? ptTrace(st, 0u, rng, albedo, normal) : vec4(0.0);
 
     vec3 color = spectral ? spectrumToXyz(L) : L.rgb;
     if (any(isnan(color)) || any(isinf(color))) color = vec3(0.0);

@@ -109,6 +109,13 @@ struct FrameUBO {
     glm::vec4 lightParams;  // x: 環境光を選ぶ確率, y: 発光三角形の Σ(輝度 × 面積), z: シーンを囲む球の半径, w: 発光三角形の数
     glm::vec4 sceneCenter;  // xyz: シーンを囲む球の中心
     glm::vec4 vcmParams;    // x: 近傍の半径（初期値、mm）, y: 半径を縮める α, z: 光源側の経路の数, w: 1 なら merging を使う
+    // レンズ（shaders/camera.glsl）
+    glm::vec4 lens0;  // x: 種類（0 ピンホール, 1 薄レンズ, 2 実レンズ）, y: 絞りの半径（mm）, z: ピントの距離（mm）, w: 羽根の枚数
+    glm::vec4 lens1;  // x: 羽根の回転（rad）, y: 丸み, z: 口径食の前の開口までの距離（0 で無効）, w: 前の開口の半径
+    glm::vec4 lens2;  // x: 1 なら cos⁴θ の周辺減光, y: 倍率色収差の係数, z: レンズからフィルムまでの距離 v, w: 焦点距離（d 線）
+    glm::vec4 lens3;  // x: レンズの nd, y: (nd − 1) / アッベ数（0 で軸上色収差なし）, z: 正規化の係数（実レンズ）, w: 実レンズの面の数
+    glm::vec4 lens4;  // 実レンズ：x, y: フィルムの半分の幅・高さ（mm）, z: フィルムの z, w: 後ろの開口の半径
+    glm::vec4 lensSurfaces[16];  // 実レンズの面：x: 曲率半径, y: 頂点の z, z: フィルム側の屈折率, w: 有効半径
 };
 
 struct PushConstants {

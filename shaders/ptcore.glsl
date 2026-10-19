@@ -44,7 +44,7 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
         if (!traceClosest(st.origin, st.dir, hit)) {
             vec4 Le = envSpectrum(st.dir);
             if (depth == 0u) {
-                L += Le;
+                L += st.beta * Le;  // beta はカメラの重み（周辺減光など）
                 albedo = clamp(envRadiance(st.dir), 0.0, 1.0);
             } else if (st.prevPdf > 0.0) {  // prevPdf = 0 は基材の中など（中から抜けた光は捨てる）
                 float w = powerHeuristic(st.prevPdf, envLightPdfW(st.dir));
@@ -63,7 +63,7 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
         if (frontFace && luminanceOf(hm.emission.rgb) > 0.0) {
             vec4 Le = specUnbounded(hm.emission.rgb, hm.specEmission);
             if (depth == 0u) {
-                L += Le;
+                L += st.beta * Le;
                 albedo = clamp(hm.emission.rgb, 0.0, 1.0);
             } else {
                 float cosL = dot(hit.ng, wo);

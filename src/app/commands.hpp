@@ -24,6 +24,9 @@ struct RenderOptions {
     bool debugLayers = false;
     std::optional<bool> denoise;  // ノイズ除去（render は既定で無効、view / watch は既定で有効）
     std::optional<bool> spectral;  // 分光モード（既定は設定ファイル、無ければ RGB）
+    std::string lens;              // pinhole / thin / realistic（空なら設定ファイル）
+    std::optional<float> fNumber, focalLength, focusDistance;
+    std::optional<int> blades;
 };
 
 struct ViewOptions {

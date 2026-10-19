@@ -18,6 +18,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 #include "lights.glsl"
 #include "ptcore.glsl"
 #include "bidir.glsl"
+#include "camera.glsl"
 
 // カメラ側の頂点の情報
 struct CamVertex {
@@ -156,32 +157,33 @@ void main() {
 
     vec2 jitter = rnd2(rng);
     vec2 ndc = (vec2(px) + jitter) / vec2(F.dims.xy) * 2.0 - 1.0;
-    vec3 dir = normalize(F.camForward.xyz + ndc.x * F.camRight.xyz - ndc.y * F.camUp.xyz);
-    float cosAtCamera = dot(F.camForward.xyz, dir);
-    float imagePointToCameraDist = imagePlaneDist() / cosAtCamera;
+    CameraRay cr = generateCameraRay(ndc, rng);
+    float cosAtCamera = dot(F.camForward.xyz, cr.dir);
+    float imagePointToCameraDist = imagePlaneDist() * cr.imageScale / cosAtCamera;
     float cameraPdfW = imagePointToCameraDist * imagePointToCameraDist / cosAtCamera;
 
     SubPath cam;
-    cam.origin = F.camPos.xyz;
-    cam.dir = dir;
-    cam.throughput = spectral ? vec4(1.0) : vec4(1.0, 1.0, 1.0, 0.0);
+    cam.origin = cr.origin;
+    cam.dir = cr.dir;
+    cam.throughput = (spectral ? vec4(1.0) : vec4(1.0, 1.0, 1.0, 0.0)) * cr.weight;
     cam.pathLength = 1u;
-    cam.dVCM = Mis(lightPathCount() / cameraPdfW);
+    // 実レンズでは、光源側の経路をカメラへ直接つなぐ戦略がないので、その分の項を 0 にする
+    cam.dVCM = lensModel() == LENS_REALISTIC ? 0.0 : Mis(lightPathCount() / cameraPdfW);
     cam.dVC = 0.0;
     cam.dVM = 0.0;
-    cam.terminated = false;
+    cam.terminated = cameraIsChromatic();
     cam.finiteLight = false;
     cam.mediumSigma = vec4(0.0);
 
     vec4 L = vec4(0.0);
     vec3 albedo = vec3(0.0), normal = vec3(0.0);
-    for (;;) {
+    for (; cr.weight > 0.0;) {
         Hit hit;
         if (!traceClosest(cam.origin, cam.dir, hit)) {
             // 環境光に当たった（s = 0）
             vec4 Le = envSpectrum(cam.dir);
             if (cam.pathLength == 1u) {
-                L += Le;
+                L += maskTerminated(cam.throughput * Le, cam.terminated);
                 albedo = clamp(envRadiance(cam.dir), 0.0, 1.0);
             } else {
                 float directPdfA = envLightPdfW(cam.dir);
@@ -213,7 +215,7 @@ void main() {
         if (frontFace && luminanceOf(hm.emission.rgb) > 0.0) {
             vec4 Le = specUnbounded(hm.emission.rgb, hm.specEmission);
             if (cam.pathLength == 1u) {
-                L += Le;
+                L += maskTerminated(cam.throughput * Le, cam.terminated);
             } else {
                 float directPdfA = emitterPdfA(hm.emission.rgb);
                 float emissionPdfW = directPdfA * max(dot(hit.ng, wo), 0.0) * INV_PI;
