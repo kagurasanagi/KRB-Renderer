@@ -143,6 +143,18 @@ scene::CameraParams cameraParams(const ProjectConfig& cfg, int width, int height
     return cp;
 }
 
+scene::Camera initialCamera(const PreparedScene& prep, const RenderOptions& o, int width, int height) {
+    const ProjectConfig& cfg = prep.cfg;
+    scene::Camera cam = scene::frameCamera(cameraParams(cfg, width, height), prep.scene.framingPoints);
+    glm::vec3 target = cam.target;
+    if (o.lookAt.size() == 2) {
+        const auto& b = prep.scene.board;
+        target = geom::boardToWorld({o.lookAt[0], o.lookAt[1]}, b.thickness / 2, b.center);
+    }
+    const float dist = cam.distance / static_cast<float>(std::max(1e-3, o.zoom));
+    return scene::orbitCamera(target, dist, cfg.elevationDeg, cfg.azimuthDeg, cfg.fovDeg, cam.aspect);
+}
+
 render::FrameParams frameParams(const ProjectConfig& cfg, const scene::Camera& cam, unsigned seed) {
     render::FrameParams f;
     f.camera = cam;

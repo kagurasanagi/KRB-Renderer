@@ -6,6 +6,7 @@
 
 #include "core/log.hpp"
 #include "core/platform.hpp"
+#include "geom/relief.hpp"
 #include "scene/scene.hpp"
 
 namespace krbr::scene {
@@ -53,12 +54,20 @@ void setupBoardMaterials(Scene& s, const kicad::Board& board, const SceneOptions
     fr4.base_color = srgbToLinear(o.fr4Color);
     fr4.specular_roughness = 0.55f;
     fr4.specular_ior = 1.5f;
+    fr4.bump_pattern = BumpPattern::Weave;  // ガラス繊維の織り（7628 程度のピッチ）
+    fr4.bump_strength = 0.12f;
+    fr4.bump_scale = 0.45f;
+    fr4.roughness_variation = 0.25f;
 
     Material copper;
     copper.name = "copper";
     copper.base_color = {0.955f, 0.638f, 0.538f};
     copper.base_metalness = 1.0f;
     copper.specular_roughness = 0.25f;
+    copper.bump_pattern = BumpPattern::Noise;
+    copper.bump_strength = 0.015f;
+    copper.bump_scale = 0.05f;
+    copper.roughness_variation = 0.3f;
 
     // 表面処理：設定 > stackup の copper_finish > ENIG
     std::string finish = o.finish;
@@ -72,16 +81,25 @@ void setupBoardMaterials(Scene& s, const kicad::Board& board, const SceneOptions
     Material fin;
     fin.name = "finish_" + finish;
     fin.base_metalness = 1.0f;
+    fin.bump_pattern = BumpPattern::Noise;
     if (finish == "HASL") {
+        // はんだの盛り上がりによる、ゆるやかで大きな凹凸
         fin.base_color = {0.80f, 0.80f, 0.79f};
-        fin.specular_roughness = 0.32f;
+        fin.specular_roughness = 0.22f;
+        fin.bump_strength = 0.10f;
+        fin.bump_scale = 0.6f;
+        fin.roughness_variation = 0.2f;
     } else if (finish == "OSP") {
         fin = copper;
         fin.name = "finish_OSP";
         fin.specular_roughness = 0.3f;
     } else {
+        // 無電解ニッケル金：細かい粒状感
         fin.base_color = {1.0f, 0.766f, 0.336f};
-        fin.specular_roughness = 0.2f;
+        fin.specular_roughness = 0.18f;
+        fin.bump_strength = 0.012f;
+        fin.bump_scale = 0.05f;
+        fin.roughness_variation = 0.2f;
     }
 
     const glm::vec3 maskSrgb =
@@ -97,11 +115,19 @@ void setupBoardMaterials(Scene& s, const kicad::Board& board, const SceneOptions
     mask.base_color = srgbToLinear(maskSrgb) * 0.6f;
     mask.base_weight = o.maskScatter;  // シェーダではこの値を「散乱を選ぶ確率」として使う
     mask.specular_roughness = 0.5f;
+    mask.bump_pattern = BumpPattern::Noise;  // 塗膜のゆず肌
+    mask.bump_strength = 0.012f;
+    mask.bump_scale = 0.45f;
+    mask.roughness_variation = 0.25f;
 
     Material silk;
     silk.name = "silkscreen";
     silk.base_color = srgbToLinear(o.silkColor);
     silk.specular_roughness = 0.65f;
+    silk.bump_pattern = BumpPattern::Noise;  // インクのざらつき
+    silk.bump_strength = 0.2f;
+    silk.bump_scale = 0.06f;
+    silk.roughness_variation = 0.3f;
 
     s.boardMats.top = addMaterial(s, top);
     s.boardMats.bottom = addMaterial(s, bottom);
@@ -112,6 +138,16 @@ void setupBoardMaterials(Scene& s, const kicad::Board& board, const SceneOptions
     s.boardMats.plated = s.boardMats.finish;
     s.boardMats.mask = addMaterial(s, mask);
     s.boardMats.silk = addMaterial(s, silk);
+    Material maskedFr4;
+    maskedFr4.name = "solder_mask_on_fr4";
+    maskedFr4.kind = MaterialKind::Masked;
+    maskedFr4.maskedBase = s.boardMats.fr4;
+    maskedFr4.maskedMask = s.boardMats.mask;
+    Material maskedCu = maskedFr4;
+    maskedCu.name = "solder_mask_on_copper";
+    maskedCu.maskedBase = s.boardMats.copper;
+    s.boardMats.maskOnFr4 = addMaterial(s, maskedFr4);
+    s.boardMats.maskOnCopper = addMaterial(s, maskedCu);
     log::info("board materials: finish {}, mask sRGB ({:.2f}, {:.2f}, {:.2f})", finish, maskSrgb.r, maskSrgb.g,
               maskSrgb.b);
 }
@@ -243,13 +279,42 @@ Scene buildScene(const SceneContext& ctx) {
     setupBoardMaterials(s, board, opts);
 
     // 基板
-    s.board = geom::buildBoardGeometry(board);
+    geom::ReliefParams rp = opts.reliefParams;
+    if (opts.reliefCopperFromStackup && board.stackup.copperThickness > 0) rp.copper = board.stackup.copperThickness;
+    geom::BoardBuildOptions bo;
+    if (opts.relief) {
+        bo.coreHalf = geom::reliefCoreHalf(board.stackup.thickness, rp);
+        bo.caps = false;  // 上下面は凹凸メッシュが受け持つ
+    }
+    s.board = geom::buildBoardGeometry(board, bo);
     {
         SceneMesh bm;
         bm.name = "board";
         bm.mesh = s.board.mesh;
         const uint32_t remap[4] = {s.boardMats.top, s.boardMats.bottom, s.boardMats.edge, s.boardMats.plated};
         for (auto& m : bm.mesh.triMaterial) m = remap[std::min<uint32_t>(m, 3)];
+        if (opts.relief) {
+            log::ScopedTimer t("relief");
+            const uint32_t rmap[5] = {s.boardMats.fr4, s.boardMats.finish, s.boardMats.maskOnFr4,
+                                      s.boardMats.maskOnCopper, s.boardMats.silk};
+            for (int side = 0; side < 2; ++side) {
+                const auto sp = raster::collectSidePaths(board, static_cast<raster::Side>(side), opts.layerArt);
+                geom::ReliefInput in{sp.copper, sp.maskOpen, sp.silk, {}};
+                // レジストでふさがれたビアは穴の上にも面を張る
+                const bool tentDefault = side == 0 ? board.setup.tentFront : board.setup.tentBack;
+                for (const auto& v : board.vias) {
+                    const std::optional<bool> tent = side == 0 ? v.tentFront : v.tentBack;
+                    if (tent.value_or(tentDefault) && v.drill > 0) geom::append(in.tentedHoles, geom::disc(v.pos, v.drill / 2));
+                }
+                geom::Mesh rm;
+                geom::buildRelief(s.board, side, in, rp, rm);
+                const uint32_t base = static_cast<uint32_t>(bm.mesh.positions.size());
+                bm.mesh.positions.insert(bm.mesh.positions.end(), rm.positions.begin(), rm.positions.end());
+                bm.mesh.normals.insert(bm.mesh.normals.end(), rm.normals.begin(), rm.normals.end());
+                for (uint32_t i : rm.indices) bm.mesh.indices.push_back(base + i);
+                for (uint32_t m : rm.triMaterial) bm.mesh.triMaterial.push_back(rmap[std::min<uint32_t>(m, 4)]);
+            }
+        }
         s.meshes.push_back(std::move(bm));
         s.instances.push_back({0, glm::mat4(1.0f)});
         addInstanceBounds(s, 0, glm::mat4(1.0f));
@@ -264,6 +329,9 @@ Scene buildScene(const SceneContext& ctx) {
     ph.name = "placeholder";
     ph.base_color = srgbToLinear(opts.placeholderColor);
     ph.specular_roughness = 0.6f;
+    ph.bump_pattern = BumpPattern::Noise;
+    ph.bump_strength = 0.02f;
+    ph.bump_scale = 0.5f;
     const uint32_t phMat = addMaterial(s, ph);
     uint32_t cubeMesh = UINT32_MAX;
 
@@ -332,6 +400,8 @@ Scene buildScene(const SceneContext& ctx) {
             ++s.placeholders;
         }
     }
+    // 凹凸の強さの一括調整
+    for (auto& m : s.materials) m.bump_strength *= opts.bumpIntensity;
     log::info("scene: {} meshes, {} instances ({} models, {} placeholders), {} materials", s.meshes.size(),
               s.instances.size(), s.modelInstances, s.placeholders, s.materials.size());
     return s;

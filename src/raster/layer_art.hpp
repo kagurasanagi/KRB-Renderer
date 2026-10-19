@@ -26,6 +26,12 @@ struct LayerTextures {
     } stats[2];
 };
 
+// 面ごとの銅箔・レジスト開口・シルクの多角形（和をとった後）
+struct SidePaths {
+    geom::Paths copper, maskOpen, silk;
+};
+SidePaths collectSidePaths(const kicad::Board& board, Side side, const LayerArtOptions& opts);
+
 LayerTextures buildLayerTextures(const kicad::Board& board, const geom::BoardGeometry& geo,
                                  const LayerArtOptions& opts);
 

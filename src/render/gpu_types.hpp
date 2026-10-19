@@ -25,9 +25,10 @@ struct GpuMaterial {
     glm::vec4 specColor;  // rgb specular_color, a specular_weight
     glm::vec4 params0;    // base_metalness, specular_roughness, specular_ior, coat_weight
     glm::vec4 coatColor;  // rgb coat_color, a coat_roughness
-    glm::vec4 params1;    // coat_ior, kind, board side, -
+    glm::vec4 params1;    // coat_ior, kind, board side / masked base, masked mask
+    glm::vec4 params2;    // bump pattern, bump strength, bump scale (mm), roughness variation
 };
-static_assert(sizeof(GpuMaterial) == 80);
+static_assert(sizeof(GpuMaterial) == 96);
 
 inline GpuMaterial toGpu(const scene::Material& m) {
     GpuMaterial g;
@@ -35,7 +36,12 @@ inline GpuMaterial toGpu(const scene::Material& m) {
     g.specColor = {m.specular_color, m.specular_weight};
     g.params0 = {m.base_metalness, m.specular_roughness, m.specular_ior, m.coat_weight};
     g.coatColor = {m.coat_color, m.coat_roughness};
-    g.params1 = {m.coat_ior, static_cast<float>(static_cast<uint32_t>(m.kind)), static_cast<float>(m.boardSide), 0.0f};
+    const bool masked = m.kind == scene::MaterialKind::Masked;
+    g.params1 = {m.coat_ior, static_cast<float>(static_cast<uint32_t>(m.kind)),
+                 static_cast<float>(masked ? m.maskedBase : m.boardSide),
+                 static_cast<float>(masked ? m.maskedMask : 0u)};
+    g.params2 = {static_cast<float>(static_cast<uint32_t>(m.bump_pattern)), m.bump_strength, m.bump_scale,
+                 m.roughness_variation};
     return g;
 }
 

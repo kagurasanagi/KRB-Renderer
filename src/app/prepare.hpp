@@ -31,6 +31,8 @@ std::unique_ptr<PreparedScene> prepareScene(const RenderOptions& o, const std::f
 std::optional<kicad::Board> loadBoardOrReport(const std::string& pcb);
 
 scene::CameraParams cameraParams(const ProjectConfig& cfg, int width, int height);
+// 自動の構図に --look-at / --zoom を反映したカメラ
+scene::Camera initialCamera(const PreparedScene& prep, const RenderOptions& o, int width, int height);
 render::FrameParams frameParams(const ProjectConfig& cfg, const scene::Camera& cam, unsigned seed);
 
 }  // namespace krbr::app

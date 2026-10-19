@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "geom/board_mesh.hpp"
+#include "geom/relief.hpp"
 #include "kicad/board.hpp"
 #include "kicad/model_resolver.hpp"
 #include "model/mesh_cache.hpp"
@@ -26,6 +27,7 @@ struct Instance {
 struct BoardMaterialIds {
     uint32_t top = 0, bottom = 0, edge = 0, plated = 0;  // 基板メッシュの面
     uint32_t mask = 0, copper = 0, finish = 0, fr4 = 0, silk = 0;  // 基板面の中で使い分ける材質
+    uint32_t maskOnFr4 = 0, maskOnCopper = 0;                      // 凹凸を形状にした場合のレジスト面
 };
 
 struct MissingModel {
@@ -61,6 +63,10 @@ struct SceneOptions {
     glm::vec3 placeholderColor{0.30f, 0.36f, 0.50f};  // sRGB
     bool includeDnp = true;
     raster::LayerArtOptions layerArt;
+    bool relief = true;                    // 銅・レジスト・シルクの厚みを形状として作る
+    bool reliefCopperFromStackup = true;   // 銅の厚みは stackup の値を使う
+    geom::ReliefParams reliefParams;
+    float bumpIntensity = 1.0f;            // 表面の凹凸（バンプ）の強さの倍率。0 で無効
 };
 
 struct SceneContext {

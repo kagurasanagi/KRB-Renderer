@@ -13,6 +13,8 @@ namespace {
 
 const char* kDefaultToml = R"(# krbr: 部品の 3D モデルの材質の対応表（全体設定）
 # パラメータ名は OpenPBR Surface に合わせています。base_color を省略するとモデルの色を使います。
+# bump_pattern（"noise" / "weave" / "none"）, bump_strength（傾き）, bump_scale（mm）, roughness_variation は
+# krbr 独自の、表面の微細な凹凸と粗さのむらです。
 # [[rules]] は上から順に評価され、最初に一致したものが使われます。
 #   model   : モデルのファイル名に対するワイルドカード（例 "LED_*"）
 #   hue_min / hue_max (度), sat_min / sat_max, val_min / val_max : 面の色（sRGB の HSV）の条件
@@ -20,20 +22,36 @@ const char* kDefaultToml = R"(# krbr: 部品の 3D モデルの材質の対応�
 [presets.metal_tin]        # 錫めっきのリード・端子
 base_metalness = 1.0
 specular_roughness = 0.28
+bump_pattern = "noise"
+bump_strength = 0.012
+bump_scale = 0.08
+roughness_variation = 0.2
 
 [presets.metal_gold]       # 金めっきの端子
 base_metalness = 1.0
 specular_roughness = 0.22
+bump_pattern = "noise"
+bump_strength = 0.01
+bump_scale = 0.08
+roughness_variation = 0.2
 
 [presets.plastic]          # 樹脂・セラミックのボディ
 base_metalness = 0.0
 specular_roughness = 0.45
 specular_ior = 1.5
+bump_pattern = "noise"
+bump_strength = 0.012
+bump_scale = 0.3
+roughness_variation = 0.15
 
 [presets.glossy_plastic]   # 白い樹脂など、つやのあるもの
 base_metalness = 0.0
 specular_roughness = 0.3
 specular_ior = 1.5
+bump_pattern = "noise"
+bump_strength = 0.01
+bump_scale = 0.3
+roughness_variation = 0.15
 
 [[rules]]   # わずかに黄みのある灰色（KiCad 標準モデルの "metal grey pins" など）
 preset = "metal_tin"
@@ -94,6 +112,12 @@ void readMaterial(const toml::table& t, Material& m, bool& hasBaseColor) {
     c("coat_color", m.coat_color);
     f("coat_roughness", m.coat_roughness);
     f("coat_ior", m.coat_ior);
+    // krbr 独自：表面の微細な凹凸
+    if (auto v = t["bump_pattern"].value<std::string>())
+        m.bump_pattern = *v == "noise" ? BumpPattern::Noise : *v == "weave" ? BumpPattern::Weave : BumpPattern::None;
+    f("bump_strength", m.bump_strength);
+    f("bump_scale", m.bump_scale);
+    f("roughness_variation", m.roughness_variation);
 }
 
 bool parseInto(const std::string& text, const std::string& source, std::map<std::string, MaterialPreset>& presets,
@@ -109,12 +133,14 @@ bool parseInto(const std::string& text, const std::string& source, std::map<std:
         for (const auto& [name, node] : *ps) {
             const toml::table* t = node.as_table();
             if (!t) continue;
-            MaterialPreset p;
-            p.material.name = std::string(name.str());
+            // 同じ名前があれば、それに書かれた項目だけを上書きする
+            const std::string key(name.str());
+            MaterialPreset p = presets.count(key) ? presets[key] : MaterialPreset{};
+            p.material.name = key;
             bool hasBase = false;
             readMaterial(*t, p.material, hasBase);
-            p.useModelColor = !hasBase;
-            presets[std::string(name.str())] = p;
+            if (hasBase) p.useModelColor = false;
+            presets[key] = p;
         }
     }
     if (const toml::array* rs = root["rules"].as_array()) {

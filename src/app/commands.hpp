@@ -1,6 +1,7 @@
 #pragma once
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace krbr::app {
 
@@ -11,6 +12,8 @@ struct RenderOptions {
     std::optional<int> spp, width, height, maxDepth;
     std::optional<double> elevation, azimuth, fov;
     std::optional<float> exposure, envIntensity, envRotation, radianceClamp;
+    std::vector<double> lookAt;  // 注視点（KiCad の基板座標 X, Y、mm）
+    double zoom = 1.0;           // 自動で決めた距離に対する拡大率
     std::string integrator;
     unsigned seed = 0;
     bool init = false;

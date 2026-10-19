@@ -19,10 +19,12 @@ void addCommonOptions(CLI::App* c, krbr::app::RenderOptions& ro) {
     c->add_option("--elevation", ro.elevation, "camera elevation above the board (deg, default 35)");
     c->add_option("--azimuth", ro.azimuth, "camera azimuth (deg, default 45)");
     c->add_option("--fov", ro.fov, "vertical field of view (deg, default 30)");
+    c->add_option("--look-at", ro.lookAt, "look at this board point (KiCad X Y in mm)")->expected(2)->delimiter(',');
+    c->add_option("--zoom", ro.zoom, "zoom factor relative to the automatic framing");
     c->add_option("--exposure", ro.exposure, "exposure (EV)");
     c->add_option("--env-intensity", ro.envIntensity, "environment intensity multiplier");
     c->add_option("--env-rotation", ro.envRotation, "environment rotation around the vertical axis (deg)");
-    c->add_option("--clamp", ro.radianceClamp, "clamp per-sample radiance (0 = off)");
+    c->add_option("--clamp", ro.radianceClamp, "clamp indirect radiance per sample to suppress fireflies (default 10, 0 = off)");
     c->add_option("--integrator", ro.integrator, "integrator (pt)");
     c->add_option("--seed", ro.seed, "random seed");
     c->add_flag("--init", ro.init, "write default config files (<project>.krbr/*.toml) if missing");

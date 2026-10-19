@@ -10,13 +10,21 @@ namespace krbr::scene {
 
 enum class MaterialKind : uint32_t {
     Generic = 0,
-    BoardSurface = 1,  // 層テクスチャで材質を決める基板面
+    BoardSurface = 1,  // 層テクスチャで材質を決める基板面（凹凸を形状にしない場合）
+    Masked = 2,        // レジストの下に別の材質（maskedBase）がある面。レジストは maskedMask
+};
+
+enum class BumpPattern : uint32_t {
+    None = 0,
+    Noise = 1,  // 等方的なノイズ（塗膜のゆず肌・粒状感・樹脂のむら）
+    Weave = 2,  // ガラス繊維の織り目（FR4）。bump_scale が織りのピッチ
 };
 
 struct Material {
     std::string name;
     MaterialKind kind = MaterialKind::Generic;
     uint32_t boardSide = 0;  // BoardSurface 用（0=表, 1=裏）
+    uint32_t maskedBase = 0, maskedMask = 0;  // Masked 用（材質の番号）
 
     glm::vec3 base_color{0.8f};
     float base_weight = 1.0f;
@@ -29,6 +37,12 @@ struct Material {
     glm::vec3 coat_color{1.0f};
     float coat_roughness = 0.0f;
     float coat_ior = 1.6f;
+
+    // krbr 独自：表面の微細な凹凸（法線の揺らぎ）と粗さのむら
+    BumpPattern bump_pattern = BumpPattern::None;
+    float bump_strength = 0.0f;   // 傾きの大きさ（0.05 で約 3°）
+    float bump_scale = 0.2f;      // 凹凸の大きさ（mm）
+    float roughness_variation = 0.0f;  // specular_roughness の相対的なむら（0..1）
 };
 
 // sRGB（表示値）からリニアへ

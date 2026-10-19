@@ -260,7 +260,7 @@ int cmdView(const ViewOptions& vo) {
 
         // 初期のカメラ（オフライン描画と同じ自動調整）
         auto resetCamera = [&](int w, int h) {
-            const scene::Camera c = scene::frameCamera(cameraParams(cfg, w, h), prep->scene.framingPoints);
+            const scene::Camera c = initialCamera(*prep, o, w, h);
             st.target = c.target;
             st.distance = c.distance;
             st.elevation = cfg.elevationDeg;

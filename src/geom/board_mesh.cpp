@@ -94,7 +94,13 @@ void addHole(Vec2 center, double angleDeg, Vec2 size, bool oval, bool plated, Pa
                                center + kicad::rotatePoint(l * dir, angleDeg), minDim / 2});
 }
 
-void triangulateFaces(const Clipper2Lib::PolyPath64& node, double yTop, double yBot, Vec2 center, Mesh& mesh) {
+struct Cap {
+    double y;
+    float normalY;  // +1: 上向きの面, -1: 下向き
+    uint32_t mat;
+};
+
+void triangulateFaces(const Clipper2Lib::PolyPath64& node, const std::vector<Cap>& caps, Vec2 center, Mesh& mesh) {
     for (size_t i = 0; i < node.Count(); ++i) {
         const auto* outer = node.Child(i);  // 外側の輪郭
         using Pt = std::array<double, 2>;
@@ -113,16 +119,18 @@ void triangulateFaces(const Clipper2Lib::PolyPath64& node, double yTop, double y
         for (size_t h = 0; h < outer->Count(); ++h) addRing(outer->Child(h)->Polygon());
         const std::vector<uint32_t> idx = mapbox::earcut<uint32_t>(poly);
 
-        const uint32_t baseTop = static_cast<uint32_t>(mesh.positions.size());
-        for (Vec2 v : flat) mesh.addVertex(boardToWorld(v, yTop, center), {0, 1, 0});
-        const uint32_t baseBot = static_cast<uint32_t>(mesh.positions.size());
-        for (Vec2 v : flat) mesh.addVertex(boardToWorld(v, yBot, center), {0, -1, 0});
-        for (size_t t = 0; t + 2 < idx.size(); t += 3) {
-            mesh.addTriangle(baseTop + idx[t], baseTop + idx[t + 1], baseTop + idx[t + 2], BoardTop);
-            mesh.addTriangle(baseBot + idx[t], baseBot + idx[t + 2], baseBot + idx[t + 1], BoardBottom);
+        for (const Cap& cap : caps) {
+            const uint32_t base = static_cast<uint32_t>(mesh.positions.size());
+            for (Vec2 v : flat) mesh.addVertex(boardToWorld(v, cap.y, center), {0, cap.normalY, 0});
+            for (size_t t = 0; t + 2 < idx.size(); t += 3) {
+                if (cap.normalY > 0)
+                    mesh.addTriangle(base + idx[t], base + idx[t + 1], base + idx[t + 2], cap.mat);
+                else
+                    mesh.addTriangle(base + idx[t], base + idx[t + 2], base + idx[t + 1], cap.mat);
+            }
         }
         // 穴の中の島（さらに内側の外形）
-        for (size_t h = 0; h < outer->Count(); ++h) triangulateFaces(*outer->Child(h), yTop, yBot, center, mesh);
+        for (size_t h = 0; h < outer->Count(); ++h) triangulateFaces(*outer->Child(h), caps, center, mesh);
     }
 }
 
@@ -134,8 +142,8 @@ void collectRings(const Clipper2Lib::PolyPath64& node, std::vector<const Path*>&
 }
 
 // 輪郭の側面。材質が左側にある向き（Clipper の外周は正の面積、穴は負）で外向き法線を決める
-void buildWalls(const Path& ring, double yTop, double yBot, Vec2 center, const std::vector<PlatedHole>& plated,
-                Mesh& mesh) {
+template <class MatFn>
+void buildWalls(const Path& ring, double yTop, double yBot, Vec2 center, MatFn matAt, Mesh& mesh) {
     const size_t n = ring.size();
     if (n < 3) return;
     std::vector<Vec2> pts = fromPath(ring);
@@ -164,14 +172,7 @@ void buildWalls(const Path& ring, double yTop, double yBot, Vec2 center, const s
         if (glm::length(p1 - p0) <= 0) continue;
         const Vec2 n0 = vtxNormal(i, (i + n - 1) % n);
         const Vec2 n1 = vtxNormal(i, j);
-        const Vec2 mid = (p0 + p1) * 0.5;
-        uint32_t mat = BoardEdge;
-        for (const auto& h : plated) {
-            if (std::abs(distToSegment(mid, h.a, h.b) - h.r) < 0.02) {
-                mat = BoardPlated;
-                break;
-            }
-        }
+        const uint32_t mat = matAt((p0 + p1) * 0.5);
         const glm::vec3 wn0{static_cast<float>(n0.x), 0.f, static_cast<float>(n0.y)};
         const glm::vec3 wn1{static_cast<float>(n1.x), 0.f, static_cast<float>(n1.y)};
         const uint32_t a = mesh.addVertex(boardToWorld(p0, yTop, center), wn0);
@@ -185,9 +186,25 @@ void buildWalls(const Path& ring, double yTop, double yBot, Vec2 center, const s
 
 }  // namespace
 
-BoardGeometry buildBoardGeometry(const Board& board) {
+void extrudeRegion(const Paths& region, double yFace, double yBase, bool faceUp, uint32_t faceMat, uint32_t wallMat,
+                   Vec2 center, Mesh& mesh) {
+    if (region.empty()) return;
+    Clipper2Lib::PolyTree64 tree;
+    Clipper2Lib::Clipper64 clip;
+    clip.AddSubject(region);
+    clip.Execute(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::NonZero, tree);
+    triangulateFaces(tree, {{yFace, faceUp ? 1.0f : -1.0f, faceMat}}, center, mesh);
+    if (std::abs(yFace - yBase) < 1e-9) return;
+    std::vector<const Path*> rings;
+    collectRings(tree, rings);
+    const double hi = std::max(yFace, yBase), lo = std::min(yFace, yBase);
+    for (const Path* r : rings) buildWalls(*r, hi, lo, center, [&](Vec2) { return wallMat; }, mesh);
+}
+
+BoardGeometry buildBoardGeometry(const Board& board, const BoardBuildOptions& opts) {
     BoardGeometry geo;
     geo.thickness = board.stackup.thickness;
+    geo.coreHalf = opts.coreHalf > 0 ? opts.coreHalf : geo.thickness / 2;
 
     int openChains = 0;
     auto loops = outlineLoops(board, openChains);
@@ -238,11 +255,16 @@ BoardGeometry buildBoardGeometry(const Board& board) {
     clip.Execute(Clipper2Lib::ClipType::Difference, Clipper2Lib::FillRule::NonZero, tree);
     geo.body = Clipper2Lib::PolyTreeToPaths64(tree);
 
-    const double yTop = geo.thickness / 2, yBot = -geo.thickness / 2;
-    triangulateFaces(tree, yTop, yBot, geo.center, geo.mesh);
+    const double yTop = geo.coreHalf, yBot = -geo.coreHalf;
+    if (opts.caps) triangulateFaces(tree, {{yTop, 1.0f, BoardTop}, {yBot, -1.0f, BoardBottom}}, geo.center, geo.mesh);
     std::vector<const Path*> rings;
     collectRings(tree, rings);
-    for (const Path* r : rings) buildWalls(*r, yTop, yBot, geo.center, plated, geo.mesh);
+    auto wallMat = [&](Vec2 mid) -> uint32_t {
+        for (const auto& h : plated)
+            if (std::abs(distToSegment(mid, h.a, h.b) - h.r) < 0.02) return BoardPlated;
+        return BoardEdge;
+    };
+    for (const Path* r : rings) buildWalls(*r, yTop, yBot, geo.center, wallMat, geo.mesh);
 
     log::info("board: {:.2f} x {:.2f} mm, thickness {:.2f} mm, {} holes, {} triangles", geo.bounds.size().x,
               geo.bounds.size().y, geo.thickness, geo.holeCount, geo.mesh.triangleCount());

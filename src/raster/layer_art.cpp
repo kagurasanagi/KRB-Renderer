@@ -22,11 +22,9 @@ bool padHasCopper(const kicad::Pad& p) {
 
 bool viaOnSide(const kicad::Via& v, const std::string& cu) { return v.layerFrom == cu || v.layerTo == cu; }
 
-struct SidePaths {
-    Paths copper, maskOpen, silk;
-};
+}  // namespace
 
-SidePaths collectSide(const Board& board, Side side, const LayerArtOptions& opts) {
+SidePaths collectSidePaths(const Board& board, Side side, const LayerArtOptions& opts) {
     const std::string cu = side == Front ? "F.Cu" : "B.Cu";
     const std::string mask = side == Front ? "F.Mask" : "B.Mask";
     const std::string silk = side == Front ? "F.SilkS" : "B.SilkS";
@@ -63,8 +61,6 @@ SidePaths collectSide(const Board& board, Side side, const LayerArtOptions& opts
     return sp;
 }
 
-}  // namespace
-
 LayerTextures buildLayerTextures(const Board& board, const BoardGeometry& geo, const LayerArtOptions& opts) {
     LayerTextures tex;
     const Vec2 lo = geo.bounds.lo - Vec2{opts.marginMm, opts.marginMm};
@@ -83,7 +79,7 @@ LayerTextures buildLayerTextures(const Board& board, const BoardGeometry& geo, c
     const size_t npx = static_cast<size_t>(tex.grid.width) * tex.grid.height;
     std::vector<float> cov;
     for (Side side : {Front, Back}) {
-        SidePaths sp = collectSide(board, side, opts);
+        SidePaths sp = collectSidePaths(board, side, opts);
         tex.stats[side] = {sp.copper.size(), sp.maskOpen.size(), sp.silk.size()};
         auto& out = tex.rgba[side];
         out.assign(npx * 4, 0);

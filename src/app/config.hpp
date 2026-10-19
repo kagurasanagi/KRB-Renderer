@@ -28,7 +28,7 @@ struct ProjectConfig {
     int spp = 64;
     int maxDepth = 8;
     float exposureEv = 0.0f;
-    float radianceClamp = 0.0f;
+    float radianceClamp = 10.0f;  // 間接光だけに効く上限（ホタル対策）
     std::string integrator = "pt";
 
     std::vector<fs::path> loadedFiles;

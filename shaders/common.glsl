@@ -7,7 +7,12 @@
 
 // 材質の種別
 #define MAT_GENERIC 0u
-#define MAT_BOARD 1u  // 基板の表裏面。層テクスチャで材質を決める
+#define MAT_BOARD 1u   // 基板の表裏面。層テクスチャで材質を決める（凹凸を形状にしない場合）
+#define MAT_MASKED 2u  // レジストの下に別の材質がある面（params1.z: 下の材質, params1.w: レジスト）
+
+#define BUMP_NONE 0u
+#define BUMP_NOISE 1u
+#define BUMP_WEAVE 2u
 
 struct Vertex {
     vec3 pos;
@@ -29,7 +34,8 @@ struct Material {
     vec4 specColor;   // rgb: specular_color, a: specular_weight
     vec4 params0;     // x: base_metalness, y: specular_roughness, z: specular_ior, w: coat_weight
     vec4 coatColor;   // rgb: coat_color, a: coat_roughness
-    vec4 params1;     // x: coat_ior, y: kind, z: side（基板面: 0=表, 1=裏）, w: 未使用
+    vec4 params1;     // x: coat_ior, y: kind, z: side（基板面: 0=表, 1=裏）/ 下の材質, w: レジストの材質
+    vec4 params2;     // x: 凹凸の模様, y: 強さ（傾き）, z: 大きさ（mm）, w: 粗さのむら
 };
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
@@ -53,7 +59,7 @@ layout(set = 0, binding = 14, std140) uniform Frame {
     vec4 camUp;       // xyz: 上方向 * tan(半画角)
     vec4 camForward;
     vec4 boardMap;    // x,y: テクスチャ原点のワールド X,Z、z,w: 1/幅, 1/奥行き
-    vec4 envParams;   // x: 強度, y: 回転（rad）, z: 最大放射輝度クランプ（0 で無効）
+    vec4 envParams;   // x: 強度, y: 回転（rad）, z: 間接光の放射輝度の上限（0 で無効）
     uvec4 dims;       // x,y: 出力解像度, z,w: 環境マップ分布の解像度
     uvec4 counts;     // x: 最大深さ, y: ロシアンルーレット開始深さ
     uvec4 boardMats;  // x: レジスト, y: 銅（レジスト下）, z: 表面処理, w: 基材

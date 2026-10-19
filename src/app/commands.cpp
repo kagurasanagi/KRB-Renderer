@@ -84,8 +84,7 @@ int cmdRender(const RenderOptions& o) {
     if (!prep) return 1;
     const ProjectConfig& cfg = prep->cfg;
 
-    const scene::Camera cam =
-        scene::frameCamera(cameraParams(cfg, cfg.width, cfg.height), prep->scene.framingPoints);
+    const scene::Camera cam = initialCamera(*prep, o, cfg.width, cfg.height);
     log::info("camera: elevation {:.1f} deg, azimuth {:.1f} deg, fov {:.1f} deg, position ({:.1f}, {:.1f}, {:.1f}) mm",
               cfg.elevationDeg, cfg.azimuthDeg, cfg.fovDeg, cam.position.x, cam.position.y, cam.position.z);
 

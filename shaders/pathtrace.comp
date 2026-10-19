@@ -8,13 +8,17 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 #include "common.glsl"
 #include "sampling.glsl"
+#include "noise.glsl"
 #include "bsdf.glsl"
 #include "env.glsl"
 
 struct Hit {
     vec3 pos;
-    vec3 ng;  // 幾何法線（ワールド、正規化済み）
-    vec3 ns;  // シェーディング法線
+    vec3 pObj;  // オブジェクト座標（表面の模様をインスタンスに貼り付けるため）
+    vec3 ng;    // 幾何法線（ワールド、正規化済み）
+    vec3 ns;    // シェーディング法線
+    mat3 w2o;   // ワールド -> オブジェクトの 3x3（勾配・法線の変換用）
+    uint instance;
     uint material;
 };
 
@@ -41,11 +45,13 @@ bool traceClosest(vec3 origin, vec3 dir, out Hit hit) {
     vec3 nObj = w0 * v0.nrm + bc.x * v1.nrm + bc.y * v2.nrm;
     vec3 ngObj = cross(v1.pos - v0.pos, v2.pos - v0.pos);
 
-    mat3 w2o3 = mat3(w2o);
+    hit.w2o = mat3(w2o);
+    hit.pObj = pObj;
     hit.pos = o2w * vec4(pObj, 1.0);
-    hit.ng = normalize(ngObj * w2o3);  // 法線は逆転置で変換
-    vec3 ns = nObj * w2o3;
+    hit.ng = normalize(ngObj * hit.w2o);  // 法線は逆転置で変換
+    vec3 ns = nObj * hit.w2o;
     hit.ns = dot(ns, ns) > 1e-20 ? normalize(ns) : hit.ng;
+    hit.instance = uint(rayQueryGetIntersectionInstanceIdEXT(rq, true));
     hit.material = triMats[mi.triOffset + prim];
     return true;
 }
@@ -59,27 +65,74 @@ bool occluded(vec3 origin, vec3 dir) {
     return rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
 }
 
-// 基板面：層テクスチャ（R=銅, G=レジスト開口, B=シルク）から材質を確率的に選ぶ。
-// 被覆率の境界は多数サンプルの平均でアンチエイリアスされる
-Shade boardShade(vec3 p, uint side, inout Rng rng) {
+// ---------------------------------------------------------------- 表面の微細な凹凸
+
+struct Detail {
+    vec3 grad;       // 高さの勾配（オブジェクト座標、傾きの単位）
+    float roughMul;  // 粗さへの倍率
+    float colorMul;  // 色への倍率
+};
+
+void addDetail(Material m, vec3 pObj, vec3 nObj, vec3 seed, float weight, inout Detail d) {
+    uint pattern = uint(m.params2.x);
+    float strength = m.params2.y * weight;
+    float scale = max(m.params2.z, 1e-4);
+    float rv = m.params2.w * weight;
+    if (pattern == BUMP_NOISE) {
+        vec4 n = fbmd(pObj / scale + seed);
+        d.grad += strength * n.yzw;
+    } else if (pattern == BUMP_WEAVE) {
+        float h;
+        if (abs(nObj.y) > 0.5) {
+            // 基板の面（XZ）に沿った織り目。糸と樹脂で色もわずかに変わる
+            vec3 g = weaveGrad(pObj.xz / scale, h);
+            d.grad += strength * vec3(g.x, 0.0, g.y);
+        } else {
+            // 側面・穴の内壁：ガラス布が水平に重なった層（約 0.1 mm ごと）
+            vec4 n = noised(vec3((pObj.x + pObj.z) / scale, pObj.y / 0.05, 0.5) + seed);
+            h = 0.5 + 0.5 * sin(pObj.y / 0.05 * PI + 1.5 * n.x);
+            d.grad += strength * 0.5 * vec3(0.0, cos(pObj.y / 0.05 * PI) * PI / 0.05 * 0.02, 0.0);
+        }
+        d.colorMul *= mix(1.0, mix(0.86, 1.06, h), weight);
+    }
+    if (rv > 0.0) {
+        float r = noised(pObj / (scale * 2.7) + seed + vec3(31.7, 7.1, 3.3)).x;
+        d.roughMul *= clamp(1.0 + 2.0 * rv * r, 0.3, 2.0);
+    }
+}
+
+vec3 instanceSeed(uint instance) {
+    uint h = pcgHash(instance + 1u);
+    return vec3(float(h & 1023u), float((h >> 10) & 1023u), float((h >> 20) & 1023u)) * 0.37;
+}
+
+// 基板面（層テクスチャ方式）：R=銅, G=レジスト開口, B=シルク から材質を確率的に選ぶ
+Shade boardShade(vec3 p, uint side, inout Rng rng, out uint detailMat, out uint maskMat) {
     vec2 uv = vec2((p.x - F.boardMap.x) * F.boardMap.z, (p.z - F.boardMap.y) * F.boardMap.w);
     vec4 t = textureLod(boardTex, vec3(uv, float(side)), 0.0);
     float copper = t.r, open = t.g, silk = t.b;
-
-    if (rnd(rng) < silk) return shadeFromMaterial(materials[F.boardMats2.x]);
-
+    maskMat = 0xFFFFFFFFu;
+    if (rnd(rng) < silk) {
+        detailMat = F.boardMats2.x;
+        return shadeFromMaterial(materials[detailMat]);
+    }
     bool onCopper = rnd(rng) < copper;
     bool masked = rnd(rng) >= open;
-    Material mask = materials[F.boardMats.x];
-    if (!masked) return shadeFromMaterial(materials[onCopper ? F.boardMats.z : F.boardMats.w]);
+    if (!masked) {
+        detailMat = onCopper ? F.boardMats.z : F.boardMats.w;
+        return shadeFromMaterial(materials[detailMat]);
+    }
+    detailMat = onCopper ? F.boardMats.y : F.boardMats.w;
+    maskMat = F.boardMats.x;
+    return shadeFromMaterial(materials[detailMat]);
+}
 
-    // レジストの下：銅か基材。レジスト自身の顔料による散乱（mask の base_weight）も確率的に混ぜる
-    Shade s;
+// レジストを上にかぶせる（下の材質 s を、レジストのコートで覆う）
+Shade applyMask(Shade s, Material mask, inout Rng rng) {
+    // レジストの顔料自身による散乱（mask の base_weight を確率として使う）
     if (rnd(rng) < mask.baseColor.a) {
         s = shadeFromMaterial(mask);
         s.baseWeight = 1.0;
-    } else {
-        s = shadeFromMaterial(materials[onCopper ? F.boardMats.y : F.boardMats.w]);
     }
     s.coatWeight = mask.params0.w;
     s.coatColor = mask.coatColor.rgb;
@@ -88,11 +141,49 @@ Shade boardShade(vec3 p, uint side, inout Rng rng) {
     return s;
 }
 
-Shade hitShade(Hit hit, inout Rng rng) {
+// 交点の材質と、凹凸で揺らした法線を求める
+Shade surfaceAt(Hit hit, inout vec3 ns, inout Rng rng) {
     Material m = materials[hit.material];
     uint kind = uint(m.params1.y);
-    if (kind == MAT_BOARD) return boardShade(hit.pos, uint(m.params1.z), rng);
-    return shadeFromMaterial(m);
+    vec3 seed = instanceSeed(hit.instance);
+    vec3 nObj = normalize(hit.w2o * ns);  // 法線をオブジェクト座標へ（剛体変換なら w2o をそのまま掛ける）
+    Detail d = Detail(vec3(0.0), 1.0, 1.0);
+    Shade s;
+    uint maskMat = 0xFFFFFFFFu;
+    uint baseMat = hit.material;
+    if (kind == MAT_BOARD) {
+        s = boardShade(hit.pos, uint(m.params1.z), rng, baseMat, maskMat);
+    } else if (kind == MAT_MASKED) {
+        baseMat = uint(m.params1.z);
+        maskMat = uint(m.params1.w);
+        s = shadeFromMaterial(materials[baseMat]);
+    } else {
+        s = shadeFromMaterial(m);
+    }
+
+    if (maskMat != 0xFFFFFFFFu) {
+        Material mask = materials[maskMat];
+        // レジストの表面はレジストの凹凸。下が基材なら織り目がうっすら浮き出る
+        addDetail(mask, hit.pObj, nObj, seed, 1.0, d);
+        Material base = materials[baseMat];
+        if (uint(base.params2.x) == BUMP_WEAVE) addDetail(base, hit.pObj, nObj, seed, 0.12, d);
+        s.baseColor *= d.colorMul;
+        s = applyMask(s, mask, rng);
+        s.coatRoughness = clamp(s.coatRoughness * d.roughMul, 0.02, 1.0);
+    } else {
+        addDetail(materials[baseMat], hit.pObj, nObj, seed, 1.0, d);
+        s.baseColor *= d.colorMul;
+        s.roughness = clamp(s.roughness * d.roughMul, 0.02, 1.0);
+    }
+
+    // 勾配をワールドへ（法線と同じく逆転置）、法線を傾ける
+    vec3 g = d.grad * hit.w2o;
+    vec3 gt = g - dot(g, ns) * ns;
+    if (dot(gt, gt) > 0.0) {
+        vec3 nb = normalize(ns - gt);
+        if (dot(nb, ns) > 0.2) ns = nb;
+    }
+    return s;
 }
 
 vec3 clampRadiance(vec3 c) {
@@ -117,7 +208,7 @@ void main() {
     vec3 beta = vec3(1.0);
     vec3 albedo = vec3(0.0);
     vec3 normal = vec3(0.0);
-    float prevPdf = 0.0;  // 直前の BSDF サンプリングの pdf（0 は「カメラから」）
+    float prevPdf = 0.0;
     uint maxDepth = F.counts.x;
 
     for (uint depth = 0u; depth < maxDepth; ++depth) {
@@ -129,7 +220,8 @@ void main() {
                 albedo = clamp(Le, 0.0, 1.0);
             } else {
                 float w = powerHeuristic(prevPdf, envPdfDir(dir));
-                L += clampRadiance(beta * Le * w);
+                vec3 c = beta * Le * w;
+                L += depth >= 2u ? clampRadiance(c) : c;  // 間接光だけを抑える（ホタル対策）
             }
             break;
         }
@@ -140,7 +232,9 @@ void main() {
         vec3 ns = dot(hit.ns, ng) < 0.0 ? -hit.ns : hit.ns;
         if (dot(ns, wo) <= 0.0) ns = ng;
 
-        Shade s = hitShade(hit, rng);
+        vec3 nsBase = ns;
+        Shade s = surfaceAt(hit, ns, rng);
+        if (dot(ns, wo) <= 0.0) ns = nsBase;  // 凹凸で裏を向いた場合は元に戻す
         if (depth == 0u) {
             albedo = shadeAlbedo(s);
             normal = ns;
@@ -163,7 +257,8 @@ void main() {
                 if (l.z > 0.0 && (f.r + f.g + f.b) > 0.0 && !occluded(p, wi)) {
                     float bsdfPdfL = bsdfPdf(s, v, l);
                     float w = powerHeuristic(lightPdf, bsdfPdfL);
-                    L += clampRadiance(beta * f * l.z * envRadiance(wi) * (w / lightPdf));
+                    vec3 c = beta * f * l.z * envRadiance(wi) * (w / lightPdf);
+                    L += depth >= 1u ? clampRadiance(c) : c;
                 }
             }
         }

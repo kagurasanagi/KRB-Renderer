@@ -24,6 +24,16 @@ clip_silk_by_mask = true     # レジストの開口部ではシルクを印刷�
 texture_px_per_mm = 50       # 層テクスチャの解像度（50 = 20 µm/px）
 include_dnp = true
 
+[relief]                     # 銅箔・レジスト・シルクの厚みを形状として作る（段差）
+enabled = true
+# copper_um = 35             # 省略時は stackup の銅の厚み
+mask_on_copper_um = 12
+mask_on_substrate_um = 25    # 銅の間を埋めるので、銅の上より厚い
+silk_um = 15
+
+[surface]
+bump_intensity = 1.0         # 表面の微細な凹凸（ゆず肌・織り目・粒状感）の強さの倍率。0 で無効
+
 [placeholder]                # 3D モデルが見つからない部品の代替の箱
 height_mm = 1.0
 color = [0.30, 0.36, 0.50]
@@ -59,7 +69,7 @@ height = 1080
 spp = 64                     # 1 画素あたりのサンプル数（作業中の PC 向けに控えめ）
 max_depth = 8
 exposure_ev = 0.0
-radiance_clamp = 0.0         # 0 で無効。強い光の点（ホタル）を抑えたいときに 10 など
+radiance_clamp = 10.0        # 間接光の放射輝度の上限（ホタル対策）。0 で無効（偏りのない結果）
 integrator = "pt"            # 今回はパストレーサーのみ
 )";
 
@@ -117,6 +127,16 @@ ProjectConfig loadProjectConfig(const fs::path& pcbFile) {
         o.layerArt.clipSilkByMask = b["clip_silk_by_mask"].value_or(o.layerArt.clipSilkByMask);
         readNum(b["texture_px_per_mm"], o.layerArt.pxPerMm);
         o.includeDnp = b["include_dnp"].value_or(o.includeDnp);
+        auto rel = root["relief"];
+        o.relief = rel["enabled"].value_or(o.relief);
+        if (auto v = rel["copper_um"].value<double>()) {
+            o.reliefParams.copper = *v / 1000.0;
+            o.reliefCopperFromStackup = false;
+        }
+        if (auto v = rel["mask_on_copper_um"].value<double>()) o.reliefParams.maskOnCopper = *v / 1000.0;
+        if (auto v = rel["mask_on_substrate_um"].value<double>()) o.reliefParams.maskOnSubstrate = *v / 1000.0;
+        if (auto v = rel["silk_um"].value<double>()) o.reliefParams.silk = *v / 1000.0;
+        readNum(root["surface"]["bump_intensity"], o.bumpIntensity);
         auto ph = root["placeholder"];
         readNum(ph["height_mm"], o.placeholderHeight);
         o.placeholderColor = readColor(ph["color"], o.placeholderColor);
