@@ -270,7 +270,7 @@ cargo test
 | 1 | S 式パーサ、基板の構造（`krbr-kicad`）、3D モデルのパス解決、`info` | 済（C++ 版と同じ結果：250 部品・234 モデル解決） |
 | 2 | STEP → メッシュの変換器を C++ の薄い DLL（`stepkrbr_step.dll`）に切り出し、Rust はキャッシュと DLL だけを読む（`krbr-model`、`krbr models`） | 済（C++ 版と同じキャッシュを共有：38 モデル・21 万三角形） |
 | 3 | 基板メッシュ、凹凸タイル、層の多角形、距離場（`krbr-geom`：Clipper2・earcut の crate、`krbr geom`） | 済（外形・穴の数は C++ 版と一致。凹凸は 168 万三角形、C++ 版 150 万：Clipper2 の丸め継ぎ目の分割数の違い） |
-| 4 | 描画（ash：デバイス、BLAS/TLAS、カーネル、累積、トーンマップ）。`render` が C++ 版と同じ画像になることを確認 | 未 |
+| 4 | 描画（`krbr-scene`：材質・割り当て・分光・設定、`krbr-render`：ash でデバイス・BLAS/TLAS・カーネル（ray query / RT パイプライン）・累積・読み戻し・PNG/EXR）。`krbr render` | 済（同じシェーダ・同じカメラで C++ 版と同じ画像。未移植：kicad-cli の線フォントのシルク、ノイズ除去、層テクスチャ方式、`--init`） |
 | 5 | ビューア（winit + egui）、監視、ノイズ除去（OIDN）、材質 CLI | 未 |
 
 ## テスト

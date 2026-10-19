@@ -1,0 +1,126 @@
+//! 画像の入出力：.hdr / .exr の読み込み、EXR（リニア）と PNG（ACES でトーンマッピング、sRGB）の書き出し
+
+use std::path::Path;
+
+use krbr_scene::material::linear_to_srgb_f;
+
+/// RGBA float のリニア画像
+#[derive(Debug, Clone, Default)]
+pub struct ImageF {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<f32>,
+}
+
+impl ImageF {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self { width, height, rgba: vec![0.0; (width * height * 4) as usize] }
+    }
+}
+
+pub fn load_hdr_image(p: &Path) -> Result<ImageF, String> {
+    let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if ext == "exr" {
+        let img = exr::prelude::read_first_rgba_layer_from_file(
+            p,
+            |res, _| ImageF::new(res.width() as u32, res.height() as u32),
+            |img, pos, (r, g, b, a): (f32, f32, f32, f32)| {
+                let i = (pos.y() * img.width as usize + pos.x()) * 4;
+                img.rgba[i] = r;
+                img.rgba[i + 1] = g;
+                img.rgba[i + 2] = b;
+                img.rgba[i + 3] = a;
+            },
+        )
+        .map_err(|e| format!("EXR: {e}"))?;
+        return Ok(img.layer_data.channel_data.pixels);
+    }
+    let dyn_img = image::open(p).map_err(|e| format!("{e}"))?;
+    let rgba = dyn_img.to_rgba32f();
+    let (w, h) = (rgba.width(), rgba.height());
+    Ok(ImageF { width: w, height: h, rgba: rgba.into_raw() })
+}
+
+pub fn save_exr(p: &Path, img: &ImageF) -> Result<(), String> {
+    use exr::prelude::*;
+    let w = img.width as usize;
+    let image = Image::from_channels(
+        (w, img.height as usize),
+        SpecificChannels::rgba(|pos: Vec2<usize>| {
+            let i = (pos.y() * w + pos.x()) * 4;
+            (img.rgba[i], img.rgba[i + 1], img.rgba[i + 2], img.rgba[i + 3])
+        }),
+    );
+    image.write().to_file(p).map_err(|e| format!("EXR: {e}"))
+}
+
+/// Stephen Hill の ACES fitted（sRGB/Rec.709 リニア入力）
+pub fn aces_fitted(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let i0 = 0.59719 * r + 0.35458 * g + 0.04823 * b;
+    let i1 = 0.07600 * r + 0.90834 * g + 0.01566 * b;
+    let i2 = 0.02840 * r + 0.13383 * g + 0.83777 * b;
+    let rrt = |v: f32| {
+        let a = v * (v + 0.0245786) - 0.000090537;
+        let b2 = v * (0.983729 * v + 0.4329510) + 0.238081;
+        a / b2
+    };
+    let (o0, o1, o2) = (rrt(i0), rrt(i1), rrt(i2));
+    (1.60475 * o0 - 0.53108 * o1 - 0.07367 * o2, -0.10208 * o0 + 1.10813 * o1 - 0.00605 * o2, -0.00327 * o0 - 0.07276 * o1 + 1.07602 * o2)
+}
+
+/// ACES でトーンマッピングして sRGB の 8bit にする（C++ 版 savePngTonemapped と同じ式）
+pub fn tonemap_rgba8(img: &ImageF, exposure_ev: f32) -> Vec<u8> {
+    let scale = 2f32.powf(exposure_ev);
+    let n = (img.width * img.height) as usize;
+    let mut px = vec![0u8; n * 4];
+    for i in 0..n {
+        let (r, g, b) = aces_fitted(img.rgba[i * 4] * scale, img.rgba[i * 4 + 1] * scale, img.rgba[i * 4 + 2] * scale);
+        // 量子化の縞を減らす小さなディザ
+        let d = ((((i as u32).wrapping_mul(2654435761)) & 255) as f32 / 255.0 - 0.5) / 255.0;
+        px[i * 4] = ((linear_to_srgb_f(r) + d).clamp(0.0, 1.0) * 255.0).round() as u8;
+        px[i * 4 + 1] = ((linear_to_srgb_f(g) + d).clamp(0.0, 1.0) * 255.0).round() as u8;
+        px[i * 4 + 2] = ((linear_to_srgb_f(b) + d).clamp(0.0, 1.0) * 255.0).round() as u8;
+        px[i * 4 + 3] = 255;
+    }
+    px
+}
+
+pub fn save_png_rgba8(p: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), String> {
+    // 書き出し中のファイルを読まれないよう、一時ファイルに書いてから置き換える
+    let tmp = p.with_extension("png.tmp");
+    image::save_buffer_with_format(&tmp, rgba, w, h, image::ColorType::Rgba8, image::ImageFormat::Png).map_err(|e| format!("{e}"))?;
+    std::fs::rename(&tmp, p).map_err(|e| format!("{e}"))
+}
+
+pub fn save_png_tonemapped(p: &Path, img: &ImageF, exposure_ev: f32) -> Result<(), String> {
+    save_png_rgba8(p, img.width, img.height, &tonemap_rgba8(img, exposure_ev))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exr_round_trip() {
+        let dir = std::env::temp_dir().join("krbr_rust_image_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut img = ImageF::new(4, 3);
+        for (i, v) in img.rgba.iter_mut().enumerate() {
+            *v = i as f32 * 0.25;
+        }
+        let p = dir.join("t.exr");
+        save_exr(&p, &img).unwrap();
+        let back = load_hdr_image(&p).unwrap();
+        assert_eq!((back.width, back.height), (4, 3));
+        assert!((back.rgba[5] - 1.25).abs() < 1e-6);
+        let png = dir.join("t.png");
+        save_png_tonemapped(&png, &img, 0.0).unwrap();
+        assert!(png.exists());
+    }
+
+    #[test]
+    fn aces_maps_white_below_one() {
+        let (r, g, b) = aces_fitted(1.0, 1.0, 1.0);
+        assert!(r < 1.0 && r > 0.7 && (r - g).abs() < 0.02 && (g - b).abs() < 0.02);
+    }
+}

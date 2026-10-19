@@ -1,0 +1,17 @@
+[package]
+name = "krbr-render"
+description = "KRB-Renderer: Vulkan（ash）による描画。加速構造、積分器のカーネル、累積、読み戻し、画像の入出力"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+krbr-core = { path = "../krbr-core" }
+krbr-kicad = { path = "../krbr-kicad" }
+krbr-geom = { path = "../krbr-geom" }
+krbr-scene = { path = "../krbr-scene" }
+glam.workspace = true
+ash = { version = "0.38", default-features = false, features = ["loaded", "std", "debug"] }
+gpu-allocator = { version = "0.28", default-features = false, features = ["vulkan", "std"] }
+exr = "1.74"
+image = { version = "0.25", default-features = false, features = ["png", "hdr"] }

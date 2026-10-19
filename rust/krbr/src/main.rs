@@ -1,10 +1,12 @@
 //! krbr（Rust 版）のコマンドライン。移植の進み具合に合わせてサブコマンドを増やす。
 //! フェーズ1：`info`（基板の解析と 3D モデルのパス解決。GPU は使わない）
 
+mod render_cmd;
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use krbr_core::{info, log};
 use krbr_kicad::{load_board, ModelResolver};
 
@@ -28,10 +30,17 @@ enum Command {
         #[arg(long)]
         models: bool,
     },
+    /// render offscreen to PNG (tone mapped) and EXR (linear)
+    Render(RenderArgs),
     /// build the board geometry and the relief tiles (no GPU) and print statistics
     Geom {
         /// .kicad_pcb file
         pcb: PathBuf,
+    },
+    /// development: compare two images (PNG / EXR) and print the mean and max difference
+    Diff {
+        a: PathBuf,
+        b: PathBuf,
     },
     /// load every 3D model of a board (mesh cache, else the STEP converter DLL) and print statistics
     Models {
@@ -41,6 +50,148 @@ enum Command {
         #[arg(long)]
         no_cache: bool,
     },
+}
+
+#[derive(Args, Debug)]
+struct RenderArgs {
+    /// .kicad_pcb file
+    pcb: PathBuf,
+    /// equirectangular environment map (.hdr / .exr)
+    #[arg(long, default_value = "")]
+    hdr: String,
+    /// output PNG (EXR and AOVs are written next to it)
+    #[arg(long, default_value = "out/board.png")]
+    out: PathBuf,
+    #[arg(long)]
+    spp: Option<u32>,
+    #[arg(long)]
+    width: Option<u32>,
+    #[arg(long)]
+    height: Option<u32>,
+    #[arg(long)]
+    max_depth: Option<u32>,
+    /// camera elevation above the board (deg, default 35)
+    #[arg(long)]
+    elevation: Option<f64>,
+    /// camera azimuth (deg, default 45)
+    #[arg(long)]
+    azimuth: Option<f64>,
+    /// vertical field of view (deg, default 30)
+    #[arg(long)]
+    fov: Option<f64>,
+    /// look at this board point (KiCad X,Y in mm)
+    #[arg(long, value_delimiter = ',', num_args = 2)]
+    look_at: Vec<f64>,
+    /// zoom factor relative to the automatic framing
+    #[arg(long, default_value_t = 1.0)]
+    zoom: f64,
+    /// exposure (EV)
+    #[arg(long)]
+    exposure: Option<f32>,
+    #[arg(long)]
+    env_intensity: Option<f32>,
+    #[arg(long)]
+    env_rotation: Option<f32>,
+    /// clamp indirect radiance per sample (default 10, 0 = off)
+    #[arg(long)]
+    clamp: Option<f32>,
+    /// integrator: pt (default), bdpt, vcm
+    #[arg(long, default_value = "")]
+    integrator: String,
+    #[arg(long, default_value_t = 0)]
+    seed: u32,
+    /// do not read or write the mesh cache
+    #[arg(long)]
+    no_cache: bool,
+    /// enable the Vulkan validation layer
+    #[arg(long)]
+    validate: bool,
+    /// spectral rendering (hero wavelengths)
+    #[arg(long)]
+    spectral: bool,
+    /// camera lens: pinhole (default), thin, realistic
+    #[arg(long, default_value = "")]
+    lens: String,
+    #[arg(long)]
+    f_number: Option<f32>,
+    #[arg(long)]
+    focal_length: Option<f32>,
+    #[arg(long)]
+    focus_distance: Option<f32>,
+    #[arg(long)]
+    blades: Option<i32>,
+    /// solder mask: preset name (see: krbr mask list) or r,g,b in sRGB
+    #[arg(long, default_value = "")]
+    mask_color: String,
+}
+
+impl RenderArgs {
+    fn to_options(&self) -> render_cmd::RenderOptions {
+        render_cmd::RenderOptions {
+            pcb: self.pcb.clone(),
+            hdr: self.hdr.clone(),
+            out: self.out.clone(),
+            spp: self.spp,
+            width: self.width,
+            height: self.height,
+            max_depth: self.max_depth,
+            elevation: self.elevation,
+            azimuth: self.azimuth,
+            fov: self.fov,
+            exposure: self.exposure,
+            env_intensity: self.env_intensity,
+            env_rotation: self.env_rotation,
+            radiance_clamp: self.clamp,
+            look_at: self.look_at.clone(),
+            zoom: self.zoom,
+            integrator: self.integrator.clone(),
+            seed: self.seed,
+            no_cache: self.no_cache,
+            validate: self.validate,
+            spectral: if self.spectral { Some(true) } else { None },
+            lens: self.lens.clone(),
+            f_number: self.f_number,
+            focal_length: self.focal_length,
+            focus_distance: self.focus_distance,
+            blades: self.blades,
+            mask_color: self.mask_color.clone(),
+        }
+    }
+}
+
+fn cmd_diff(a: &PathBuf, b: &PathBuf) -> anyhow::Result<()> {
+    use krbr_render::image_io::load_hdr_image;
+    let load = |p: &PathBuf| -> anyhow::Result<krbr_render::ImageF> {
+        if p.extension().map(|e| e == "exr").unwrap_or(false) {
+            return load_hdr_image(p).map_err(|e| anyhow::anyhow!(e));
+        }
+        let img = image::open(p)?.to_rgba8();
+        let (w, h) = (img.width(), img.height());
+        Ok(krbr_render::ImageF { width: w, height: h, rgba: img.into_raw().iter().map(|&v| v as f32 / 255.0).collect() })
+    };
+    let (ia, ib) = (load(a)?, load(b)?);
+    if (ia.width, ia.height) != (ib.width, ib.height) {
+        anyhow::bail!("size differs: {}x{} vs {}x{}", ia.width, ia.height, ib.width, ib.height);
+    }
+    let n = (ia.width * ia.height) as usize;
+    let (mut sum, mut max, mut big, mut ma, mut mb) = (0.0f64, 0.0f32, 0usize, 0.0f64, 0.0f64);
+    for i in 0..n {
+        let mut px_max = 0.0f32;
+        for c in 0..3 {
+            let (x, y) = (ia.rgba[i * 4 + c], ib.rgba[i * 4 + c]);
+            let d = (x - y).abs();
+            sum += d as f64;
+            max = max.max(d);
+            px_max = px_max.max(d);
+            ma += x as f64;
+            mb += y as f64;
+        }
+        if px_max > 8.0 / 255.0 {
+            big += 1;
+        }
+    }
+    info!("{}x{}: mean |diff| {:.5}, max {:.4}, pixels differing by > 8/255: {:.2}%, mean A {:.5}, mean B {:.5}", ia.width, ia.height, sum / (3.0 * n as f64), max, big as f64 * 100.0 / n as f64, ma / (3.0 * n as f64), mb / (3.0 * n as f64));
+    Ok(())
 }
 
 fn cmd_geom(pcb: &PathBuf) -> anyhow::Result<()> {
@@ -153,7 +304,9 @@ fn main() {
     }
     let result = match &cli.command {
         Command::Info { pcb, models } => cmd_info(pcb, *models),
+        Command::Render(args) => render_cmd::cmd_render(&args.to_options()),
         Command::Geom { pcb } => cmd_geom(pcb),
+        Command::Diff { a, b } => cmd_diff(a, b),
         Command::Models { pcb, no_cache } => cmd_models(pcb, *no_cache),
     };
     if let Err(e) = result {
