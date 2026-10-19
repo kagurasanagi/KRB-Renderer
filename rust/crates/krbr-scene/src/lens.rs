@@ -218,6 +218,47 @@ impl LensSystem {
         (z_principal - z_focus).abs() as f32
     }
 
+    /// 設計上の F 値（焦点距離 / 入射瞳の直径）。入射瞳は、物体側から軸に平行に入れた光線が絞りで通る高さから求める
+    pub fn nominal_f_number(&self) -> f32 {
+        let Some(stop) = self.surfaces.iter().rposition(|s| s.radius == 0.0) else { return 0.0 };
+        let h = 0.05 * 0.5 * self.surfaces[0].aperture as f64;
+        let (mut o, mut d) = (DVec3::new(h, 0.0, 1.0), DVec3::NEG_Z);
+        let zs = self.vertex_z();
+        // 絞りの手前まで追跡する（絞りを含めない部分系）
+        let front = LensSystem { surfaces: self.surfaces[..stop].to_vec(), name: String::new() };
+        if !front.surfaces.is_empty() && !front.trace(&mut o, &mut d, true) {
+            return 0.0;
+        }
+        if d.z.abs() < 1e-12 {
+            return 0.0;
+        }
+        let hs = (o + d * ((zs[stop] as f64 - o.z) / d.z)).x.abs();
+        if hs < 1e-9 {
+            return 0.0;
+        }
+        let pupil_radius = 0.5 * self.surfaces[stop].aperture as f64 * h / hs;
+        (self.effective_focal_length() as f64 / (2.0 * pupil_radius)) as f32
+    }
+
+    /// 絞りを f_number まで絞ったレンズ（設計値より開くことはできない）。絞りの面（radius 0）の有効径だけを縮める
+    pub fn stopped_down(&self, f_number: f32) -> LensSystem {
+        let mut s = self.clone();
+        let nominal = self.nominal_f_number();
+        if nominal <= 0.0 || f_number <= nominal {
+            return s;
+        }
+        let scale = nominal / f_number;
+        for surf in &mut s.surfaces {
+            if surf.radius == 0.0 {
+                surf.aperture *= scale;
+            }
+        }
+        // フィルムから光線を出す「後ろの開口」も同じ割合で縮める（射出瞳の近似）。絞りでさえぎられる光線を
+        // 減らして、絞ったときのノイズを抑える。明るさは center_weight が同じ開口で正規化する
+        s.surfaces.last_mut().unwrap().aperture *= scale;
+        s
+    }
+
     /// フィルムの中央での明るさ（cos⁴θ · A / z² の、光が通る割合を含めた平均）
     pub fn center_weight(&self, film_distance: f32) -> f32 {
         let zs = self.vertex_z();
@@ -258,5 +299,13 @@ mod tests {
         let fd = s.film_distance_for(0.0);
         assert!(fd > 20.0 && fd < 60.0, "{fd}");
         assert!(s.center_weight(fd) > 0.0);
+        // double Gauss 50mm f/2：設計上の F 値は 2 前後
+        let n = s.nominal_f_number();
+        assert!(n > 1.6 && n < 2.4, "{n}");
+        // f/8 に絞ると絞りの径は 1/4
+        let stopped = s.stopped_down(8.0);
+        let stop = s.surfaces.iter().position(|x| x.radius == 0.0).unwrap();
+        assert!((stopped.surfaces[stop].aperture / s.surfaces[stop].aperture - n / 8.0).abs() < 1e-5);
+        assert_eq!(s.stopped_down(1.0).surfaces[stop].aperture, s.surfaces[stop].aperture);
     }
 }

@@ -145,7 +145,8 @@ pub fn fill_lens(u: &mut FrameUbo, fp: &FrameParams) {
     const ND: f32 = 1.5168; // BK7 相当
     u.lens3 = Vec4::new(ND, if l.abbe_number > 0.0 { (ND - 1.0) / l.abbe_number } else { 0.0 }, 0.0, 0.0);
     if l.model == LensModel::Realistic {
-        let sys = lens_system_for(&l.lens_file);
+        // F 値は設計値（開放）から絞る方向にだけ効く。絞りの面の有効径を縮める
+        let sys = lens_system_for(&l.lens_file).stopped_down(l.f_number);
         let front_to_focus = focus.max(1.0);
         let film_dist = sys.film_distance_for(front_to_focus);
         let fe = sys.effective_focal_length();

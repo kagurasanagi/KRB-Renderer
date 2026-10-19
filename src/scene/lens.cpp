@@ -128,6 +128,39 @@ float LensSystem::effectiveFocalLength() const {
     return static_cast<float>(std::abs(zPrincipal - zFocus));
 }
 
+float LensSystem::nominalFNumber() const {
+    // 物体側から高さ h で軸に平行に入れた光線が、絞りの面を高さ hs で通るなら、入射瞳の半径は 絞りの半径 × h / hs
+    int stop = -1;
+    for (size_t i = 0; i < surfaces.size(); ++i)
+        if (surfaces[i].radius == 0.0f) stop = static_cast<int>(i);
+    if (stop < 0) return 0.0f;
+    const double h = 0.05 * 0.5 * surfaces.front().aperture;
+    glm::dvec3 o{h, 0, 1.0}, d{0, 0, -1};
+    const std::vector<float> zs = vertexZ();
+    // 絞りの手前まで追跡する（絞りを含めない部分系）
+    LensSystem front;
+    front.surfaces.assign(surfaces.begin(), surfaces.begin() + stop);
+    if (!front.surfaces.empty() && !front.trace(o, d, true, 0.0f)) return 0.0f;
+    if (std::abs(d.z) < 1e-12) return 0.0f;
+    const double hs = std::abs((o + d * ((zs[stop] - o.z) / d.z)).x);
+    if (hs < 1e-9) return 0.0f;
+    const double pupilRadius = 0.5 * surfaces[stop].aperture * h / hs;
+    return static_cast<float>(effectiveFocalLength() / (2.0 * pupilRadius));
+}
+
+LensSystem LensSystem::stoppedDown(float fNumber) const {
+    LensSystem s = *this;
+    const float nominal = nominalFNumber();
+    if (nominal <= 0.0f || fNumber <= nominal) return s;
+    const float scale = nominal / fNumber;
+    for (auto& surf : s.surfaces)
+        if (surf.radius == 0.0f) surf.aperture *= scale;
+    // フィルムから光線を出す「後ろの開口」も同じ割合で縮める（射出瞳の近似）。絞りでさえぎられる光線を
+    // 減らして、絞ったときのノイズを抑える。明るさは centerWeight が同じ開口で正規化する
+    s.surfaces.back().aperture *= scale;
+    return s;
+}
+
 float LensSystem::centerWeight(float filmDistance) const {
     const double zFilm = vertexZ().back() - filmDistance;
     const double r = 0.5 * surfaces.back().aperture;

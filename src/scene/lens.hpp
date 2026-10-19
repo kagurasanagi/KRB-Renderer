@@ -56,6 +56,11 @@ public:
 
     // 光線の追跡（レンズの座標：x 右、y 上、z が物体側）。物体側から入れる場合は fromScene = true。通らなければ false
     bool trace(glm::dvec3& o, glm::dvec3& d, bool fromScene, float filmDistance) const;
+
+    // 設計上の F 値（焦点距離 / 入射瞳の直径）。入射瞳は、物体側から軸に平行に入れた光線が絞りで通る高さから求める
+    float nominalFNumber() const;
+    // 絞りを fNumber まで絞ったレンズ（設計値より開くことはできない）。絞りの面（radius 0）の有効径だけを縮める
+    LensSystem stoppedDown(float fNumber) const;
 };
 
 }  // namespace krbr::scene

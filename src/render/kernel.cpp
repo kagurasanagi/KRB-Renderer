@@ -135,7 +135,8 @@ void fillLens(FrameUBO& u, const FrameParams& fp) {
     constexpr float nd = 1.5168f;  // BK7 相当
     u.lens3 = {nd, L.abbeNumber > 0 ? (nd - 1.0f) / L.abbeNumber : 0.0f, 0.0f, 0.0f};
     if (L.model == scene::LensModel::Realistic) {
-        const scene::LensSystem& sys = lensSystemFor(L.lensFile);
+        // F 値は設計値（開放）から絞る方向にだけ効く。絞りの面の有効径を縮める
+        const scene::LensSystem sys = lensSystemFor(L.lensFile).stoppedDown(L.fNumber);
         const float frontToFocus = std::max(focus, 1.0f);
         const float filmDist = sys.filmDistanceFor(frontToFocus);
         const float fe = sys.effectiveFocalLength();
