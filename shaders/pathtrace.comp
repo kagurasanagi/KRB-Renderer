@@ -1,0 +1,204 @@
+#version 460
+// 単方向パストレーサー（環境光の NEE ＋ BSDF サンプリングを MIS で結合）
+// 1 回の dispatch で各画素 1 サンプルを追加する
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#include "common.glsl"
+#include "sampling.glsl"
+#include "bsdf.glsl"
+#include "env.glsl"
+
+struct Hit {
+    vec3 pos;
+    vec3 ng;  // 幾何法線（ワールド、正規化済み）
+    vec3 ns;  // シェーディング法線
+    uint material;
+};
+
+bool traceClosest(vec3 origin, vec3 dir, out Hit hit) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT, 0xFF, origin, 0.0, dir, 1e30);
+    while (rayQueryProceedEXT(rq)) {
+    }
+    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) return false;
+
+    uint meshId = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true));
+    uint prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, true));
+    vec2 bc = rayQueryGetIntersectionBarycentricsEXT(rq, true);
+    mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT(rq, true);
+    mat4x3 w2o = rayQueryGetIntersectionWorldToObjectEXT(rq, true);
+
+    MeshInfo mi = meshes[meshId];
+    uint i0 = indices[mi.indexOffset + prim * 3u + 0u] + mi.vertexOffset;
+    uint i1 = indices[mi.indexOffset + prim * 3u + 1u] + mi.vertexOffset;
+    uint i2 = indices[mi.indexOffset + prim * 3u + 2u] + mi.vertexOffset;
+    Vertex v0 = vertices[i0], v1 = vertices[i1], v2 = vertices[i2];
+    float w0 = 1.0 - bc.x - bc.y;
+    vec3 pObj = w0 * v0.pos + bc.x * v1.pos + bc.y * v2.pos;
+    vec3 nObj = w0 * v0.nrm + bc.x * v1.nrm + bc.y * v2.nrm;
+    vec3 ngObj = cross(v1.pos - v0.pos, v2.pos - v0.pos);
+
+    mat3 w2o3 = mat3(w2o);
+    hit.pos = o2w * vec4(pObj, 1.0);
+    hit.ng = normalize(ngObj * w2o3);  // 法線は逆転置で変換
+    vec3 ns = nObj * w2o3;
+    hit.ns = dot(ns, ns) > 1e-20 ? normalize(ns) : hit.ng;
+    hit.material = triMats[mi.triOffset + prim];
+    return true;
+}
+
+bool occluded(vec3 origin, vec3 dir) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, origin, 0.0, dir,
+                          1e30);
+    while (rayQueryProceedEXT(rq)) {
+    }
+    return rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+// 基板面：層テクスチャ（R=銅, G=レジスト開口, B=シルク）から材質を確率的に選ぶ。
+// 被覆率の境界は多数サンプルの平均でアンチエイリアスされる
+Shade boardShade(vec3 p, uint side, inout Rng rng) {
+    vec2 uv = vec2((p.x - F.boardMap.x) * F.boardMap.z, (p.z - F.boardMap.y) * F.boardMap.w);
+    vec4 t = textureLod(boardTex, vec3(uv, float(side)), 0.0);
+    float copper = t.r, open = t.g, silk = t.b;
+
+    if (rnd(rng) < silk) return shadeFromMaterial(materials[F.boardMats2.x]);
+
+    bool onCopper = rnd(rng) < copper;
+    bool masked = rnd(rng) >= open;
+    Material mask = materials[F.boardMats.x];
+    if (!masked) return shadeFromMaterial(materials[onCopper ? F.boardMats.z : F.boardMats.w]);
+
+    // レジストの下：銅か基材。レジスト自身の顔料による散乱（mask の base_weight）も確率的に混ぜる
+    Shade s;
+    if (rnd(rng) < mask.baseColor.a) {
+        s = shadeFromMaterial(mask);
+        s.baseWeight = 1.0;
+    } else {
+        s = shadeFromMaterial(materials[onCopper ? F.boardMats.y : F.boardMats.w]);
+    }
+    s.coatWeight = mask.params0.w;
+    s.coatColor = mask.coatColor.rgb;
+    s.coatRoughness = mask.coatColor.a;
+    s.coatIor = mask.params1.x;
+    return s;
+}
+
+Shade hitShade(Hit hit, inout Rng rng) {
+    Material m = materials[hit.material];
+    uint kind = uint(m.params1.y);
+    if (kind == MAT_BOARD) return boardShade(hit.pos, uint(m.params1.z), rng);
+    return shadeFromMaterial(m);
+}
+
+vec3 clampRadiance(vec3 c) {
+    float m = F.envParams.z;
+    if (m <= 0.0) return c;
+    float mx = max(c.r, max(c.g, c.b));
+    return mx > m ? c * (m / mx) : c;
+}
+
+void main() {
+    uvec2 px = gl_GlobalInvocationID.xy;
+    if (px.x >= F.dims.x || px.y >= F.dims.y) return;
+    Rng rng = rngInit(px, pc.sampleIndex, pc.seed);
+
+    // 画素内のジッタ（箱フィルタ）
+    vec2 jitter = rnd2(rng);
+    vec2 ndc = (vec2(px) + jitter) / vec2(F.dims.xy) * 2.0 - 1.0;
+    vec3 dir = normalize(F.camForward.xyz + ndc.x * F.camRight.xyz - ndc.y * F.camUp.xyz);
+    vec3 origin = F.camPos.xyz;
+
+    vec3 L = vec3(0.0);
+    vec3 beta = vec3(1.0);
+    vec3 albedo = vec3(0.0);
+    vec3 normal = vec3(0.0);
+    float prevPdf = 0.0;  // 直前の BSDF サンプリングの pdf（0 は「カメラから」）
+    uint maxDepth = F.counts.x;
+
+    for (uint depth = 0u; depth < maxDepth; ++depth) {
+        Hit hit;
+        if (!traceClosest(origin, dir, hit)) {
+            vec3 Le = envRadiance(dir);
+            if (depth == 0u) {
+                L += Le;
+                albedo = clamp(Le, 0.0, 1.0);
+            } else {
+                float w = powerHeuristic(prevPdf, envPdfDir(dir));
+                L += clampRadiance(beta * Le * w);
+            }
+            break;
+        }
+
+        vec3 wo = -dir;
+        // 光線の来た側に法線をそろえる（両面として扱う）
+        vec3 ng = dot(hit.ng, wo) < 0.0 ? -hit.ng : hit.ng;
+        vec3 ns = dot(hit.ns, ng) < 0.0 ? -hit.ns : hit.ns;
+        if (dot(ns, wo) <= 0.0) ns = ng;
+
+        Shade s = hitShade(hit, rng);
+        if (depth == 0u) {
+            albedo = shadeAlbedo(s);
+            normal = ns;
+        }
+
+        vec3 t, b;
+        basis(ns, t, b);
+        vec3 v = toLocal(wo, t, b, ns);
+        if (v.z <= 1e-6) break;
+
+        vec3 p = offsetRay(hit.pos, ng);
+
+        // 環境光の直接サンプリング（NEE）
+        {
+            float lightPdf;
+            vec3 wi = envSample(rnd2(rng), lightPdf);
+            if (lightPdf > 0.0 && dot(wi, ng) > 0.0) {
+                vec3 l = toLocal(wi, t, b, ns);
+                vec3 f = bsdfEval(s, v, l);
+                if (l.z > 0.0 && (f.r + f.g + f.b) > 0.0 && !occluded(p, wi)) {
+                    float bsdfPdfL = bsdfPdf(s, v, l);
+                    float w = powerHeuristic(lightPdf, bsdfPdfL);
+                    L += clampRadiance(beta * f * l.z * envRadiance(wi) * (w / lightPdf));
+                }
+            }
+        }
+
+        // BSDF サンプリング
+        vec3 l = bsdfSample(s, v, rng);
+        if (l.z <= 0.0) break;
+        float pdf = bsdfPdf(s, v, l);
+        if (pdf <= 0.0) break;
+        vec3 f = bsdfEval(s, v, l);
+        vec3 wi = toWorld(l, t, b, ns);
+        if (dot(wi, ng) <= 0.0) break;  // シェーディング法線と幾何法線の不一致で面の内側に入る方向
+        beta *= f * l.z / pdf;
+        prevPdf = pdf;
+        origin = p;
+        dir = wi;
+
+        // ロシアンルーレット
+        if (depth + 1u >= F.counts.y) {
+            float q = clamp(max(beta.r, max(beta.g, beta.b)), 0.05, 0.95);
+            if (rnd(rng) > q) break;
+            beta /= q;
+        }
+    }
+
+    if (any(isnan(L)) || any(isinf(L))) L = vec3(0.0);
+
+    ivec2 ip = ivec2(px);
+    if (pc.sampleIndex == 0u) {
+        imageStore(accumColor, ip, vec4(L, 1.0));
+        imageStore(accumAlbedo, ip, vec4(albedo, 1.0));
+        imageStore(accumNormal, ip, vec4(normal, 1.0));
+    } else {
+        imageStore(accumColor, ip, imageLoad(accumColor, ip) + vec4(L, 1.0));
+        imageStore(accumAlbedo, ip, imageLoad(accumAlbedo, ip) + vec4(albedo, 1.0));
+        imageStore(accumNormal, ip, imageLoad(accumNormal, ip) + vec4(normal, 1.0));
+    }
+}

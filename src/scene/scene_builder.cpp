@@ -1,0 +1,339 @@
+#include <algorithm>
+#include <cmath>
+#include <glm/gtc/matrix_transform.hpp>
+#include <map>
+#include <numbers>
+
+#include "core/log.hpp"
+#include "core/platform.hpp"
+#include "scene/scene.hpp"
+
+namespace krbr::scene {
+
+using kicad::Footprint;
+using kicad::GrKind;
+using kicad::Vec2;
+
+namespace {
+
+uint32_t addMaterial(Scene& s, Material m) {
+    s.materials.push_back(std::move(m));
+    return static_cast<uint32_t>(s.materials.size() - 1);
+}
+
+glm::vec3 stackupColor(const std::string& name, glm::vec3 fallback) {
+    // KiCad の stackup の色名（"Green" など）または "#RRGGBBAA"
+    static const std::map<std::string, glm::vec3> named = {
+        {"Green", {0.05f, 0.42f, 0.16f}},  {"Red", {0.62f, 0.07f, 0.06f}},    {"Blue", {0.05f, 0.18f, 0.52f}},
+        {"Yellow", {0.80f, 0.68f, 0.10f}}, {"Purple", {0.30f, 0.10f, 0.42f}}, {"Black", {0.04f, 0.04f, 0.04f}},
+        {"White", {0.90f, 0.90f, 0.88f}},  {"Matte Black", {0.05f, 0.05f, 0.05f}},
+    };
+    if (auto it = named.find(name); it != named.end()) return it->second;
+    if (name.size() >= 7 && name[0] == '#') {
+        auto hex = [&](size_t i) { return std::stoi(name.substr(i, 2), nullptr, 16) / 255.0f; };
+        try {
+            return {hex(1), hex(3), hex(5)};
+        } catch (...) {
+        }
+    }
+    return fallback;
+}
+
+void setupBoardMaterials(Scene& s, const kicad::Board& board, const SceneOptions& o) {
+    Material top;
+    top.name = "board_top";
+    top.kind = MaterialKind::BoardSurface;
+    top.boardSide = 0;
+    Material bottom = top;
+    bottom.name = "board_bottom";
+    bottom.boardSide = 1;
+
+    Material fr4;
+    fr4.name = "fr4";
+    fr4.base_color = srgbToLinear(o.fr4Color);
+    fr4.specular_roughness = 0.55f;
+    fr4.specular_ior = 1.5f;
+
+    Material copper;
+    copper.name = "copper";
+    copper.base_color = {0.955f, 0.638f, 0.538f};
+    copper.base_metalness = 1.0f;
+    copper.specular_roughness = 0.25f;
+
+    // 表面処理：設定 > stackup の copper_finish > ENIG
+    std::string finish = o.finish;
+    if (finish == "auto") {
+        const std::string f = board.stackup.copperFinish;
+        if (f.find("HAL") != std::string::npos || f.find("HASL") != std::string::npos) finish = "HASL";
+        else if (f.find("OSP") != std::string::npos) finish = "OSP";
+        else if (f.find("Silver") != std::string::npos) finish = "HASL";
+        else finish = "ENIG";
+    }
+    Material fin;
+    fin.name = "finish_" + finish;
+    fin.base_metalness = 1.0f;
+    if (finish == "HASL") {
+        fin.base_color = {0.80f, 0.80f, 0.79f};
+        fin.specular_roughness = 0.32f;
+    } else if (finish == "OSP") {
+        fin = copper;
+        fin.name = "finish_OSP";
+        fin.specular_roughness = 0.3f;
+    } else {
+        fin.base_color = {1.0f, 0.766f, 0.336f};
+        fin.specular_roughness = 0.2f;
+    }
+
+    const glm::vec3 maskSrgb =
+        o.maskColorSet ? o.maskColor : stackupColor(board.stackup.maskColorFront, o.maskColor);
+    Material mask;
+    mask.name = "solder_mask";
+    // コートとして使う：coat_color がレジストを通る光の色、base_* は顔料自身の散乱
+    mask.coat_weight = 1.0f;
+    mask.coat_color = srgbToLinear(maskSrgb);
+    mask.coat_roughness = o.maskRoughness;
+    mask.coat_ior = 1.5f;
+    mask.base_color = srgbToLinear(maskSrgb) * 0.6f;
+    mask.base_weight = o.maskScatter;  // シェーダではこの値を「散乱を選ぶ確率」として使う
+    mask.specular_roughness = 0.5f;
+
+    Material silk;
+    silk.name = "silkscreen";
+    silk.base_color = srgbToLinear(o.silkColor);
+    silk.specular_roughness = 0.65f;
+
+    s.boardMats.top = addMaterial(s, top);
+    s.boardMats.bottom = addMaterial(s, bottom);
+    s.boardMats.fr4 = addMaterial(s, fr4);
+    s.boardMats.edge = s.boardMats.fr4;
+    s.boardMats.copper = addMaterial(s, copper);
+    s.boardMats.finish = addMaterial(s, fin);
+    s.boardMats.plated = s.boardMats.finish;
+    s.boardMats.mask = addMaterial(s, mask);
+    s.boardMats.silk = addMaterial(s, silk);
+    log::info("board materials: finish {}, mask sRGB ({:.2f}, {:.2f}, {:.2f})", finish, maskSrgb.r, maskSrgb.g,
+              maskSrgb.b);
+}
+
+// KiCad の 3D ビューアと同じ並びで部品・モデルの変換を作る（KiCad 3D 座標、mm、Z 上向き）
+glm::dmat4 kicadModelMatrix(const Footprint& fp, const kicad::Model3D& m, double thickness) {
+    using namespace glm;
+    const double pi = std::numbers::pi;
+    dmat4 M(1.0);
+    M = translate(M, dvec3(fp.pos.x, -fp.pos.y, fp.back ? -thickness / 2 : thickness / 2));
+    M = rotate(M, radians(fp.angleDeg), dvec3(0, 0, 1));
+    if (fp.back) {
+        M = rotate(M, pi, dvec3(0, 1, 0));
+        M = rotate(M, pi, dvec3(0, 0, 1));
+    }
+    M = translate(M, m.offset);
+    M = rotate(M, radians(-m.rotate.z), dvec3(0, 0, 1));
+    M = rotate(M, radians(-m.rotate.y), dvec3(0, 1, 0));
+    M = rotate(M, radians(-m.rotate.x), dvec3(1, 0, 0));
+    M = scale(M, m.scale);
+    return M;
+}
+
+// KiCad 3D 座標（x, y=上が正, z=基板の上方向）-> ワールド（X = x - cx, Y = z, Z = -y - cy）
+glm::dmat4 kicadToWorld(Vec2 center) {
+    glm::dmat4 R(1.0);
+    R[0] = {1, 0, 0, 0};
+    R[1] = {0, 0, -1, 0};
+    R[2] = {0, 1, 0, 0};
+    R[3] = {-center.x, 0, -center.y, 1};
+    return R;
+}
+
+geom::Mesh unitCube(uint32_t mat) {
+    geom::Mesh m;
+    const glm::vec3 n[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    for (const auto& nn : n) {
+        // 面の中心 = 0.5 + 0.5n、残り2軸で正方形
+        glm::vec3 a = glm::abs(nn).x > 0 ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+        glm::vec3 b = glm::cross(nn, a);
+        const glm::vec3 c = glm::vec3(0.5f) + 0.5f * nn;
+        const uint32_t base = static_cast<uint32_t>(m.positions.size());
+        m.addVertex(c - 0.5f * a - 0.5f * b, nn);
+        m.addVertex(c + 0.5f * a - 0.5f * b, nn);
+        m.addVertex(c + 0.5f * a + 0.5f * b, nn);
+        m.addVertex(c - 0.5f * a + 0.5f * b, nn);
+        m.addTriangle(base, base + 1, base + 2, mat);
+        m.addTriangle(base, base + 2, base + 3, mat);
+    }
+    return m;
+}
+
+// 部品の外形線（Courtyard）またはパッドから、部品座標系（未回転）での範囲を求める
+bool footprintLocalBox(const kicad::Board& board, int fpIndex, Vec2& lo, Vec2& hi) {
+    const Footprint& fp = board.footprints[fpIndex];
+    const std::string crt = fp.back ? "B.CrtYd" : "F.CrtYd";
+    lo = Vec2{1e30};
+    hi = Vec2{-1e30};
+    auto add = [&](Vec2 p) {
+        const Vec2 l = kicad::rotatePoint(p - fp.pos, -fp.angleDeg);
+        lo = glm::min(lo, l);
+        hi = glm::max(hi, l);
+    };
+    for (const auto& g : board.graphics) {
+        if (g.footprint != fpIndex || g.layer != crt) continue;
+        switch (g.kind) {
+            case GrKind::Line:
+                add(g.start);
+                add(g.end);
+                break;
+            case GrKind::Arc:
+                for (Vec2 p : geom::arcPoints(g.start, g.mid, g.end, 0.01)) add(p);
+                break;
+            case GrKind::Circle:
+                for (Vec2 p : geom::circlePoints(g.start, glm::length(g.end - g.start), 0.01)) add(p);
+                break;
+            case GrKind::Poly:
+            case GrKind::Curve:
+                for (Vec2 p : g.pts) add(p);
+                break;
+        }
+    }
+    if (lo.x <= hi.x) return true;
+    for (const auto& p : board.pads) {
+        if (p.footprint != fpIndex) continue;
+        for (const auto& path : geom::padToPaths(p))
+            for (const auto& q : path) add(geom::fromPt(q));
+    }
+    if (lo.x <= hi.x) {
+        lo -= Vec2{0.1, 0.1};
+        hi += Vec2{0.1, 0.1};
+        return true;
+    }
+    return false;
+}
+
+glm::mat4 placeholderMatrix(const Footprint& fp, Vec2 lo, Vec2 hi, double height, double thickness, Vec2 center) {
+    // 単位立方体 [0,1]^3 -> 部品座標系の箱 -> ワールド
+    const Vec2 ex = kicad::rotatePoint({hi.x - lo.x, 0}, fp.angleDeg);
+    const Vec2 ez = kicad::rotatePoint({0, hi.y - lo.y}, fp.angleDeg);
+    const Vec2 o = fp.pos + kicad::rotatePoint(lo, fp.angleDeg);
+    const double y0 = fp.back ? -thickness / 2 : thickness / 2;
+    const double h = fp.back ? -height : height;
+    glm::mat4 M(1.0f);
+    M[0] = {static_cast<float>(ex.x), 0, static_cast<float>(ex.y), 0};
+    M[1] = {0, static_cast<float>(h), 0, 0};
+    M[2] = {static_cast<float>(ez.x), 0, static_cast<float>(ez.y), 0};
+    M[3] = {static_cast<float>(o.x - center.x), static_cast<float>(y0), static_cast<float>(o.y - center.y), 1};
+    return M;
+}
+
+void addInstanceBounds(Scene& s, uint32_t mesh, const glm::mat4& xf) {
+    const geom::Bounds3 b = s.meshes[mesh].mesh.bounds();
+    if (!b.valid()) return;
+    for (int i = 0; i < 8; ++i) {
+        const glm::vec3 c{(i & 1) ? b.hi.x : b.lo.x, (i & 2) ? b.hi.y : b.lo.y, (i & 4) ? b.hi.z : b.lo.z};
+        const glm::vec3 w = glm::vec3(xf * glm::vec4(c, 1.0f));
+        s.bounds.add(w);
+        s.framingPoints.push_back(w);
+    }
+}
+
+}  // namespace
+
+Scene buildScene(const SceneContext& ctx) {
+    const auto& board = ctx.board;
+    const auto& opts = ctx.options;
+    Scene s;
+    setupBoardMaterials(s, board, opts);
+
+    // 基板
+    s.board = geom::buildBoardGeometry(board);
+    {
+        SceneMesh bm;
+        bm.name = "board";
+        bm.mesh = s.board.mesh;
+        const uint32_t remap[4] = {s.boardMats.top, s.boardMats.bottom, s.boardMats.edge, s.boardMats.plated};
+        for (auto& m : bm.mesh.triMaterial) m = remap[std::min<uint32_t>(m, 3)];
+        s.meshes.push_back(std::move(bm));
+        s.instances.push_back({0, glm::mat4(1.0f)});
+        addInstanceBounds(s, 0, glm::mat4(1.0f));
+    }
+    {
+        log::ScopedTimer t("layer textures");
+        s.layers = raster::buildLayerTextures(board, s.board, opts.layerArt);
+    }
+
+    // 代替表示の箱
+    Material ph;
+    ph.name = "placeholder";
+    ph.base_color = srgbToLinear(opts.placeholderColor);
+    ph.specular_roughness = 0.6f;
+    const uint32_t phMat = addMaterial(s, ph);
+    uint32_t cubeMesh = UINT32_MAX;
+
+    const glm::dmat4 toWorld = kicadToWorld(s.board.center);
+    std::map<const model::ModelMesh*, uint32_t> meshOf;
+
+    for (size_t fi = 0; fi < board.footprints.size(); ++fi) {
+        const Footprint& fp = board.footprints[fi];
+        if (fp.dnp && !opts.includeDnp) continue;
+        int wanted = 0, placed = 0;
+        for (const auto& m : fp.models) {
+            if (m.hidden || m.opacity <= 0.0) continue;
+            ++wanted;
+            MissingModel miss{fp.reference, fp.libId, fp.value, m.path, {}, {}};
+            const auto res = ctx.resolver.resolve(m.path);
+            miss.resolved = platform::pathToUtf8(res.path);
+            if (!res.found) {
+                miss.reason = res.reason;
+                s.missing.push_back(std::move(miss));
+                continue;
+            }
+            const auto lr = ctx.library.get(res.path);
+            if (!lr.mesh) {
+                miss.reason = lr.error;
+                s.missing.push_back(std::move(miss));
+                continue;
+            }
+            uint32_t meshId;
+            if (auto it = meshOf.find(lr.mesh.get()); it != meshOf.end()) {
+                meshId = it->second;
+            } else {
+                SceneMesh sm;
+                sm.name = platform::pathToUtf8(res.path.filename());
+                sm.mesh = lr.mesh->mesh;
+                std::vector<uint32_t> colorMat(lr.mesh->colors.size());
+                for (size_t c = 0; c < colorMat.size(); ++c) {
+                    Material mm = ctx.modelMap.resolve(sm.name, lr.mesh->colors[c]);
+                    mm.name = sm.name + ":" + mm.name;
+                    colorMat[c] = addMaterial(s, mm);
+                }
+                for (auto& t : sm.mesh.triMaterial) t = t < colorMat.size() ? colorMat[t] : phMat;
+                meshId = static_cast<uint32_t>(s.meshes.size());
+                s.meshes.push_back(std::move(sm));
+                meshOf[lr.mesh.get()] = meshId;
+            }
+            const glm::mat4 xf = glm::mat4(toWorld * kicadModelMatrix(fp, m, s.board.thickness));
+            s.instances.push_back({meshId, xf});
+            addInstanceBounds(s, meshId, xf);
+            ++placed;
+            ++s.modelInstances;
+        }
+        if (wanted > 0 && placed == 0) {
+            Vec2 lo, hi;
+            if (!footprintLocalBox(board, static_cast<int>(fi), lo, hi)) {
+                lo = {-0.5, -0.5};
+                hi = {0.5, 0.5};
+            }
+            if (cubeMesh == UINT32_MAX) {
+                cubeMesh = static_cast<uint32_t>(s.meshes.size());
+                s.meshes.push_back({"placeholder_box", unitCube(phMat)});
+            }
+            const glm::mat4 xf =
+                placeholderMatrix(fp, lo, hi, opts.placeholderHeight, s.board.thickness, s.board.center);
+            s.instances.push_back({cubeMesh, xf});
+            addInstanceBounds(s, cubeMesh, xf);
+            ++s.placeholders;
+        }
+    }
+    log::info("scene: {} meshes, {} instances ({} models, {} placeholders), {} materials", s.meshes.size(),
+              s.instances.size(), s.modelInstances, s.placeholders, s.materials.size());
+    return s;
+}
+
+}  // namespace krbr::scene

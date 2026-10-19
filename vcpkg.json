@@ -1,0 +1,19 @@
+{
+  "name": "krbr",
+  "version-string": "0.1.0",
+  "builtin-baseline": "9e53836916341b64a14162a78ba9802488034a5f",
+  "dependencies": [
+    "vulkan-headers",
+    "volk",
+    "vulkan-memory-allocator",
+    "tomlplusplus",
+    "nlohmann-json",
+    "stb",
+    "tinyexr",
+    "clipper2",
+    "earcut-hpp",
+    "cli11",
+    "glm",
+    { "name": "opencascade", "default-features": false }
+  ]
+}
