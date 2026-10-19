@@ -121,7 +121,7 @@ struct ViewState {
     float envRotationDeg = 0.0f;
     float envIntensity = 1.0f;
     float bumpIntensity = 1.0f;
-    int maxSpp = 1024;
+    int maxSpp = 4096;  // 2 の累乗（パネルでは指数で選ぶ）
     render::DisplayMode mode = render::DisplayMode::Beauty;
     bool showPanel = true;
     bool dirty = true;  // カメラ・照明が変わった（累積をやり直す）
@@ -360,7 +360,12 @@ int cmdView(const ViewOptions& vo) {
     }
 
     ViewState st;
-    st.maxSpp = o.spp ? *o.spp : 1024;
+    // 最大のサンプル数は 2 の累乗にそろえる（--spp の値は、それ以上で最も近い 2 の累乗に切り上げる）
+    st.maxSpp = 4096;
+    if (o.spp) {
+        st.maxSpp = 16;
+        while (st.maxSpp < *o.spp && st.maxSpp < (1 << 16)) st.maxSpp <<= 1;
+    }
     st.exposure = cfg.exposureEv;
     st.spectral = cfg.spectral;
     st.envRotationDeg = cfg.envRotationDeg;
@@ -721,7 +726,13 @@ int cmdView(const ViewOptions& vo) {
                 ImGui::SameLine();
                 ImGui::RadioButton("法線", &mode, 2);
                 st.mode = static_cast<render::DisplayMode>(mode);
-                ImGui::SliderInt("最大 spp", &st.maxSpp, 16, 16384, "%d", ImGuiSliderFlags_Logarithmic);
+                {
+                    // 2 の何乗かで選ぶ（2^4 = 16 〜 2^16 = 65536）
+                    int e = 4;
+                    while ((1 << e) < st.maxSpp && e < 16) ++e;
+                    const std::string label = std::format("2^%d = {}", st.maxSpp);
+                    if (ImGui::SliderInt("最大 spp", &e, 4, 16, label.c_str())) st.maxSpp = 1 << e;
+                }
 
                 ImGui::SeparatorText("カメラ");
                 float fov = static_cast<float>(st.fov);
