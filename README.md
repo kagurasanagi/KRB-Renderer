@@ -145,7 +145,7 @@ bump_scale = 0.1
 ## テスト
 
 ```
-buildelease\krbr_tests.exe
+build\release\krbr_tests.exe
 ```
 
 doctest で、次をウィンドウを開かずに確かめます。
