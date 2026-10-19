@@ -190,21 +190,58 @@ glm::dmat4 kicadToWorld(Vec2 center) {
     return R;
 }
 
-geom::Mesh unitCube(uint32_t mat) {
+// 縁を 45° に面取りした箱（中心が原点、半分の大きさ h、面取りの幅 r）。面ごとに法線を持つ（平らな面）。
+// 6 つの面・12 本の辺の面取り・8 つの角の三角形からなる凸な立体で、三角形は外向き（透明な材質で内外を判定するため）
+geom::Mesh beveledBox(glm::vec3 h, float r, uint32_t mat) {
     geom::Mesh m;
-    const glm::vec3 n[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
-    for (const auto& nn : n) {
-        // 面の中心 = 0.5 + 0.5n、残り2軸で正方形
-        glm::vec3 a = glm::abs(nn).x > 0 ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
-        glm::vec3 b = glm::cross(nn, a);
-        const glm::vec3 c = glm::vec3(0.5f) + 0.5f * nn;
+    r = std::min({r, h.x * 0.95f, h.y * 0.95f, h.z * 0.95f});
+    // 角 s（各成分 ±1）の近くの 3 点：軸 k の面の上にある点
+    auto P = [&](glm::vec3 s, int k) {
+        glm::vec3 p = s * (h - glm::vec3(r));
+        p[k] = s[k] * h[k];
+        return p;
+    };
+    auto poly = [&](std::vector<glm::vec3> v) {
+        glm::vec3 c(0.0f);
+        for (auto& p : v) c += p;
+        c /= static_cast<float>(v.size());
+        glm::vec3 n = glm::normalize(glm::cross(v[1] - v[0], v[2] - v[0]));
+        if (glm::dot(n, c) < 0) {  // 外向き（原点から離れる向き）にそろえる
+            std::reverse(v.begin(), v.end());
+            n = -n;
+        }
         const uint32_t base = static_cast<uint32_t>(m.positions.size());
-        m.addVertex(c - 0.5f * a - 0.5f * b, nn);
-        m.addVertex(c + 0.5f * a - 0.5f * b, nn);
-        m.addVertex(c + 0.5f * a + 0.5f * b, nn);
-        m.addVertex(c - 0.5f * a + 0.5f * b, nn);
-        m.addTriangle(base, base + 1, base + 2, mat);
-        m.addTriangle(base, base + 2, base + 3, mat);
+        for (auto& p : v) m.addVertex(p, n);
+        for (uint32_t i = 1; i + 1 < v.size(); ++i) m.addTriangle(base, base + i, base + i + 1, mat);
+    };
+    for (int k = 0; k < 3; ++k) {
+        const int a = (k + 1) % 3, b = (k + 2) % 3;
+        for (float sk : {-1.0f, 1.0f}) {
+            // 面 k
+            std::vector<glm::vec3> f;
+            for (auto [sa, sb] : {std::pair{1.0f, 1.0f}, {1.0f, -1.0f}, {-1.0f, -1.0f}, {-1.0f, 1.0f}}) {
+                glm::vec3 s;
+                s[k] = sk;
+                s[a] = sa;
+                s[b] = sb;
+                f.push_back(P(s, k));
+            }
+            poly(f);
+            // 面 k と面 a の間の面取り（軸 b に沿う）
+            for (float sa : {-1.0f, 1.0f}) {
+                glm::vec3 s1, s2;
+                s1[k] = s2[k] = sk;
+                s1[a] = s2[a] = sa;
+                s1[b] = 1.0f;
+                s2[b] = -1.0f;
+                poly({P(s1, k), P(s2, k), P(s2, a), P(s1, a)});
+            }
+        }
+    }
+    // 角の三角形
+    for (int i = 0; i < 8; ++i) {
+        const glm::vec3 s((i & 1) ? 1.0f : -1.0f, (i & 2) ? 1.0f : -1.0f, (i & 4) ? 1.0f : -1.0f);
+        poly({P(s, 0), P(s, 1), P(s, 2)});
     }
     return m;
 }
@@ -253,18 +290,19 @@ bool footprintLocalBox(const kicad::Board& board, int fpIndex, Vec2& lo, Vec2& h
     return false;
 }
 
+// 代替の箱（中心が原点の実寸のメッシュ）を置く行列：部品の向きに回し、基板の表（裏）の面の上（下）に置く。
+// 伸縮や反転を含めない（透明な材質の内外の判定と、面取りの幅を保つため）
 glm::mat4 placeholderMatrix(const Footprint& fp, Vec2 lo, Vec2 hi, double height, double thickness, Vec2 center) {
-    // 単位立方体 [0,1]^3 -> 部品座標系の箱 -> ワールド
-    const Vec2 ex = kicad::rotatePoint({hi.x - lo.x, 0}, fp.angleDeg);
-    const Vec2 ez = kicad::rotatePoint({0, hi.y - lo.y}, fp.angleDeg);
-    const Vec2 o = fp.pos + kicad::rotatePoint(lo, fp.angleDeg);
-    const double y0 = fp.back ? -thickness / 2 : thickness / 2;
-    const double h = fp.back ? -height : height;
+    const Vec2 ex = kicad::rotatePoint({1, 0}, fp.angleDeg);
+    const Vec2 ez = kicad::rotatePoint({0, 1}, fp.angleDeg);
+    const Vec2 c = fp.pos + kicad::rotatePoint((lo + hi) * 0.5, fp.angleDeg);
+    constexpr double lift = 0.01;  // 基板の面とぴったり重ならないように少し浮かせる
+    const double yc = (thickness / 2 + lift + height / 2) * (fp.back ? -1.0 : 1.0);
     glm::mat4 M(1.0f);
     M[0] = {static_cast<float>(ex.x), 0, static_cast<float>(ex.y), 0};
-    M[1] = {0, static_cast<float>(h), 0, 0};
+    M[1] = {0, 1, 0, 0};
     M[2] = {static_cast<float>(ez.x), 0, static_cast<float>(ez.y), 0};
-    M[3] = {static_cast<float>(o.x - center.x), static_cast<float>(y0), static_cast<float>(o.y - center.y), 1};
+    M[3] = {static_cast<float>(c.x - center.x), static_cast<float>(yc), static_cast<float>(c.y - center.y), 1};
     return M;
 }
 
@@ -495,16 +533,18 @@ Scene buildScene(const SceneContext& ctx) {
         s.layers = raster::buildLayerTextures(board, s.board, opts.layerArt);
     }
 
-    // 代替表示の箱
+    // 代替表示の箱：縁を面取りした透明な水晶（石英：nd 1.544、アッベ数 70）。色は中を 5 mm 進んだときの透過の色
     Material ph;
     ph.name = "placeholder";
-    ph.base_color = srgbToLinear(opts.placeholderColor);
-    ph.specular_roughness = 0.6f;
-    ph.bump_pattern = BumpPattern::Noise;
-    ph.bump_strength = 0.02f;
-    ph.bump_scale = 0.5f;
+    ph.base_color = glm::vec3(1.0f);
+    ph.specular_roughness = 0.0f;
+    ph.specular_ior = 1.544f;
+    ph.transmission_weight = 1.0f;
+    ph.transmission_color = srgbToLinear(opts.placeholderColor);
+    ph.transmission_depth = 5.0f;
+    ph.transmission_dispersion_scale = 1.0f;
+    ph.transmission_dispersion_abbe_number = 70.0f;
     const uint32_t phMat = addMaterial(s, ph);
-    uint32_t cubeMesh = UINT32_MAX;
 
     const glm::dmat4 toWorld = kicadToWorld(s.board.center);
     std::map<const model::ModelMesh*, uint32_t> meshOf;
@@ -597,14 +637,16 @@ Scene buildScene(const SceneContext& ctx) {
                 lo = {-0.5, -0.5};
                 hi = {0.5, 0.5};
             }
-            if (cubeMesh == UINT32_MAX) {
-                cubeMesh = static_cast<uint32_t>(s.meshes.size());
-                s.meshes.push_back({"placeholder_box", unitCube(phMat)});
-            }
+            const glm::vec3 half(static_cast<float>(hi.x - lo.x) / 2, static_cast<float>(opts.placeholderHeight) / 2,
+                                 static_cast<float>(hi.y - lo.y) / 2);
+            // 面取りの幅：いちばん短い辺の 20%（最大 0.6 mm）
+            const float bevel = std::min(0.4f * std::min({half.x, half.y, half.z}), 0.6f);
+            const uint32_t boxMesh = static_cast<uint32_t>(s.meshes.size());
+            s.meshes.push_back({"placeholder_" + fp.reference, beveledBox(half, bevel, phMat)});
             const glm::mat4 xf =
                 placeholderMatrix(fp, lo, hi, opts.placeholderHeight, s.board.thickness, s.board.center);
-            s.instances.push_back({cubeMesh, xf});
-            addInstanceBounds(s, cubeMesh, xf);
+            s.instances.push_back({boxMesh, xf});
+            addInstanceBounds(s, boxMesh, xf);
             ++s.placeholders;
         }
     }
