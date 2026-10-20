@@ -34,6 +34,18 @@ enum Command {
     View(ViewArgs),
     /// headless: re-render whenever the board is saved (no window)
     Watch(WatchArgs),
+    /// list Vulkan devices and check ray tracing support
+    Probe,
+    /// material assignment (OpenPBR materials, per model / per reference)
+    Material {
+        #[command(subcommand)]
+        cmd: MaterialCmd,
+    },
+    /// solder mask color presets
+    Mask {
+        #[command(subcommand)]
+        cmd: MaskCmd,
+    },
     /// build the board geometry and the relief tiles (no GPU) and print statistics
     Geom {
         /// .kicad_pcb file
@@ -52,6 +64,46 @@ enum Command {
         #[arg(long)]
         no_cache: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum MaterialCmd {
+    /// list the material library (built-in and %APPDATA%\krbr\materials\*.toml)
+    List,
+    /// show the material of every model part and which rule decided it
+    Show {
+        /// .kicad_pcb file
+        pcb: PathBuf,
+        /// only this reference
+        #[arg(long = "ref", default_value = "")]
+        reference: String,
+    },
+    /// assign a material per reference (project overrides.toml) or per 3D model (project, or --global)
+    Set {
+        /// .kicad_pcb file
+        pcb: PathBuf,
+        /// reference designator (project overrides.toml)
+        #[arg(long = "ref", default_value = "")]
+        reference: String,
+        /// 3D model: path as written in the board, file name, or resolved file
+        #[arg(long, default_value = "")]
+        model: String,
+        /// part key (XDE name / "kicad:<color name>" / "#rrggbb"); omitted or "*" for all parts
+        #[arg(long, default_value = "")]
+        part: String,
+        /// material name (see: krbr material list)
+        #[arg(long)]
+        material: String,
+        /// write the per-model setting to the global model_map.toml (shared by all projects)
+        #[arg(long)]
+        global: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum MaskCmd {
+    /// list the solder mask color presets (KiCad color names and JLCPCB options)
+    List,
 }
 
 #[derive(Args, Debug)]
@@ -109,6 +161,9 @@ struct RenderArgs {
     /// do not use kicad-cli for stroke-font silkscreen texts (they will be missing)
     #[arg(long)]
     no_kicad_cli: bool,
+    /// write template <name>.krbr\board.toml and environment.toml (existing files are kept)
+    #[arg(long)]
+    init: bool,
     /// enable the Vulkan validation layer
     #[arg(long)]
     validate: bool,
@@ -188,6 +243,7 @@ impl RenderArgs {
             seed: self.seed,
             no_cache: self.no_cache,
             no_kicad_cli: self.no_kicad_cli,
+            init: self.init,
             validate: self.validate,
             spectral: if self.spectral { Some(true) } else { None },
             lens: self.lens.clone(),
@@ -413,6 +469,20 @@ fn main() {
             })
         }
         Command::Watch(args) => krbr_app::cmd_watch(&krbr_app::WatchOptions { common: args.render.to_options("out/watch.png"), max_updates: args.max_updates }),
+        Command::Probe => krbr_app::material_cmd::cmd_probe(),
+        Command::Material { cmd } => match cmd {
+            MaterialCmd::List => krbr_app::material_cmd::cmd_material_list(),
+            MaterialCmd::Show { pcb, reference } => krbr_app::material_cmd::cmd_material_show(pcb, reference),
+            MaterialCmd::Set { pcb, reference, model, part, material, global } => krbr_app::material_cmd::cmd_material_set(&krbr_app::material_cmd::MaterialSetOptions {
+                pcb: pcb.clone(),
+                reference: reference.clone(),
+                model: model.clone(),
+                part: part.clone(),
+                material: material.clone(),
+                global: *global,
+            }),
+        },
+        Command::Mask { cmd: MaskCmd::List } => krbr_app::material_cmd::cmd_mask_list(),
         Command::Geom { pcb } => cmd_geom(pcb),
         Command::Diff { a, b } => cmd_diff(a, b),
         Command::Models { pcb, no_cache } => cmd_models(pcb, *no_cache),

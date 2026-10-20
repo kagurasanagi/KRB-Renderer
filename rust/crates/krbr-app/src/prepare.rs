@@ -10,7 +10,7 @@ use krbr_kicad::{diff_boards, load_board, Board, BoardDiff, ModelResolver};
 use krbr_model::{MeshParams, ModelLibrary};
 use krbr_render::studio_env::STUDIO;
 use krbr_render::{build_env_distribution, image_io, is_builtin, load_environment_map, render_offscreen, Context, ContextOptions, FrameParams, GpuScene, RenderSettings};
-use krbr_scene::config::{apply_mask_color_spec, load_project_config, ProjectConfig};
+use krbr_scene::config::{apply_mask_color_spec, load_project_config, write_default_configs, ProjectConfig};
 use krbr_scene::scene::{build_scene, load_material_setup, MaterialSetup, SceneContext};
 use krbr_scene::{frame_camera, orbit_camera, Camera, CameraParams, LensModel, MaterialResolver, Scene, SceneOptions};
 
@@ -49,6 +49,8 @@ pub struct RenderOptions {
     pub mask_color: String,
     /// kicad-cli で線フォントの文字（シルク）を描かない
     pub no_kicad_cli: bool,
+    /// <名前>.krbr\board.toml と environment.toml のひな形を書く（あるものは上書きしない）
+    pub init: bool,
 }
 
 pub struct PreparedScene {
@@ -176,6 +178,9 @@ pub fn load_board_or_report(pcb: &Path) -> Option<Board> {
 
 pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
     let board = load_board_or_report(&o.pcb)?;
+    if o.init {
+        write_default_configs(&board.file);
+    }
     let mut cfg = load_project_config(&board.file);
     if let Some(v) = o.spp {
         cfg.spp = v;

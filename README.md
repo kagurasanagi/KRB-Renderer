@@ -265,7 +265,8 @@ target\release\krbr.exe E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.k
 target\release\krbr.exe render E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --hdr E:\desktop\hdr\brown_photostudio_02_4k.exr --out out\rs.png
 target\release\krbr.exe watch E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --out out\watch.png   # 保存のたびに PNG を書き直す
 cargo test
-cargo test --release -p krbr-app --test watch -- --ignored --nocapture   # 保存の監視（GPU と KiCad の 3D モデルが要る）
+cargo test --release -p krbr-app --test watch -- --ignored --nocapture      # 保存の監視（GPU と KiCad の 3D モデルが要る）
+cargo test --release -p krbr-app --test material -- --ignored --nocapture   # 材質の CLI（KiCad の 3D モデルが要る）
 ```
 
 Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフォルダの `shaders\`、環境変数 `KRBR_SHADER_DIR`、開発中は `<リポジトリ>\build\release\shaders` の順で探します。STEP 変換器 DLL は exe と同じフォルダの `step\krbr_step.dll`、無ければ開発中は `<リポジトリ>\build\release\step\krbr_step.dll` です（どちらも exe のフォルダから上へたどって探すので、`deps\` に置かれるテストの実行ファイルからも見つかります）。ビューアの操作パネルは egui なので見た目は C++ 版（Dear ImGui）と違いますが、項目・操作・キーは同じです。Rust 版ではパネルをウィンドウの右端に上下いっぱいで固定し（幅は境目のドラッグで変更、× で閉じる）、3D 表示はその残りの領域に描きます。上端のメニュー（ファイル／表示／ヘルプ）の「表示」→「設定パネル」か `F1` / `Tab` で再表示できます。
@@ -283,6 +284,8 @@ Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフ�
 
 **線フォントの文字（Rust 版）**：KiCad の線フォント（ストロークフォント）の文字は形の情報を持たないので、C++ 版と同じく kicad-cli でシルクを SVG に書き出して取り込みます（`[kicad_cli] use_for_text` / `path`、`--no-kicad-cli`）。ただし C++ 版と違い、kicad-cli に渡すのは**シルク層に線フォントの文字（と文字の枠）だけを残した基板のコピー**です。TrueType の文字（`render_cache` を持つもの）はシルク層から部品図の層へ移し、線・図形・パッドなどは取り除きます。TrueType の文字・線・図形は krbr が自分で描くので、kicad-cli の形が重なって太ったり二重になったりしません（この基板で、kicad-cli の有無で変わるのは線フォントの文字の画素だけであることを確かめています）。書き出しは `%LOCALAPPDATA%\krbr\cache\silk\<キー>-stroke-F.svg` / `-B.svg` にキャッシュします（キーは渡す基板のコピーの内容から作るので、TrueType の文字を動かしただけでは書き出し直しません。C++ 版のキャッシュとは別）。作業フォルダはプロセスごとに分け、kicad-cli は 120 秒で打ち切ります。保存で線フォントの文字が変わったときは、ビューアと `krbr watch` が裏で書き出し直し、終わったら凹凸タイルを全部作り直します（それまでは前の文字のまま。書き出し中にまた変わったら、終わった後にもう一度書き出します）。
 
+**材質の CLI（Rust 版）**：`krbr material list / show / set`、`krbr mask list`、`krbr probe`、`--init` は C++ 版と同じ表示・同じファイルです（上の「コマンド」の表）。ただし `material set` は、書き込む先の `overrides.toml` / `model_map.toml` が既にあって書式の誤りで読めないときは、エラーで止めてファイルに触りません（C++ 版は警告だけ出して、新しい 1 件だけの内容で上書きします）。
+
 **exe のアイコンへのドラッグ＆ドロップ**：`krbr.exe`（またはそのショートカット）に `.kicad_pcb` をドロップすると、ビューアで開きます。このとき（エクスプローラーからの起動）は作業フォルダを基板のフォルダにするので、`S` で保存した画像は `<基板のフォルダ>\out\` に入ります。エラーで終わるときは、コンソールが閉じる前に Enter を待ちます。
 
 | 段階 | 内容 | 状況 |
@@ -290,8 +293,8 @@ Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフ�
 | 1 | S 式パーサ、基板の構造（`krbr-kicad`）、3D モデルのパス解決、`info` | 済（C++ 版と同じ結果：250 部品・234 モデル解決） |
 | 2 | STEP → メッシュの変換器を C++ の薄い DLL（`stepkrbr_step.dll`）に切り出し、Rust はキャッシュと DLL だけを読む（`krbr-model`、`krbr models`） | 済（C++ 版と同じキャッシュを共有：38 モデル・21 万三角形） |
 | 3 | 基板メッシュ、凹凸タイル、層の多角形、距離場（`krbr-geom`：Clipper2・earcut の crate、`krbr geom`） | 済（外形・穴の数は C++ 版と一致。凹凸は 168 万三角形、C++ 版 150 万：Clipper2 の丸め継ぎ目の分割数の違い） |
-| 4 | 描画（`krbr-scene`：材質・割り当て・分光・設定、`krbr-render`：ash でデバイス・BLAS/TLAS・カーネル（ray query / RT パイプライン）・累積・読み戻し・PNG/EXR）。`krbr render` | 済（同じシェーダ・同じカメラで C++ 版と同じ画像。kicad-cli の線フォントのシルクも済。未移植：ノイズ除去、層テクスチャ方式、`--init`） |
-| 5 | ビューア（winit + egui、`krbr-app`）、監視、ノイズ除去（OIDN）、材質 CLI | ビューアは済（`krbr <pcb> --hdr ...` でウィンドウ。パネル・マウス操作・キー・保存・テストモードは C++ 版と同じ。保存の監視と差分更新・`krbr watch`・kicad-cli のシルクも済。未：ノイズ除去、`material` / `mask list` / `--init`） |
+| 4 | 描画（`krbr-scene`：材質・割り当て・分光・設定、`krbr-render`：ash でデバイス・BLAS/TLAS・カーネル（ray query / RT パイプライン）・累積・読み戻し・PNG/EXR）。`krbr render` | 済（同じシェーダ・同じカメラで C++ 版と同じ画像。kicad-cli の線フォントのシルクも済。`--init` も済。未移植：ノイズ除去、層テクスチャ方式） |
+| 5 | ビューア（winit + egui、`krbr-app`）、監視、ノイズ除去（OIDN）、材質 CLI | ビューアは済（`krbr <pcb> --hdr ...` でウィンドウ。パネル・マウス操作・キー・保存・テストモードは C++ 版と同じ。保存の監視と差分更新・`krbr watch`・kicad-cli のシルクも済。`material list / show / set`・`mask list`・`probe` も済（表示は C++ 版と同じ。設定ファイルは互いに読める）。未：ノイズ除去） |
 
 ## テスト
 

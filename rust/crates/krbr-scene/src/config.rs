@@ -194,6 +194,22 @@ fn resolve_rel(dir: &Path, s: &str) -> PathBuf {
 }
 
 /// 既定値に、見つかった設定ファイルの内容を重ねる。失敗したファイルは警告して無視
+/// `--init`：<名前>.krbr\board.toml と environment.toml のひな形を書く（あるものは上書きしない。C++ 版と同じ）
+pub fn write_default_configs(pcb: &Path) {
+    let dir = project_config_dir(pcb);
+    for (name, text) in [("board.toml", crate::config_templates::BOARD_TOML), ("environment.toml", crate::config_templates::ENVIRONMENT_TOML)] {
+        let p = dir.join(name);
+        if p.exists() {
+            krbr_core::info!("--init: keeping existing {}", p.display());
+            continue;
+        }
+        match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&p, text)) {
+            Ok(()) => krbr_core::info!("--init: wrote {}", p.display()),
+            Err(e) => krbr_core::warn!("--init: cannot write {}: {}", p.display(), e),
+        }
+    }
+}
+
 pub fn load_project_config(pcb: &Path) -> ProjectConfig {
     let mut c = ProjectConfig::default();
     let dir = project_config_dir(pcb);
@@ -304,6 +320,34 @@ pub fn load_project_config(pcb: &Path) -> ProjectConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn init_templates_are_the_defaults_and_never_overwrite() {
+        let dir = std::env::temp_dir().join(format!("krbr_rust_init_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pcb = dir.join("b.kicad_pcb");
+        write_default_configs(&pcb);
+        let cfg_dir = dir.join("b.krbr");
+        assert!(cfg_dir.join("board.toml").is_file() && cfg_dir.join("environment.toml").is_file());
+        // ひな形の値は既定値と同じ（書いても見た目が変わらない）
+        let (c, d) = (load_project_config(&pcb), ProjectConfig::default());
+        assert_eq!(c.loaded_files.len(), 2);
+        assert_eq!((c.width, c.height, c.spp, c.max_depth), (d.width, d.height, d.spp, d.max_depth));
+        assert_eq!((c.exposure_ev, c.radiance_clamp, c.env_intensity), (d.exposure_ev, d.radiance_clamp, d.env_intensity));
+        assert_eq!((c.elevation_deg, c.azimuth_deg, c.fov_deg, c.margin), (d.elevation_deg, d.azimuth_deg, d.fov_deg, d.margin));
+        assert_eq!((c.integrator.as_str(), c.spectral, c.hdr.as_str()), (d.integrator.as_str(), d.spectral, ""));
+        assert_eq!((c.lens.model, c.lens.f_number, c.lens.focal_length_mm), (d.lens.model, d.lens.f_number, d.lens.focal_length_mm));
+        assert_eq!((c.scene.mask_roughness, c.scene.mask_scatter, c.scene.bump_intensity), (d.scene.mask_roughness, d.scene.mask_scatter, d.scene.bump_intensity));
+        assert_eq!((c.scene.placeholder_height, c.scene.placeholder_color), (d.scene.placeholder_height, d.scene.placeholder_color));
+        assert_eq!(c.scene.relief_params.via_dimple, d.scene.relief_params.via_dimple);
+        assert_eq!(c.use_kicad_cli_text, d.use_kicad_cli_text);
+        // 既にあるファイルは上書きしない
+        std::fs::write(cfg_dir.join("board.toml"), "[surface]\nbump_intensity = 0.5\n").unwrap();
+        write_default_configs(&pcb);
+        assert_eq!(std::fs::read_to_string(cfg_dir.join("board.toml")).unwrap(), "[surface]\nbump_intensity = 0.5\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn reads_both_files() {

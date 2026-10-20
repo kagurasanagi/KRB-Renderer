@@ -4,6 +4,7 @@
 
 pub mod camera;
 pub mod config;
+pub mod config_templates;
 pub mod lens;
 pub mod mask_presets;
 pub mod material;
