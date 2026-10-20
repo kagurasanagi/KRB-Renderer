@@ -18,27 +18,28 @@ $name = "KRB-Renderer-$version-win64"
 $dst = Join-Path $OutDir $name
 $cppOut = Join-Path $repo "build\release"
 $rustExe = Join-Path $repo "rust\target\release\krbr.exe"
+$rustShaders = Join-Path $repo "rust\target\release\shaders"  # cargo build（krbr-render の build.rs）が glslc で作る
 
 # Visual Studio（cmake、Visual C++ ランタイムの再頒布用ファイル）
-$vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath 2>$null
+$vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath 2>$null
 if (-not $vs) { $vs = (Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio\*\*" -Directory | Where-Object { Test-Path "$($_.FullName)\VC\Redist\MSVC" } | Select-Object -First 1).FullName }
 if (-not $vs) { throw "Visual Studio が見つかりません（Visual C++ ランタイムを入れるのに使う）" }
 
 if (-not $NoBuild) {
-    Write-Host "== C++ 版のビルド（シェーダ、STEP 変換器 DLL）"
+    Write-Host "== C++ 版のビルド（STEP 変換器 DLL）"
     Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
     Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=x64" | Out-Null
     Push-Location $repo
     cmake --build --preset release
     if ($LASTEXITCODE -ne 0) { throw "cmake --build に失敗" }
     Pop-Location
-    Write-Host "== Rust 版のビルド"
+    Write-Host "== Rust 版のビルド（シェーダも作る）"
     Push-Location (Join-Path $repo "rust")
     cargo build --release
     if ($LASTEXITCODE -ne 0) { throw "cargo build に失敗" }
     Pop-Location
 }
-foreach ($p in @($rustExe, "$cppOut\shaders\pathtrace.comp.spv", "$cppOut\step\krbr_step.dll")) {
+foreach ($p in @($rustExe, "$rustShaders\pathtrace.comp.spv", "$cppOut\step\krbr_step.dll")) {
     if (-not (Test-Path $p)) { throw "見つかりません: $p（-NoBuild を外してビルドしてください）" }
 }
 
@@ -46,7 +47,7 @@ Write-Host "== $dst にまとめる"
 if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
 New-Item -ItemType Directory -Force "$dst\shaders", "$dst\dll\step", "$dst\dll\oidn", "$dst\dll\vcruntime", "$dst\kicad_plugin\krbr_preview", "$dst\licenses" | Out-Null
 Copy-Item $rustExe $dst
-Copy-Item "$cppOut\shaders\*.spv" "$dst\shaders"
+Copy-Item "$rustShaders\*.spv" "$dst\shaders"
 Copy-Item "$cppOut\step\krbr_step.dll", "$cppOut\step\TK*.dll" "$dst\dll\step"
 # ノイズ除去（OIDN）。HIP・SYCL のデバイスは使わないので入れない
 Copy-Item "$cppOut\OpenImageDenoise.dll", "$cppOut\OpenImageDenoise_core.dll", "$cppOut\OpenImageDenoise_device_cpu.dll", "$cppOut\OpenImageDenoise_device_cuda.dll", "$cppOut\tbb12.dll" "$dst\dll\oidn"

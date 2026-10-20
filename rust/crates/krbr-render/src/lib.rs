@@ -1,5 +1,5 @@
 //! Vulkan による描画（C++ 版の `render/` と `io/` に相当）。
-//! シェーダは C++ 版と同じ SPIR-V（`shaders/*.spv`）をそのまま使う。
+//! シェーダ（<repo>/shaders の GLSL）は build.rs が glslc で SPIR-V にして、target/<profile>/shaders に置く。
 
 pub mod denoiser;
 pub mod env_map;
@@ -24,16 +24,20 @@ pub use vk::{Context, ContextOptions, DeviceInfo};
 
 use std::path::PathBuf;
 
-/// シェーダ（SPIR-V）の置き場所：exe と同じフォルダの shaders\、環境変数 KRBR_SHADER_DIR、
-/// 開発中は C++ 版のビルド出力（<repo>/build/release/shaders）
+/// シェーダ（SPIR-V）の置き場所：環境変数 KRBR_SHADER_DIR、exe と同じフォルダの shaders\（配布の一式と cargo build の出力）、
+/// それが無ければ build.rs の出力先（テストの実行ファイルは target/<profile>/deps にあるため）
 pub fn shader_dir() -> PathBuf {
     if let Ok(v) = std::env::var("KRBR_SHADER_DIR") {
         return PathBuf::from(v);
     }
-    let exe = krbr_core::platform::exe_dir();
-    let local = exe.join("shaders");
+    let local = krbr_core::platform::exe_dir().join("shaders");
     if local.join("pathtrace.comp.spv").exists() {
         return local;
     }
-    krbr_core::platform::dev_build_dir("shaders", "pathtrace.comp.spv").unwrap_or(local)
+    let built = PathBuf::from(env!("KRBR_BUILD_SHADER_DIR"));
+    if built.join("pathtrace.comp.spv").exists() {
+        built
+    } else {
+        local
+    }
 }
