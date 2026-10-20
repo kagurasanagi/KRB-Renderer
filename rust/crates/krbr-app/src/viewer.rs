@@ -26,6 +26,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use crate::kicad_cli::{plot_stroke_silk, SilkPlot};
 use crate::prepare::{ReloadStats, SceneSource};
 use crate::remember;
 use crate::prepare::{frame_params, initial_camera, prepare_scene, PreparedScene, RenderOptions};
@@ -57,6 +58,8 @@ struct ReloadDone {
     result: Result<(Option<Board>, Scene, ReloadStats), String>,
     /// 保存したファイルの更新時刻（保存から画面の更新までの時間を測る）
     saved_at: Option<SystemTime>,
+    /// kicad-cli で書き出し直したシルクを反映した
+    silk: bool,
 }
 
 /// 入力・操作パネルで変わる表示の状態
@@ -245,6 +248,12 @@ struct App {
     models_seen: usize,
     test_reload_started: bool,
     test_reload_applied: bool,
+    /// 線フォントの文字の書き出し（kicad-cli、裏のスレッド）
+    silk_job: Option<mpsc::Receiver<SilkPlot>>,
+    /// 書き出しの間にまた文字が変わった（終わったらもう一度書き出す）
+    silk_rerun: bool,
+    /// 新しいシルクを受け取った（凹凸タイルを全部作り直す）
+    silk_dirty: bool,
     last_update: String,
     samples_per_frame: u32,
     need_recreate: bool,
@@ -368,6 +377,9 @@ impl App {
         ui.add(egui::ProgressBar::new((g.prog.samples() as f32 / st.max_spp.max(1) as f32).min(1.0)));
         if self.reload_job.is_some() {
             ui.colored_label(egui::Color32::from_rgb(255, 204, 77), "基板を読み直し中...");
+        }
+        if self.silk_job.is_some() {
+            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), "線フォントの文字を書き出し中（kicad-cli）...");
         }
         if self.prep.scene.pending_models > 0 {
             ui.colored_label(egui::Color32::from_rgb(255, 204, 77), format!("3D モデルを分割中: {}（それまでは箱で表示）", self.prep.scene.pending_models));
@@ -576,20 +588,57 @@ impl App {
             self.test_reload_started = true;
         }
         let models_done = src.library.completed();
-        if !saved && models_done == self.models_seen {
+        let silk = self.silk_dirty;
+        if !saved && !silk && models_done == self.models_seen {
             return;
         }
         self.models_seen = models_done;
+        self.silk_dirty = false;
         let mut source = self.prep.source.take().unwrap();
         let old = self.prep.board.clone();
         let options = self.prep.cfg.scene.clone();
         let saved_at = if saved { self.watcher.as_ref().and_then(|w| w.saved_at()) } else { None };
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
+            if silk {
+                source.tiles.invalidate_all(); // シルクが変わったので、どのタイルも作り直す
+            }
             let result = if saved { source.reload(&old, &options).map(|(b, s, st)| (Some(b), s, st)) } else { Ok((None, source.build(&old, &options, true), ReloadStats::default())) };
-            let _ = tx.send(ReloadDone { source, saved, result, saved_at });
+            let _ = tx.send(ReloadDone { source, saved, result, saved_at, silk });
         });
         self.reload_job = Some(rx);
+    }
+
+    /// 線フォントの文字が変わったので、kicad-cli で裏で書き出し直す（書き出し中なら、終わった後にもう一度）
+    fn request_silk(&mut self) {
+        let Some(k) = self.prep.kicad_cli.clone() else { return };
+        if self.silk_job.is_some() {
+            self.silk_rerun = true;
+            return;
+        }
+        let (file, name) = (self.prep.board.file.clone(), self.prep.board.project_name.clone());
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(plot_stroke_silk(&k.cli, &file, &name, &k.cache_dir, k.use_cache));
+        });
+        self.silk_job = Some(rx);
+    }
+
+    /// 書き出しが終わっていれば、新しいシルクを設定に入れる（次の組み立てでタイルを全部作り直す）
+    fn poll_silk(&mut self) {
+        let Some(rx) = &self.silk_job else { return };
+        match rx.try_recv() {
+            Ok(silk) => {
+                self.silk_job = None;
+                self.prep.cfg.scene.layer_art.extra_silk = silk.side;
+                self.silk_dirty = true;
+                if std::mem::take(&mut self.silk_rerun) {
+                    self.request_silk();
+                }
+            }
+            Err(mpsc::TryRecvError::Disconnected) => self.silk_job = None,
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
     }
 
     /// 読み直しが終わっていれば、新しいシーンに差し替える（GPU の形状と積分器を作り直す）
@@ -621,6 +670,9 @@ impl App {
                 if let Some(b) = board {
                     self.prep.board = b;
                 }
+                if stats.diff.stroke_silk_changed {
+                    self.request_silk();
+                }
                 // 読み直しの間に変えたレジストの色も反映する
                 update_mask_material(&mut scene, &self.prep.board, &self.prep.cfg.scene);
                 self.prep.scene = scene;
@@ -638,6 +690,9 @@ impl App {
                     self.last_update = format!("読み直し：変更 {}・追加 {}・削除 {}{}、タイル {} 枚（解析 {:.0} ms、組み立て {:.0} ms、GPU {:.0} ms{}）", df.changed, df.added, df.removed, full, stats.tiles_rebuilt, stats.parse_ms, stats.build_ms, gpu_ms, since);
                     let meshing = if pending > 0 { format!(", {pending} model(s) still meshing") } else { String::new() };
                     info!("reload: {} changed, {} added, {} removed{}, {} tile(s) rebuilt; parse {:.0} ms, build {:.0} ms, GPU {:.0} ms{}", df.changed, df.added, df.removed, if df.full { " (full)" } else { "" }, stats.tiles_rebuilt, stats.parse_ms, stats.build_ms, gpu_ms, meshing);
+                } else if d.silk {
+                    self.last_update = "線フォントの文字（kicad-cli）を反映した".into();
+                    info!("stroke-font silkscreen updated; scene rebuilt");
                 } else {
                     self.last_update = if pending > 0 { format!("3D モデルを反映した（残り {pending}）") } else { "3D モデルをすべて反映した".into() };
                     info!("models finished meshing; scene rebuilt ({} pending)", pending);
@@ -768,6 +823,7 @@ impl App {
 
         // ---- 状態の反映（GPU は前のフレームの完了を待っているので、ここで資源を触ってよい）
         self.apply_reload()?;
+        self.poll_silk();
         self.start_reload_if_needed();
         if let Some(rx) = &self.open_dialog {
             match rx.try_recv() {
@@ -1180,7 +1236,7 @@ impl ApplicationHandler for App {
             el.exit();
             return;
         }
-        let idle = self.gpu.as_ref().map(|g| g.prog.samples() >= self.st.max_spp).unwrap_or(false) && !self.st.dirty && self.env_job.is_none() && self.reload_job.is_none() && self.vo.test_frames == 0;
+        let idle = self.gpu.as_ref().map(|g| g.prog.samples() >= self.st.max_spp).unwrap_or(false) && !self.st.dirty && self.env_job.is_none() && self.reload_job.is_none() && self.silk_job.is_none() && !self.silk_dirty && self.vo.test_frames == 0;
         if idle {
             // 収束したら GPU を休ませ、入力と保存を待つ
             let wait = if self.watcher.is_some() || self.prep.scene.pending_models > 0 { 100 } else { 250 };
@@ -1264,6 +1320,9 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         models_seen,
         test_reload_started: false,
         test_reload_applied: false,
+        silk_job: None,
+        silk_rerun: false,
+        silk_dirty: false,
         last_update: String::new(),
         samples_per_frame: 1,
         need_recreate: false,

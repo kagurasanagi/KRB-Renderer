@@ -236,6 +236,52 @@ fn serialize(n: &Node, out: &mut String) {
     }
 }
 
+fn write_node(n: &Node, depth: usize, out: &mut String) {
+    if !n.is_list {
+        if n.quoted {
+            out.push('"');
+            for c in n.text.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\t' => out.push_str("\\t"),
+                    '\r' => out.push_str("\\r"),
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
+        } else {
+            out.push_str(&n.text);
+        }
+        return;
+    }
+    out.push('(');
+    for (i, c) in n.items.iter().enumerate() {
+        if i > 0 {
+            // 最上位の要素は 1 行ずつ（読みやすさのためだけ。KiCad は空白の種類を問わない）
+            if depth == 0 && c.is_list {
+                out.push_str("\n  ");
+            } else {
+                out.push(' ');
+            }
+        }
+        write_node(c, depth + 1, out);
+    }
+    if depth == 0 {
+        out.push('\n');
+    }
+    out.push(')');
+}
+
+/// ファイルに書ける S 式にする（文字列は KiCad と同じエスケープ。parse で読み直すと同じ木になる）
+pub fn write(n: &Node) -> String {
+    let mut s = String::new();
+    write_node(n, 0, &mut s);
+    s.push('\n');
+    s
+}
+
 /// ノードの内容（アトムと入れ子の構造）のハッシュ（C++ 版と同じ直列化）
 pub fn hash_node(n: &Node) -> u64 {
     let mut s = String::new();
@@ -257,6 +303,16 @@ mod tests {
         assert_eq!(p.str(1), "a \"b\"");
         assert!(p.has_atom("smd"));
         assert!(!p.has_atom("a \"b\""));
+    }
+
+    #[test]
+    fn write_round_trips() {
+        // 引用符・逆斜線・改行のエスケープ
+        let src = r#"(kicad_pcb (version 1) (gr_text "a \"q\" \\ b\nc" (at 1 2)) (x))"#;
+        let n = parse(src).unwrap();
+        let back = parse(&write(&n)).unwrap();
+        assert_eq!(hash_node(&n), hash_node(&back));
+        assert_eq!(back.child("gr_text").unwrap().str(1), "a \"q\" \\ b\nc");
     }
 
     #[test]

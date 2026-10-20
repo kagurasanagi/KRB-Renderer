@@ -103,9 +103,12 @@ struct RenderArgs {
     integrator: String,
     #[arg(long, default_value_t = 0)]
     seed: u32,
-    /// do not read or write the mesh cache
+    /// do not read or write the mesh cache (and the kicad-cli silk cache)
     #[arg(long)]
     no_cache: bool,
+    /// do not use kicad-cli for stroke-font silkscreen texts (they will be missing)
+    #[arg(long)]
+    no_kicad_cli: bool,
     /// enable the Vulkan validation layer
     #[arg(long)]
     validate: bool,
@@ -184,6 +187,7 @@ impl RenderArgs {
             integrator: self.integrator.clone(),
             seed: self.seed,
             no_cache: self.no_cache,
+            no_kicad_cli: self.no_kicad_cli,
             validate: self.validate,
             spectral: if self.spectral { Some(true) } else { None },
             lens: self.lens.clone(),

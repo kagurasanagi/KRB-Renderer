@@ -14,6 +14,7 @@ use krbr_scene::config::{apply_mask_color_spec, load_project_config, ProjectConf
 use krbr_scene::scene::{build_scene, load_material_setup, MaterialSetup, SceneContext};
 use krbr_scene::{frame_camera, orbit_camera, Camera, CameraParams, LensModel, MaterialResolver, Scene, SceneOptions};
 
+use crate::kicad_cli::{find_kicad_cli, plot_stroke_silk, SilkPlot};
 use crate::remember;
 
 #[derive(Debug, Clone, Default)]
@@ -46,6 +47,8 @@ pub struct RenderOptions {
     pub focus_distance: Option<f32>,
     pub blades: Option<i32>,
     pub mask_color: String,
+    /// kicad-cli で線フォントの文字（シルク）を描かない
+    pub no_kicad_cli: bool,
 }
 
 pub struct PreparedScene {
@@ -56,8 +59,54 @@ pub struct PreparedScene {
     pub dist: krbr_render::EnvDistribution,
     /// environment.toml の hdr（空なら指定なし）。選んだ環境マップを覚えるときに一緒に残す
     pub config_hdr: String,
+    /// 線フォントの文字の書き出しに使う kicad-cli（無効・見つからなければ None）
+    pub kicad_cli: Option<KicadCliSilk>,
     /// シーンを組み立て直すための状態。裏のスレッドで読み直している間は None（スレッドが持っている）
     pub source: Option<SceneSource>,
+}
+
+/// 線フォントの文字（シルク）の書き出し（kicad-cli）
+#[derive(Debug, Clone)]
+pub struct KicadCliSilk {
+    pub cli: PathBuf,
+    pub cache_dir: PathBuf,
+    pub use_cache: bool,
+}
+
+impl KicadCliSilk {
+    pub fn plot(&self, board: &Board) -> SilkPlot {
+        plot_stroke_silk(&self.cli, &board.file, &board.project_name, &self.cache_dir, self.use_cache)
+    }
+}
+
+/// シルク層の線フォントの文字の数（krbr は形を作れないので kicad-cli で描く）
+pub fn stroke_silk_count(board: &Board) -> usize {
+    board.stroke_texts.iter().filter(|t| t.layer == "F.SilkS" || t.layer == "B.SilkS").count()
+}
+
+/// kicad-cli を探し、線フォントの文字があれば書き出して cfg.scene.layer_art.extra_silk に入れる
+fn setup_stroke_silk(board: &Board, cfg: &mut ProjectConfig, o: &RenderOptions, cache_dir: &Path) -> Option<KicadCliSilk> {
+    let n = stroke_silk_count(board);
+    if !cfg.use_kicad_cli_text || o.no_kicad_cli {
+        if n > 0 {
+            warn!("{} stroke-font silkscreen text(s) will be missing (kicad-cli disabled)", n);
+        }
+        return None;
+    }
+    let Some(cli) = find_kicad_cli(&cfg.kicad_cli) else {
+        if n > 0 {
+            warn!("kicad-cli not found; {} stroke-font silkscreen text(s) will be missing (set [kicad_cli] path in board.toml)", n);
+        }
+        return None;
+    };
+    let k = KicadCliSilk { cli, cache_dir: cache_dir.to_path_buf(), use_cache: !o.no_cache };
+    if n > 0 {
+        let t0 = Instant::now();
+        let silk = k.plot(board);
+        info!("kicad-cli silk: {} stroke-font text(s), {:.0} ms{} ({})", n, t0.elapsed().as_secs_f64() * 1000.0, if silk.from_cache { ", from cache" } else { "" }, k.cli.display());
+        cfg.scene.layer_art.extra_silk = silk.side;
+    }
+    Some(k)
 }
 
 /// シーンを組み立てるのに使う状態（C++ 版 PreparedScene の resolver / library / materials / tiles）。
@@ -217,10 +266,7 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
 
     // 部品の材質：材質ライブラリ、全体の対応表、プロジェクトの上書き
     let materials = load_material_setup(&board.file);
-    let stroke = board.stroke_texts.iter().filter(|t| t.layer == "F.SilkS" || t.layer == "B.SilkS").count();
-    if stroke > 0 {
-        warn!("{} stroke-font silkscreen text(s) will be missing (kicad-cli silk is not ported yet)", stroke);
-    }
+    let kicad_cli = setup_stroke_silk(&board, &mut cfg, o, &cache_dir);
     let resolver = ModelResolver::new(&board.project_dir, &cfg.path_vars, &cfg.model_search_dirs);
     let library = Arc::new(ModelLibrary::new(cache_dir.clone(), MeshParams::default(), !o.no_cache));
     info!("mesh cache: {}{}", cache_dir.join("meshes").display(), if o.no_cache { " (disabled)" } else { "" });
@@ -251,7 +297,7 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
         remember::remember_hdr(&board.file, &cfg.hdr, &config_hdr);
     }
     let dist = build_env_distribution(&env, 2048);
-    Some(PreparedScene { board, cfg, scene, env, dist, config_hdr, source: Some(source) })
+    Some(PreparedScene { board, cfg, scene, env, dist, config_hdr, kicad_cli, source: Some(source) })
 }
 
 pub fn camera_params(cfg: &ProjectConfig, width: u32, height: u32) -> CameraParams {

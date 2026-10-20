@@ -1,6 +1,7 @@
 //! ヘッドレスの保存監視（`krbr watch`、C++ 版 app/watch）。ウィンドウは開かず、保存のたびに描き直して PNG を書き出す
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use ash::vk;
@@ -9,7 +10,8 @@ use krbr_render::tonemapper::{DisplayMode, Tonemapper};
 use krbr_render::vk::memory_barrier;
 use krbr_render::{image_io, Context, ContextOptions, FrameParams, GpuScene, Progressive};
 
-use crate::prepare::{frame_params, initial_camera, prepare_scene, ReloadStats, RenderOptions};
+use crate::kicad_cli::{plot_stroke_silk, SilkPlot};
+use crate::prepare::{frame_params, initial_camera, prepare_scene, PreparedScene, ReloadStats, RenderOptions};
 
 #[derive(Debug, Clone, Default)]
 pub struct WatchOptions {
@@ -22,8 +24,10 @@ pub struct WatchOptions {
 /// 1 回の更新の内訳（C++ 版 WatchUpdate。ノイズ除去は Rust 版では未対応）
 #[derive(Debug, Clone, Default)]
 pub struct WatchUpdate {
-    /// 保存による更新か（false：裏で分割していた 3D モデルが揃った）
+    /// 保存による更新か（false：裏で分割していた 3D モデルが揃った、または線フォントの文字を書き出し直した）
     pub saved: bool,
+    /// kicad-cli で書き出し直した線フォントの文字（シルク）を反映した
+    pub silk: bool,
     /// ファイルの更新時刻から、画像を書き終えるまで
     pub since_save_ms: f64,
     pub reload_ms: f64,
@@ -73,11 +77,29 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
 
     let mut models_seen = prep.source.as_ref().map(|s| s.library.completed()).unwrap_or(0);
     let mut idle_since = Instant::now();
+    // 線フォントの文字の書き出し（kicad-cli、裏のスレッド）と、その間にまた文字が変わったか
+    let mut silk_job: Option<mpsc::Receiver<SilkPlot>> = None;
+    let mut silk_rerun = false;
     loop {
+        let mut silk = false;
+        if let Some(rx) = &silk_job {
+            match rx.try_recv() {
+                Ok(plot) => {
+                    silk_job = None;
+                    prep.cfg.scene.layer_art.extra_silk = plot.side;
+                    silk = true;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => silk_job = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if silk_job.is_none() && std::mem::take(&mut silk_rerun) {
+            silk_job = start_silk(&prep);
+        }
         let source = prep.source.as_mut().unwrap();
         let saved = watcher.poll();
         let models_done = source.library.completed() != models_seen;
-        if !saved && !models_done {
+        if !saved && !models_done && !silk {
             if idle_since.elapsed() >= poll {
                 if !on_event(WatchEvent::Idle) {
                     return Ok(());
@@ -87,12 +109,23 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
             std::thread::sleep(Duration::from_millis(20));
             continue;
         }
-        let mut u = WatchUpdate { saved, ..Default::default() };
+        let mut u = WatchUpdate { saved, silk, ..Default::default() };
         let t0 = Instant::now();
+        if silk {
+            source.tiles.invalidate_all(); // シルクが変わったので、どのタイルも作り直す
+        }
         let scene = if saved {
             match source.reload(&prep.board, &prep.cfg.scene) {
                 Ok((board, scene, stats)) => {
                     prep.board = board;
+                    if stats.diff.stroke_silk_changed {
+                        // 書き出しの間にまた変わったら、終わった後にもう一度書き出す
+                        if silk_job.is_some() {
+                            silk_rerun = true;
+                        } else {
+                            silk_job = start_silk(&prep);
+                        }
+                    }
                     u.stats = stats;
                     scene
                 }
@@ -120,6 +153,8 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
                 "watch: updated {:.0} ms after save (reload {:.0} [parse {:.0}, {} tiles], gpu {:.0}, render {:.0}, write {:.0}); {} added, {} changed, {} removed{}",
                 u.since_save_ms, u.reload_ms, s.parse_ms, s.tiles_rebuilt, u.gpu_ms, u.render_ms, u.write_ms, s.diff.added, s.diff.changed, s.diff.removed, meshing
             );
+        } else if silk {
+            info!("watch: updated (background silkscreen plot finished)");
         } else {
             info!("watch: updated (background model meshing finished, {} pending)", u.pending_models);
         }
@@ -128,6 +163,17 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
             return Ok(());
         }
     }
+}
+
+/// 線フォントの文字を kicad-cli で裏で書き出す（kicad-cli を使わないなら None）
+fn start_silk(prep: &PreparedScene) -> Option<mpsc::Receiver<SilkPlot>> {
+    let k = prep.kicad_cli.clone()?;
+    let (file, name) = (prep.board.file.clone(), prep.board.project_name.clone());
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(plot_stroke_silk(&k.cli, &file, &name, &k.cache_dir, k.use_cache));
+    });
+    Some(rx)
 }
 
 /// `krbr watch`：止めるまで（または --max-updates 回）保存のたびに描き直す

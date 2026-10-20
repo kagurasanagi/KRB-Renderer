@@ -72,8 +72,12 @@ fn save_updates_the_image_and_rebuilds_only_nearby_tiles() {
     };
     let (fp, at_from, at_to) = find_target(&pcb);
     let model_to = unused_capacitor_model(&pcb);
+    // 線フォントの文字（kicad-cli で描く）の書き換えは、kicad-cli があるときだけ確かめる
+    let with_cli = krbr_app::kicad_cli::find_kicad_cli("").is_some();
+    let total = if with_cli { 6 } else { 4 };
 
     // 1. 部品を動かす  2. 中身を変えずに保存する  3. 3D モデルを未分割のものに替える（箱で仮表示）  4. その分割の完了
+    // 5. 線フォントの文字を書き換える  6. kicad-cli での書き出し直しの完了
     let mut updates: Vec<WatchUpdate> = Vec::new();
     let mut deadline = Instant::now();
     let mut timed_out = false;
@@ -85,7 +89,8 @@ fn save_updates_the_image_and_rebuilds_only_nearby_tiles() {
                 let text = std::fs::read_to_string(&pcb).unwrap();
                 std::fs::write(&pcb, text + "\n").unwrap();
             }
-            _ => save_with_replace(&pcb, "Capacitor_SMD.3dshapes/C_0603_1608Metric.step", &format!("Capacitor_SMD.3dshapes/{model_to}.step"), fp),
+            2 => save_with_replace(&pcb, "Capacitor_SMD.3dshapes/C_0603_1608Metric.step", &format!("Capacitor_SMD.3dshapes/{model_to}.step"), fp),
+            _ => save_with_replace(&pcb, "\"LEADS ->\"", "\"LEADS <-\"", 0),
         }
     };
     run_watch(&o, Duration::from_millis(200), |e| match e {
@@ -98,12 +103,12 @@ fn save_updates_the_image_and_rebuilds_only_nearby_tiles() {
         WatchEvent::Updated(u) => {
             updates.push(u.clone());
             let n = updates.len();
-            if n <= 2 {
+            if n <= 2 || (n == 4 && with_cli) {
                 save(n);
             }
-            // 分割の完了は最大 30 秒待つ
-            deadline = Instant::now() + Duration::from_secs(if n == 3 { 30 } else { 10 });
-            n < 4
+            // 分割と kicad-cli の完了は最大 30 秒待つ
+            deadline = Instant::now() + Duration::from_secs(if n == 3 || n == 5 { 30 } else { 10 });
+            n < total
         }
         WatchEvent::Idle => {
             timed_out = Instant::now() > deadline;
@@ -118,7 +123,7 @@ fn save_updates_the_image_and_rebuilds_only_nearby_tiles() {
         );
     }
     assert!(!timed_out, "timed out after {} update(s)", updates.len());
-    assert_eq!(updates.len(), 4);
+    assert_eq!(updates.len(), total);
 
     // 1. 部品を動かした：その周辺のタイルだけを作り直し、1 秒以内に画像を更新する
     let u = &updates[0];
@@ -145,5 +150,14 @@ fn save_updates_the_image_and_rebuilds_only_nearby_tiles() {
     let u = &updates[3];
     assert!(!u.saved);
     assert_eq!(u.pending_models, 0);
+
+    // 5. 線フォントの文字を書き換えた：まず読み直し（文字はまだ前のもの）、6. 書き出し直したシルクで全部のタイルを作り直す
+    if with_cli {
+        let u = &updates[4];
+        assert!(u.saved && u.stats.diff.stroke_silk_changed);
+        let u = &updates[5];
+        assert!(!u.saved && u.silk);
+        assert!(u.stats.tiles_rebuilt == 0); // 統計は保存のときだけ（作り直しは invalidate_all で全部）
+    }
     let _ = std::fs::remove_dir_all(&ws);
 }

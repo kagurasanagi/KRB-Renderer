@@ -18,8 +18,8 @@ pub struct LayerArtOptions {
     pub max_dim: usize,
     pub margin_mm: f64,
     pub clip_silk_by_mask: bool,
-    /// kicad-cli から得たシルク（線フォントの文字など）
-    pub extra_silk: [Option<Paths>; 2],
+    /// kicad-cli から得たシルク（線フォントの文字など）。設定ごと複製されるので共有にしてある
+    pub extra_silk: [Option<std::sync::Arc<Paths>>; 2],
 }
 
 impl Default for LayerArtOptions {
