@@ -17,6 +17,18 @@ use crate::material::Material;
 use crate::material_library::MaterialLibrary;
 
 const BUILTIN_RULES: &str = r#"
+[[rule]]   # アルミ電解コンデンサ（KiCad 標準のモデル）：缶と上面（金属色の部位）はアルミ
+model = "CP_Radial_D*"
+part = "kicad:metal_grey_pins"
+material = "aluminum"
+[[rule]]   # その帯（スリーブへの印刷）は樹脂。色はモデルのまま
+model = "CP_Radial_D*"
+part = "kicad:light_brown_body"
+material = "plastic"
+[[rule]]   # 面実装のアルミ電解コンデンサの缶
+model = "CP_Elec_*"
+part = "kicad:metal_grey_pins"
+material = "aluminum"
 [[rule]]
 part = "kicad:metal_grey_pins"
 material = "metal_tin"
@@ -466,7 +478,7 @@ impl<'a> MaterialResolver<'a> {
         if name.is_empty() {
             return None;
         }
-        let Some(m) = self.lib.find(name) else {
+        let Some(m) = self.lib.find_variant(name) else {
             static WARNED: OnceLock<Mutex<std::collections::BTreeSet<String>>> = OnceLock::new();
             let mut w = WARNED.get_or_init(|| Mutex::new(Default::default())).lock().unwrap();
             if w.insert(name.to_string()) {
@@ -474,9 +486,10 @@ impl<'a> MaterialResolver<'a> {
             }
             return None;
         };
-        let mut r = ResolvedMaterial { material: m.clone(), name: name.to_string(), source };
+        let from_model = m.base_color_from_model;
+        let mut r = ResolvedMaterial { material: m, name: name.to_string(), source };
         if let Some(p) = q.part {
-            if m.base_color_from_model && p.has_color {
+            if from_model && p.has_color {
                 r.material.base_color = p.linear_color();
             }
         }

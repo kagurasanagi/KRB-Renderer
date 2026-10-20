@@ -14,6 +14,18 @@ namespace {
 
 // 組み込みの規則（全体設定の規則の後に評価する）
 const char* kBuiltinRules = R"(
+[[rule]]   # アルミ電解コンデンサ（KiCad 標準のモデル）：缶と上面（金属色の部位）はアルミ
+model = "CP_Radial_D*"
+part = "kicad:metal_grey_pins"
+material = "aluminum"
+[[rule]]   # その帯（スリーブへの印刷）は樹脂。色はモデルのまま
+model = "CP_Radial_D*"
+part = "kicad:light_brown_body"
+material = "plastic"
+[[rule]]   # 面実装のアルミ電解コンデンサの缶
+model = "CP_Elec_*"
+part = "kicad:metal_grey_pins"
+material = "aluminum"
 [[rule]]
 part = "kicad:metal_grey_pins"
 material = "metal_tin"

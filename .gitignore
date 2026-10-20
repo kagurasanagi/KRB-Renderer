@@ -9,3 +9,5 @@
 /third_party/oidn/
 # Rust 版のビルド生成物
 /rust/target/
+# 配布用の一式（scripts\make_dist.ps1 で作る）
+/dist/

@@ -135,11 +135,20 @@ struct Detail {
     float colorMul;  // 色への倍率
 };
 
-void addDetail(Material m, vec3 pObj, vec3 nObj, vec3 seed, float weight, inout Detail d) {
+// 画素 1 つが覆う広さ（mm）：カメラからの距離 × 画素 1 つ分の角度。模様を薄める目安に使う
+float pixelFootprint(vec3 p) {
+    return length(p - F.camPos.xyz) * 2.0 * length(F.camUp.xyz) / float(max(F.dims.y, 1u));
+}
+
+// footprint：画素が覆う広さ（mm）。模様の周期が画素と同じくらいまで細かくなると、平均されずに砂粒のようなノイズに
+// 見えるので、そこへ近づくほど模様を弱める（周期が十分に大きい寄りの画では元のまま）
+void addDetail(Material m, vec3 pObj, vec3 nObj, vec3 seed, float weight, float footprint, inout Detail d) {
     uint pattern = uint(m.params2.x);
-    float strength = m.params2.y * weight;
     float scale = max(m.params2.z, 1e-4);
-    float rv = m.params2.w * weight;
+    float px = scale / max(footprint, 1e-6);  // 模様の周期が何画素か
+    // 凹凸は細かい倍音（fbm）を含むので早めに、粗さのむら（周期 scale × 2.7 の 1 段）は画素の数倍まで残す
+    float strength = m.params2.y * weight * smoothstep(3.0, 12.0, px);
+    float rv = m.params2.w * weight * smoothstep(3.0, 8.0, px * 2.7);
     if (pattern == BUMP_NOISE) {
         vec4 n = fbmd(pObj / scale + seed);
         d.grad += strength * n.yzw;
@@ -252,6 +261,7 @@ Shade surfaceAt(Hit hit, inout vec3 ns, inout Rng rng) {
     vec3 seed = instanceSeed(hit.instance);
     vec3 nObj = normalize(hit.w2o * ns);  // 法線をオブジェクト座標へ（剛体変換なら w2o をそのまま掛ける）
     Detail d = Detail(vec3(0.0), 1.0, 1.0);
+    const float footprint = pixelFootprint(hit.pos);
     Shade s;
     uint maskMat = 0xFFFFFFFFu;
     uint baseMat = hit.material;
@@ -268,9 +278,9 @@ Shade surfaceAt(Hit hit, inout vec3 ns, inout Rng rng) {
     if (maskMat != 0xFFFFFFFFu) {
         Material mask = materials[maskMat];
         // レジストの表面はレジストの凹凸。下が基材なら織り目がうっすら浮き出る
-        addDetail(mask, hit.pObj, nObj, seed, 1.0, d);
+        addDetail(mask, hit.pObj, nObj, seed, 1.0, footprint, d);
         Material base = materials[baseMat];
-        if (uint(base.params2.x) == BUMP_WEAVE) addDetail(base, hit.pObj, nObj, seed, 0.05, d);
+        if (uint(base.params2.x) == BUMP_WEAVE) addDetail(base, hit.pObj, nObj, seed, 0.05, footprint, d);
         float thickness = 0.0;
         if (kind == MAT_MASKED && F.maskParams2.w > 0.5 && abs(nObj.y) > 0.5) {
             // 距離場からレジストの厚みと、縁のなだらかな傾き（法線）を求める
@@ -295,7 +305,7 @@ Shade surfaceAt(Hit hit, inout vec3 ns, inout Rng rng) {
         s.metallic = materials[baseMat].params0.x > 0.5;
         s.coatRoughness = clamp(s.coatRoughness * d.roughMul, 0.02, 1.0);
     } else {
-        addDetail(materials[baseMat], hit.pObj, nObj, seed, 1.0, d);
+        addDetail(materials[baseMat], hit.pObj, nObj, seed, 1.0, footprint, d);
         s.baseColor *= d.colorMul;
         s.baseRgb *= d.colorMul;
         s.roughness = clamp(s.roughness * d.roughMul, 0.02, 1.0);

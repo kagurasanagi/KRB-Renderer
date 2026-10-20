@@ -93,7 +93,7 @@ pub fn set_material(o: &MaterialSetOptions) -> Result<PathBuf, String> {
     }
     let board = load_board_or_report(&o.pcb).ok_or("cannot load board")?;
     let mut ms = load_material_setup(&board.file);
-    if ms.library.find(&o.material).is_none() {
+    if ms.library.find_variant(&o.material).is_none() {
         return Err(format!("material '{}' is not in the material library (see: krbr material list)", o.material));
     }
     if !o.reference.is_empty() {

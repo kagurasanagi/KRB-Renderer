@@ -6,6 +6,23 @@ use std::path::Path;
 use crate::material::Material;
 use crate::material_io::read_material;
 
+/// 材質名の後ろに付けると、表面の模様（凹凸と粗さのむら）を無くした版になる（例 "plastic+smooth"）。Rust 版だけの書き方
+pub const SMOOTH_SUFFIX: &str = "+smooth";
+
+/// 名前を（ライブラリの材質名, 模様なしか）に分ける
+pub fn split_variant(name: &str) -> (&str, bool) {
+    match name.strip_suffix(SMOOTH_SUFFIX) {
+        Some(base) => (base, true),
+        None => (name, false),
+    }
+}
+
+/// 模様のあり・なしを切り替えた名前
+pub fn with_smooth(name: &str, smooth: bool) -> String {
+    let (base, _) = split_variant(name);
+    if smooth { format!("{base}{SMOOTH_SUFFIX}") } else { base.to_string() }
+}
+
 /// krbr 組み込みの材質（OpenPBR Surface）。色はリニア。base_color を書かなければ 3D モデルの面の色を使う
 pub const BUILTIN_MATERIALS: &str = r#"# krbr 組み込みの材質（OpenPBR Surface）。色はリニア
 # 全体設定の materials/*.toml に同じ名前を書くと、書いた項目だけ上書きされる
@@ -162,6 +179,18 @@ impl MaterialLibrary {
         self.materials.get(name)
     }
 
+    /// 名前の材質を作る。名前の後ろの「+smooth」は、表面の模様（凹凸と粗さのむら）を無くした版
+    pub fn find_variant(&self, name: &str) -> Option<Material> {
+        let (base, smooth) = split_variant(name);
+        let mut m = self.materials.get(base)?.clone();
+        if smooth {
+            m.bump_pattern = crate::material::BumpPattern::None;
+            m.bump_strength = 0.0;
+            m.roughness_variation = 0.0;
+        }
+        Some(m)
+    }
+
     pub fn names(&self) -> Vec<String> {
         self.materials.keys().cloned().collect()
     }
@@ -174,6 +203,21 @@ impl MaterialLibrary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smooth_variant_drops_the_surface_pattern() {
+        let lib = MaterialLibrary::builtin();
+        let base = lib.find("plastic").unwrap();
+        assert_ne!(base.bump_pattern, crate::material::BumpPattern::None);
+        let s = lib.find_variant("plastic+smooth").unwrap();
+        assert_eq!(s.bump_pattern, crate::material::BumpPattern::None);
+        assert_eq!((s.bump_strength, s.roughness_variation), (0.0, 0.0));
+        assert_eq!(s.specular_roughness, base.specular_roughness); // 模様以外はそのまま
+        assert!(lib.find_variant("no_such+smooth").is_none());
+        assert_eq!(with_smooth("plastic", true), "plastic+smooth");
+        assert_eq!(with_smooth("plastic+smooth", false), "plastic");
+        assert_eq!(split_variant("metal_tin+smooth"), ("metal_tin", true));
+    }
 
     #[test]
     fn builtin_and_overlay() {

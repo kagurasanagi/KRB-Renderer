@@ -29,6 +29,7 @@ use winit::window::{Window, WindowId};
 use crate::kicad_cli::{plot_stroke_silk, SilkPlot};
 use crate::material_cmd::{clear_material, set_material, MaterialSetOptions};
 use crate::selection::{Outline, Selected};
+use krbr_scene::material_library::{split_variant, with_smooth};
 use crate::prepare::{ReloadStats, SceneSource};
 use crate::remember;
 use crate::prepare::{frame_params, initial_camera, prepare_scene, PreparedScene, RenderOptions};
@@ -53,6 +54,8 @@ pub struct ViewOptions {
     pub test_pick: Option<(f64, f64)>,
     /// 開発用：test_pick で選んだ部品の全部位に、この材質を割り当てる（この部品だけ）
     pub test_assign: String,
+    /// レンダリングを一時停止した状態で開く（GPU の弱い PC 向け）
+    pub paused: bool,
 }
 
 /// 基板の読み直し（裏のスレッド）の結果
@@ -96,6 +99,8 @@ struct ViewState {
     reset_requested: bool,
     auto_exposure_requested: bool,
     quit_requested: bool,
+    /// レンダリングを一時停止する（サンプルを積み足さない。GPU の弱い PC で操作を軽くする）
+    paused: bool,
     spectral: bool,
     integrator_changed: bool,
     rotating: bool,
@@ -363,7 +368,9 @@ impl App {
     fn init_gpu(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
         let hidden = self.vo.hidden || self.vo.test_frames > 0;
         let (w, h) = (self.vo.common.width.unwrap_or(1600), self.vo.common.height.unwrap_or(900));
-        let attrs = Window::default_attributes().with_title(self.base_title.clone()).with_inner_size(winit::dpi::PhysicalSize::new(w, h)).with_visible(!hidden).with_active(!hidden);
+        // ウィンドウのアイコン（exe に埋め込んだものと同じ絵。scripts/make_icon.py で作る 64x64 の RGBA）
+        let icon = winit::window::Icon::from_rgba(include_bytes!("../../../krbr/assets/krbr_64.rgba").to_vec(), 64, 64).ok();
+        let attrs = Window::default_attributes().with_window_icon(icon).with_title(self.base_title.clone()).with_inner_size(winit::dpi::PhysicalSize::new(w, h)).with_visible(!hidden).with_active(!hidden);
         let window = el.create_window(attrs).map_err(|e| format!("window: {e}"))?;
         let display = window.display_handle().map_err(|e| format!("{e}"))?.as_raw();
         let wh = window.window_handle().map_err(|e| format!("{e}"))?.as_raw();
@@ -784,12 +791,14 @@ impl App {
         let fp = self.prep.board.footprints.iter().find(|f| f.reference == sel.reference);
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(&sel.reference).strong().color(egui::Color32::from_rgb(255, 170, 40)));
-            ui.weak(fp.map(|f| f.lib_id.as_str()).unwrap_or(""));
             if ui.small_button("選択を外す").clicked() {
                 self.selected = None;
                 self.outline = None;
             }
         });
+        // 長い名前はパネルの幅で切り詰める（カーソルを乗せると全体が出る）
+        let lib_id = fp.map(|f| f.lib_id.clone()).unwrap_or_default();
+        ui.add(egui::Label::new(egui::RichText::new(&lib_id).weak()).truncate()).on_hover_text(&lib_id);
         if self.selected.is_none() {
             return;
         }
@@ -811,7 +820,7 @@ impl App {
             return;
         };
         let model_file = fp.and_then(|f| f.models.get(mi)).map(|m| std::path::Path::new(&m.path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()).unwrap_or_default();
-        ui.weak(&model_file);
+        ui.add(egui::Label::new(egui::RichText::new(&model_file).weak()).truncate()).on_hover_text(&model_file);
         // このインスタンスの部位の行
         let rows: Vec<MaterialAssignment> = sel
             .find_instance(&self.prep.scene, &self.prep.board)
@@ -838,11 +847,12 @@ impl App {
         } else if shadowed_by_project {
             ui.colored_label(egui::Color32::from_rgb(255, 204, 77), "このプロジェクトにモデルの設定があり、そちらが優先される（「このモデル」で上書きを消すと反映される）");
         }
-        let mut action: Option<(String, String, bool)> = None;
+        // 書き込むもの：(部位（空なら全部位）, 材質, 上書きを消すか)
+        let mut actions: Vec<(String, String, bool)> = Vec::new();
         let names = self.material_names.clone();
         let combo = |ui: &mut egui::Ui, id: String, current: &str, label: &str| -> Option<String> {
             let mut chosen = None;
-            egui::ComboBox::from_id_salt(id).width(120.0).selected_text(label).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt(id).width(105.0).selected_text(label).show_ui(ui, |ui| {
                 for n in &names {
                     if ui.selectable_label(n == current, n).clicked() {
                         chosen = Some(n.clone());
@@ -851,18 +861,35 @@ impl App {
             });
             chosen
         };
-        egui::Grid::new("parts").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+        let pattern_tip = "表面の模様（細かな凹凸と粗さのむら）。外すと、なめらかな面になる（材質名に +smooth が付く）";
+        egui::Grid::new("parts").num_columns(3).spacing([8.0, 4.0]).show(ui, |ui| {
             for (i, r) in rows.iter().enumerate() {
                 let key = r.part_keys.split(' ').next().unwrap_or("").to_string();
-                ui.label(if key.is_empty() { "（全体）".to_string() } else { key.clone() }).on_hover_text(format!("{}\n決まった段階: {}", r.part_keys, r.source));
-                if let Some(m) = combo(ui, format!("part{i}"), &r.material, &r.material) {
-                    action = Some((key.clone(), m, false));
+                let (base, smooth) = split_variant(&r.material);
+                // 表示では "kicad:" を省く（カーソルを乗せると全体が出る）
+                let shown = if key.is_empty() { "（全体）".to_string() } else { key.strip_prefix("kicad:").unwrap_or(&key).to_string() };
+                ui.label(shown).on_hover_text(format!("{}\n決まった段階: {}", r.part_keys, r.source));
+                // 材質を選び直しても、模様のあり・なしは保つ
+                if let Some(m) = combo(ui, format!("part{i}"), base, base) {
+                    actions.push((key.clone(), with_smooth(&m, smooth), false));
+                }
+                let mut pattern = !smooth;
+                if ui.checkbox(&mut pattern, "模様").on_hover_text(pattern_tip).changed() {
+                    actions.push((key.clone(), with_smooth(&r.material, !pattern), false));
                 }
                 ui.end_row();
             }
+            let all_smooth = !rows.is_empty() && rows.iter().all(|r| split_variant(&r.material).1);
             ui.label("全部位");
             if let Some(m) = combo(ui, "all".into(), "", "まとめて選ぶ") {
-                action = Some((String::new(), m, false));
+                actions.push((String::new(), with_smooth(&m, all_smooth), false));
+            }
+            let mut pattern = !all_smooth;
+            if ui.checkbox(&mut pattern, "模様").on_hover_text("全部位の表面の模様をまとめて切り替える").changed() {
+                for r in &rows {
+                    let key = r.part_keys.split(' ').next().unwrap_or("").to_string();
+                    actions.push((key, with_smooth(&r.material, !pattern), false));
+                }
             }
             ui.end_row();
         });
@@ -875,12 +902,12 @@ impl App {
             ui.weak("決まった段階は部位ごとに違う（部位の名前にカーソルを乗せると出る）");
         }
         if ui.button("上書きを消す（規則どおりに戻す）").on_hover_text("選んだ書き込み先の、この部品（モデル）の設定を消す").clicked() {
-            action = Some((String::new(), String::new(), true));
+            actions.push((String::new(), String::new(), true));
         }
         if !self.material_error.is_empty() {
             ui.colored_label(egui::Color32::from_rgb(255, 102, 102), &self.material_error);
         }
-        if let Some((part, m, clear)) = action {
+        for (part, m, clear) in actions {
             self.assign_material(&part, &m, clear);
         }
     }
@@ -998,6 +1025,24 @@ impl App {
     }
 
     /// ウィンドウ上端のメニュー
+    /// メニューの下のボタン列（レンダリングの一時停止）
+    fn tool_bar(&mut self, root: &mut egui::Ui) {
+        let st = &mut self.st;
+        let samples = self.gpu.as_ref().map(|g| g.prog.samples()).unwrap_or(0);
+        egui::Panel::top("toolbar").show(root, |ui| {
+            ui.horizontal(|ui| {
+                let label = if st.paused { "▶ 再開" } else { "■ 一時停止" };
+                let tip = "レンダリングを一時停止する（P）。サンプルを積み足さないので GPU の負荷がほぼ無くなり、操作が軽くなる。\nカメラを動かしたときは 1 サンプルだけ描いて止まる";
+                if ui.add(egui::Button::new(label).selected(st.paused)).on_hover_text(tip).clicked() {
+                    st.paused = !st.paused;
+                }
+                if st.paused {
+                    ui.colored_label(egui::Color32::from_rgb(255, 204, 77), format!("一時停止中（{} spp）", samples));
+                }
+            });
+        });
+    }
+
     fn menu_bar(&mut self, root: &mut egui::Ui) {
         let st = &mut self.st;
         egui::Panel::top("menu").show(root, |ui| {
@@ -1016,6 +1061,10 @@ impl App {
                 ui.menu_button("表示", |ui| {
                     if ui.add(egui::Button::new("設定パネル").selected(st.show_panel).shortcut_text("F1 / Tab")).clicked() {
                         st.show_panel = !st.show_panel;
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new("レンダリングを一時停止").selected(st.paused).shortcut_text("P")).clicked() {
+                        st.paused = !st.paused;
                         ui.close();
                     }
                     ui.separator();
@@ -1042,7 +1091,7 @@ impl App {
                     ui.label("ホイール: 拡大・縮小");
                     ui.label("Ctrl + クリック: その点にピントを合わせる");
                     ui.separator();
-                    ui.label("F1 / Tab: 設定パネル    R: 視点を戻す    S: 保存");
+                    ui.label("F1 / Tab: 設定パネル    R: 視点を戻す    S: 保存    P: 一時停止");
                     ui.label("+ / -: 露出    [ / ]: 環境マップの回転    1 / 2 / 3: 画像 / アルベド / 法線");
                     ui.label("Esc: 終了");
                 });
@@ -1088,6 +1137,7 @@ impl App {
         let mut central = egui::Rect::NOTHING;
         let full = egui_ctx.run_ui(raw, |root| {
             self.menu_bar(root);
+            self.tool_bar(root);
             if self.st.show_panel {
                 self.side_panel(root);
             }
@@ -1268,7 +1318,14 @@ impl App {
             Err(e) => return Err(format!("vkAcquireNextImageKHR: {e:?}")),
         };
         let max_spp = self.st.max_spp;
-        let add = if g.prog.samples() >= max_spp { 0 } else { self.samples_per_frame.min(max_spp - g.prog.samples()) };
+        // 一時停止中は積み足さない（カメラなどを変えて累積をやり直したときだけ、表示のために 1 サンプル描く）
+        let add = if self.st.paused {
+            u32::from(g.prog.samples() == 0)
+        } else if g.prog.samples() >= max_spp {
+            0
+        } else {
+            self.samples_per_frame.min(max_spp - g.prog.samples())
+        };
         let last_test_frame = self.vo.test_frames > 0 && self.frames + 1 >= self.vo.test_frames && self.env_job.is_none() && self.reload_job.is_none() && (!self.vo.test_reload || self.test_reload_applied) && (self.vo.test_pick.is_none() || self.test_pick_done) && !self.materials_dirty_files;
 
         // egui のテクスチャ
@@ -1422,7 +1479,8 @@ impl App {
             self.samples_per_frame = (TARGET_FRAME_MS / per_sample.max(0.05)).clamp(1.0, 64.0) as u32;
         }
         if self.last_title.elapsed().as_secs_f64() > 0.3 {
-            self.window.as_ref().unwrap().set_title(&format!("{} - {} / {} spp - {:.1} ms/frame (GPU {:.1} ms) - EV {:+.2}", self.base_title, g.prog.samples(), max_spp, self.last_frame_ms, self.last_gpu_ms, self.st.exposure));
+            let paused = if self.st.paused { " (一時停止)" } else { "" };
+            self.window.as_ref().unwrap().set_title(&format!("{} - {} / {} spp{} - {:.1} ms/frame (GPU {:.1} ms) - EV {:+.2}", self.base_title, g.prog.samples(), max_spp, paused, self.last_frame_ms, self.last_gpu_ms, self.st.exposure));
             self.last_title = Instant::now();
         }
 
@@ -1595,6 +1653,7 @@ impl ApplicationHandler for App {
                     KeyCode::Digit2 => st.mode = DisplayMode::Albedo,
                     KeyCode::Digit3 => st.mode = DisplayMode::Normal,
                     KeyCode::KeyD => st.denoise_requested = true,
+                    KeyCode::KeyP => st.paused = !st.paused,
                     _ => {}
                 }
             }
@@ -1618,7 +1677,7 @@ impl ApplicationHandler for App {
             el.exit();
             return;
         }
-        let idle = self.gpu.as_ref().map(|g| g.prog.samples() >= self.st.max_spp).unwrap_or(false) && !self.st.dirty && self.env_job.is_none() && self.reload_job.is_none() && self.silk_job.is_none() && !self.silk_dirty && self.vo.test_frames == 0;
+        let idle = self.gpu.as_ref().map(|g| g.prog.samples() >= self.st.max_spp || (self.st.paused && g.prog.samples() > 0)).unwrap_or(false) && !self.st.dirty && self.env_job.is_none() && self.reload_job.is_none() && self.silk_job.is_none() && !self.silk_dirty && self.vo.test_frames == 0;
         if idle {
             // 収束したら GPU を休ませ、入力と保存を待つ
             let wait = if self.watcher.is_some() || self.prep.scene.pending_models > 0 { 100 } else { 250 };
@@ -1662,6 +1721,7 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         reset_requested: false,
         auto_exposure_requested: false,
         quit_requested: false,
+        paused: vo.paused,
         spectral: cfg.spectral,
         integrator_changed: false,
         rotating: false,

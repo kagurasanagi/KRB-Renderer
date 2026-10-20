@@ -46,6 +46,11 @@ enum Command {
         #[command(subcommand)]
         cmd: MaskCmd,
     },
+    /// KiCad plugin: a "KRB Render でプレビュー" button on the PCB editor toolbar
+    KicadPlugin {
+        #[command(subcommand)]
+        cmd: KicadPluginCmd,
+    },
     /// build the board geometry and the relief tiles (no GPU) and print statistics
     Geom {
         /// .kicad_pcb file
@@ -97,6 +102,21 @@ enum MaterialCmd {
         /// write the per-model setting to the global model_map.toml (shared by all projects)
         #[arg(long)]
         global: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum KicadPluginCmd {
+    /// install into every KiCad 9+ user folder (Documents\KiCad\<version>\scripting\plugins), or --dir
+    Install {
+        /// the scripting\plugins folder to install into
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// remove the plugin
+    Uninstall {
+        #[arg(long)]
+        dir: Option<PathBuf>,
     },
 }
 
@@ -223,6 +243,9 @@ struct ViewArgs {
     /// development: assign this material to all parts of the part selected by --test-pick (this part only)
     #[arg(long, default_value = "")]
     test_assign: String,
+    /// open with rendering paused (P or the toolbar button resumes); for weak GPUs
+    #[arg(long)]
+    paused: bool,
 }
 
 #[derive(Args, Debug)]
@@ -480,6 +503,7 @@ fn main() {
                 test_reload: args.test_reload,
                 test_pick: (args.test_pick.len() == 2).then(|| (args.test_pick[0], args.test_pick[1])),
                 test_assign: args.test_assign.clone(),
+                paused: args.paused,
             };
             krbr_app::run_viewer(vo).map(|rc| {
                 if rc != 0 {
@@ -502,6 +526,8 @@ fn main() {
             }),
         },
         Command::Mask { cmd: MaskCmd::List } => krbr_app::material_cmd::cmd_mask_list(),
+        Command::KicadPlugin { cmd: KicadPluginCmd::Install { dir } } => krbr_app::kicad_plugin::cmd_install(dir.as_deref()),
+        Command::KicadPlugin { cmd: KicadPluginCmd::Uninstall { dir } } => krbr_app::kicad_plugin::cmd_uninstall(dir.as_deref()),
         Command::Geom { pcb } => cmd_geom(pcb),
         Command::Diff { a, b } => cmd_diff(a, b),
         Command::Models { pcb, no_cache } => cmd_models(pcb, *no_cache),

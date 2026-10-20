@@ -1,0 +1,2 @@
+# Windows のバッチファイルは CRLF のまま（cmd は LF だと日本語の行を読み違える）。文字コードは Shift-JIS
+*.bat text eol=crlf

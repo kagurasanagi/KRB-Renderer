@@ -105,7 +105,7 @@ TEST_CASE("resolution order: ref > project model > global model > rules > defaul
     MaterialQuery q{"U3", "${KICAD10_3DMODEL_DIR}/X.step", "abcd", "X.step", &pins};
 
     CHECK(res.resolve(q).name == "metal_tin");  // 組み込みの規則（kicad:metal_grey_pins）
-    CHECK(res.resolve(q).source == "rule 1 (builtin)");
+    CHECK(res.resolve(q).source == "rule 4 (builtin)");  // 先頭の 3 つは電解コンデンサのモデル用
 
     global.rules.push_back({"kicad:*", "", {}, {}, {}, {}, {}, {}, "d"});
     CHECK(res.resolve(q).name == "d");

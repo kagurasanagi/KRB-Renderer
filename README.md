@@ -249,6 +249,8 @@ bump_scale = 0.1
 - 3D モデルは、展開前のパス（`path`）か、ファイル内容の XXH64（`hash`）のどちらかが一致すれば同じとみなします。ファイルを別の場所に移しても、中身が同じなら設定が効きます。
 - 部位のキーは、XDE の名前、`kicad:<色名>`（KiCad 標準モデルの色。例 `kicad:metal_grey_pins`、`kicad:black_body`）、`#rrggbb`（STEP に書かれた色）です。`"*"` は全部位に一致します。
 - 材質ライブラリで `base_color` を書かない材質は、3D モデルの面の色を使います。
+- 組み込みの規則の先頭は、KiCad 標準のアルミ電解コンデンサのモデル用です（ファイル名が `CP_Radial_D*` / `CP_Elec_*`）。金属色の部位（缶と上面）を `aluminum`、ラジアルの帯（`kicad:light_brown_body`、スリーブへの印刷）を `plastic` にします（色で決める規則だけだと、上面が錫、帯がセラミックになるため）。タンタル（`CP_Radial_Tantal_*`）は対象外です。
+- （Rust 版）材質名の後ろに `+smooth` を付けると、表面の模様（凹凸と粗さのむら）を無くした版になります（例 `plastic+smooth`。`krbr material set --material plastic+smooth`、ビューアの部位ごとの「模様」のチェック）。C++ 版はこの書き方を知らないので、その指定を飛ばして規則どおりの材質で描きます。
 - **透過（`transmission_weight`）**：ガラス・アクリルのような誘電体の屈折（粗さのある GGX の透過、Walter et al. 2007）。中では `transmission_color` / `transmission_depth` で吸収されます（depth が 0 なら、面を通るたびに色をかける）。閉じた形状で、面の向き（三角形の巻き方）が外向きであることを前提にしています。
 - **subsurface**：krbr では簡易な形で扱います。`subsurface_weight` の割合で光が拡散して中へ入り、`subsurface_radius`（mm）進むと `subsurface_color` の透過率になる吸収を受けながら進み、反対側の面やふちから拡散して出ます（FR4 の透光性に使用）。
 - fuzz・thin_film・anisotropy・geometry_opacity・thin_walled・transmission_scatter は値を GPU まで渡していますが、描画には反映していません（使われるとログで知らせます）。発光（`emission_luminance`、cd/m²）は、放射輝度 1.0 = 1000 cd/m² として描きます。発光は片面（三角形の巻き方で決まる表側）から、余弦分布で放たれます。発光する三角形は光源として直接サンプリングします（輝度 × 面積に比例して選ぶ）。
@@ -294,6 +296,26 @@ Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフ�
 - **強さ**：OIDN 自体には強さの設定が無いので、ノイズ除去した画像と元の画像を混ぜる割合として調整します（パネルのスライダー、`--denoise-strength`。0〜1、既定 1 で OIDN の結果そのまま。下げると細部やざらつきが少し残る）。混ぜる処理は軽い（`shaders/denoise_blend.comp`）ので、ビューアではスライダーを動かすとすぐ反映されます。
 - ビューアで `S` を押したとき、ノイズ除去した画像を表示していれば `<名前>_NNN_denoised.png / .exr` も書きます（表示と同じ強さ）。
 - この PC（RTX 3080 Ti）では、1920x1080 の high で約 14 ms、960x540 で 5 ms。CPU デバイス（開発用に `KRBR_DENOISE_DEVICE=cpu` で強制できる）では 960x540 で約 0.2 秒です。4 spp の画像をノイズ除去すると、1024 spp の参照との差の平均が約 70% 減ります（RGB・分光とも）。
+
+**一時停止（Rust 版）**：メニューの下の「■ 一時停止」ボタン（`P`、メニューの「表示」、起動時から止めるなら `--paused`）で、サンプルの積み足しを止めます。GPU の負荷がほぼ無くなるので、GPU の弱い PC でも操作できます。止めている間にカメラなどを変えたときは、表示のために 1 サンプルだけ描いて止まります。
+
+**KiCad のプラグイン（Rust 版）**：`krbr kicad-plugin install` で、PCB エディタのツールバーに「KRB Render でプレビュー」のボタンを足します（KiCad 9 以降のユーザーフォルダ `ドキュメント\KiCad\<版>\scripting\plugins\krbr_preview` に、`kicad_plugin/krbr_preview` の中身と、この `krbr.exe` の場所を書く。`--dir` で場所を指定、`uninstall` で削除）。KiCad を開き直すか、PCB エディタの「ツール → 外部プラグイン → プラグインを再読み込み」で出ます。押すと、開いている基板のファイルをビューアで開きます（コンソールは出さず、ログは `%TEMP%\krbr_preview.log`。同じ基板のビューアが開いていれば二重には開かない）。ビューアは保存を監視しているので、KiCad で保存するたびに描き直されます。旧来の Action Plugin（SWIG の `pcbnew`）を使っています。KiCad 9 で非推奨になり、KiCad 11 で無くなる予定なので、そのときは IPC API のプラグイン（`plugin.json`）に移します。
+
+**配布用の一式（Rust 版）**：`powershell -ExecutionPolicy Bypass -File scripts\make_dist.ps1`（ビルド済みなら `-NoBuild`）で、`dist\KRB-Renderer-<版>-win64\` と、その zip を作ります（約 100 MB、zip で約 65 MB。`dist/` は git に入れない）。フォルダごとどこへ置いても動きます（exe と同じフォルダのものだけを使う）。中身は次のとおりです。
+
+| 中身 | 内容 |
+|---|---|
+| `krbr.exe` | 本体（アイコン付き） |
+| `shaders\` | シェーダ（SPIR-V） |
+| `step\` | STEP 変換器（`krbr_step.dll`）と OpenCASCADE の DLL |
+| `OpenImageDenoise*.dll`、`tbb12.dll` | ノイズ除去（OIDN。CPU と CUDA のデバイス） |
+| `msvcp140*.dll`、`vcruntime140*.dll`、`concrt140.dll` | Visual C++ ランタイム（再頒布用のファイルを exe の横に置く。インストール不要） |
+| `install_kicad_plugin.bat`、`uninstall_kicad_plugin.bat`、`kicad_plugin\` | KiCad のプラグインと、そのインストール・削除（同じフォルダの `krbr.exe` を使う） |
+| `README.txt`、`licenses\` | 使い方と、同梱物のライセンス（OIDN・oneTBB・OpenCASCADE） |
+
+リポジトリの外に展開した zip だけで、空のキャッシュからの STEP の分割、ノイズ除去（CUDA）、kicad-cli のシルク、ビューア、プラグインのインストールが動くことを確かめています（リポジトリの中では、開発用に `build\release` を探してしまうので、足りないファイルに気づけない）。
+
+**アイコン**：`krbr.exe` とビューアのウィンドウ、KiCad のツールバーのボタンは同じ絵です（`scripts/make_icon.py` で作り、`rust/krbr/assets/krbr.ico` を `build.rs` で exe に埋め込む）。
 
 **exe のアイコンへのドラッグ＆ドロップ**：`krbr.exe`（またはそのショートカット）に `.kicad_pcb` をドロップすると、ビューアで開きます。このとき（エクスプローラーからの起動）は作業フォルダを基板のフォルダにするので、`S` で保存した画像は `<基板のフォルダ>\out\` に入ります。エラーで終わるときは、コンソールが閉じる前に Enter を待ちます。
 
@@ -416,6 +438,7 @@ HDR ─────────────────────────�
 - 強さは `board.toml` の `[surface] bump_intensity` で一括して調整できます（既定 0.25 で、近づいて分かる程度。0 で無効）。レジストは光沢が強く、わずかな凹凸でも映り込みがまだらに揺れるので、個別にさらに弱くしています。
 - 個別の材質では、`bump_pattern` / `bump_strength` / `bump_scale` / `roughness_variation` で調整できます。これは OpenPBR にはない krbr 独自のパラメータです。
 - 模様はインスタンスごとにずらしているので、同じ部品が並んでも同じ模様にはなりません。
+- 引きの画では、模様の周期が画素と同じくらいまで細かくなり、平均されずに砂粒のようなノイズに見えます。そこで、画素 1 つが覆う広さ（カメラからの距離 × 画素 1 つ分の角度）と模様の周期を比べ、粗さのむらは周期が 8 画素以下、凹凸は 12 画素以下になると弱め、3 画素で 0 にします（`shaders/scene.glsl` の `addDetail`。寄りの画では元のまま）。
 
 ### 積分器：PT / BDPT / VCM（フェーズ6）
 

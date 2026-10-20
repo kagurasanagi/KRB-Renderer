@@ -619,7 +619,9 @@ mod tests {
 )"#;
 
     fn parse_sample() -> Board {
-        let dir = std::env::temp_dir().join("krbr_rust_parser_test");
+        // テストは並列に走るので、呼び出しごとに別のフォルダにする（同じファイルだと書きかけを読むことがある）
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!("krbr_rust_parser_test_{}_{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("sample.kicad_pcb");
         std::fs::write(&file, SAMPLE).unwrap();
