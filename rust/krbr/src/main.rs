@@ -463,6 +463,8 @@ Enter キーで閉じます");
 }
 
 fn main() {
+    // 配布用の一式の dll\vcruntime を DLL の探し先に足す（STEP 変換器・OIDN を読む前に）
+    krbr_core::platform::add_dll_search_dirs();
     // サブコマンドを省略して `krbr board.kicad_pcb ...` と書いたら view とみなす
     // （exe のアイコンに .kicad_pcb をドラッグ＆ドロップしたときもこの形になる）
     let mut args: Vec<String> = std::env::args().collect();

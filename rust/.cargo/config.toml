@@ -1,0 +1,4 @@
+# Visual C++ ランタイムを exe に静的に組み込む（ランタイムの入っていない PC でも krbr.exe だけで起動できる。
+# STEP 変換器・OpenCASCADE・OIDN の DLL が使うランタイムは、配布用の一式の dll\vcruntime から読む）
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

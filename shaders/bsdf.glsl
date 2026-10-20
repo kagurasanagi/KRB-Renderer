@@ -260,6 +260,13 @@ vec3 bsdfSample(Shade s, vec3 v, inout Rng rng) {
     return sampleCosineHemisphere(u2);
 }
 
+// ほぼ鏡面の頂点（透過する材質、粗さの小さい金属）。BDPT / VCM は接続・まとめを行わず、
+// 間接光の上限（ホタル対策）では、カメラから最初の鏡面でない頂点までのこの頂点を数えない
+bool isDeltaLike(Shade s) {
+    if (s.transWeight > 0.0) return true;
+    return s.metalness >= 0.99 && s.roughness < 0.05 && s.coatWeight <= 0.0;
+}
+
 // ノイズ除去用のアルベド（RGB）
 vec3 shadeAlbedoRgb(Shade s) {
     vec3 base = mix(s.baseRgb * s.baseWeight, s.baseRgb, s.metalness);

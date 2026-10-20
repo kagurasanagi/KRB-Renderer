@@ -12,6 +12,8 @@ struct PtState {
     vec4 insideSigma;
     vec4 mediumSigma;    // 透明な物体の中での吸収係数
     bool terminated;     // 代表波長以外を打ち切った
+    uint rough;          // 間接光の上限をかけるかの判定に使う頂点の数。カメラから最初の鏡面でない頂点までの
+                         // ガラス・鏡（isDeltaLike）は数えない（ガラス越し・鏡に映った物の直接光は抑えない）
 };
 
 // 透過する材質の屈折率（分光モードで分散があれば代表波長での値）
@@ -49,7 +51,7 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
             } else if (st.prevPdf > 0.0) {  // prevPdf = 0 は基材の中など（中から抜けた光は捨てる）
                 float w = powerHeuristic(st.prevPdf, envLightPdfW(st.dir));
                 vec4 c = st.beta * Le * w;
-                L += depth >= 2u ? clampRadiance(c, st.terminated) : c;  // 間接光だけを抑える（ホタル対策）
+                L += st.rough >= 2u ? clampRadiance(c, st.terminated) : c;  // 間接光だけを抑える（ホタル対策）
             }
             break;
         }
@@ -58,6 +60,7 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
 
         vec3 wo = -st.dir;
         bool frontFace = dot(hit.ng, wo) > 0.0;  // 幾何法線は外向き（閉じた形状の表から当たった）
+        uint roughBefore = st.rough;
         // 発光面（片面）。直接サンプリングと MIS で組み合わせる
         Material hm = materials[hit.material];
         if (frontFace && luminanceOf(hm.emission.rgb) > 0.0) {
@@ -69,7 +72,8 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
                 float cosL = dot(hit.ng, wo);
                 float lightPdfW = emitterPdfA(hm.emission.rgb) * hit.t * hit.t / max(cosL, 1e-6);
                 float w = st.prevPdf > 0.0 ? powerHeuristic(st.prevPdf, lightPdfW) : 1.0;
-                L += clampRadiance(st.beta * Le * w, st.terminated);
+                vec4 c = st.beta * Le * w;
+                L += roughBefore >= 1u ? clampRadiance(c, st.terminated) : c;
             }
         }
 
@@ -91,6 +95,7 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
                 st.terminated = true;
             }
         }
+        if (st.rough > 0u || !isDeltaLike(s)) st.rough++;
 
         if (st.inside) {
             // ---- 基材の中から面に当たった：ここまでの吸収をかけ、外へ拡散して出るか、中へはね返る
@@ -164,7 +169,7 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
         // 光源の直接サンプリング（NEE）。透過の方向は、物体自身にさえぎられるので試さない
         {
             vec4 c = directLightPt(s, p, ng, ns, t, b, v, st.beta, rng);
-            L += depth >= 1u ? clampRadiance(c, st.terminated) : c;
+            L += roughBefore >= 1u ? clampRadiance(c, st.terminated) : c;
         }
 
         // BSDF サンプリング

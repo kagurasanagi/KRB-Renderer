@@ -325,10 +325,16 @@ Shade surfaceAt(Hit hit, inout vec3 ns, inout Rng rng) {
 // 絞るほど大きい）。カメラの光線を作ったところで設定する
 float gClampScale = 1.0;
 
+// 上限の倍率：サンプル番号（VCM は繰り返しの回数）n に対して max(1, (n / 16)^(2/3))。16 spp までは設定値のまま、
+// 1024 spp で 16 倍、4096 spp で 40 倍。寄与は負にならないので、上限 τ で抑えた値の分散は τ × 平均 以下になり、
+// τ を n より遅く伸ばせば、緩めた分のばらつきも平均で消え、上限による偏りも積むほど 0 に近づく（収束する推定になる）。
+// 伸ばし方は、ガラスの下（箱越しの太陽）での偏りとざらつきを測って決めた（4096 spp で偏り −5%、16384 spp で −1%）
+float clampGrowth() { return max(1.0, pow(float(pc.sampleIndex + 1u) / 16.0, 2.0 / 3.0)); }
+
 // 間接光の上限（ホタル対策）。terminated：代表波長以外を打ち切って代表波長を 4 倍にした寄与
 vec4 clampRadiance(vec4 c, bool terminated) {
     if (F.envParams.z <= 0.0) return c;
-    float m = F.envParams.z * gClampScale * (terminated ? 4.0 : 1.0);
+    float m = F.envParams.z * gClampScale * (terminated ? 4.0 : 1.0) * clampGrowth();
     float mx = max(max(c.x, c.y), max(c.z, c.w));
     return mx > m ? c * (m / mx) : c;
 }

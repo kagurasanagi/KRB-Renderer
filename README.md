@@ -4,19 +4,21 @@
 
 コマンド名・設定フォルダ名・環境変数の接頭辞は、短い **`krbr`** のままです（`krbr.exe`、`<プロジェクト名>.krbr/`、`%APPDATA%\krbr\`、`KRBR_CONFIG_DIR` など）。リポジトリ名だけが KRB-Renderer です。
 
+実装は 2 つあります。**Rust 版（`rust/`）が本体**で、配布用の一式（「Rust 版」の「配布用の一式」）もこれで作ります。C++ 版（`src/`）は、シェーダ（GLSL → SPIR-V）と STEP 変換器 DLL のビルドに使います（C++ 版の exe も同じように動きます）。以下の説明は両方に共通で、「Rust 版」とあるものは Rust 版だけの機能・違いです。
+
 ```
-# リアルタイム表示（既定。ウィンドウが開く）
-krbr E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --hdr E:\desktop\hdr\brown_photostudio_02_4k.exr
+# リアルタイム表示（既定。ウィンドウが開く。Rust 版は --hdr を省略できる）
+krbr board.kicad_pcb --hdr studio.exr
 
 # ファイルへ出力（ウィンドウは開かない）
-krbr render E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --hdr E:\desktop\hdr\brown_photostudio_02_4k.exr --spp 256 --width 1920 --height 1080 --out out/board.png
+krbr render board.kicad_pcb --hdr studio.exr --spp 256 --width 1920 --height 1080 --out out/board.png
 ```
 
 ### リアルタイム表示（`krbr <pcb>` / `krbr view <pcb>`）
 
 フレームごとにサンプルを積み増して表示します。1フレームに積むサンプル数は、GPU のタイムスタンプで測った時間が約 10 ms に収まるように自動で調整します。最大のサンプル数（既定 2^12 = 4096）まで積むと描画を止め、GPU を休ませて入力を待ちます。最大はパネルで 2 の何乗か（2^4 = 16 〜 2^16 = 65536）で選びます。`--spp` を指定すると、それ以上で最も近い 2 の累乗になります。ノイズはサンプル数の平方根でしか減らない（半分にするには 4 倍の時間）ので、1 段上げるごとの変化は小さくなります。
 
-ウィンドウ左上の**操作パネル**（`F1` / `Tab` で表示を切り替え）で、次の項目をその場で変えられます。
+**操作パネル**（C++ 版はウィンドウの左上、Rust 版は右端に固定。`F1` / `Tab` で表示を切り替え）で、次の項目をその場で変えられます。
 
 | 項目 | 内容 |
 |---|---|
@@ -44,7 +46,7 @@ krbr render E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --h
 ウィンドウのタイトルに、積んだサンプル数・フレーム時間・露出を表示します。
 開発用に、非表示のウィンドウで描いて終了するテストモードがあります（`--test-frames N --screenshot path [--test-orbit 度]`）。画面には出ず、フォーカスも奪いません。
 
-### 保存の監視と差分更新（フェーズ3）
+### 保存の監視と差分更新
 
 ビューア（`--no-watch` で無効）と `krbr watch` は、`.kicad_pcb` の保存を見張って自動で読み直します。
 
@@ -76,7 +78,7 @@ krbr render E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --h
 |---|---|
 | `board.png` | トーンマッピング済み（ACES 近似、sRGB） |
 | `board.exr` | リニアの放射輝度（RGB float32） |
-| `board_albedo.exr` / `board_normal.exr` | 最初の交点のアルベド／ワールド法線（将来のノイズ除去用） |
+| `board_albedo.exr` / `board_normal.exr` | 最初の交点のアルベド／ワールド法線（ノイズ除去の補助情報） |
 | `missing_models.json` / `missing_models.txt` | 見つからない・読めなかった 3D モデルの一覧 |
 
 ## ビルド
@@ -99,7 +101,7 @@ scripts\build.cmd --clean  # build\release を消してやり直す（それ以�
 build\release\krbr.exe probe
 ```
 
-テストが描く基板と環境マップは CMake のキャッシュ変数で指定します（既定はこの PC のもの。他の PC では `cmake -D` で差し替える）。
+テストが描く基板と環境マップは CMake のキャッシュ変数で指定します（既定は開発元の PC のもの。他の PC では `cmake -D` で差し替える）。
 
 | 変数 | 既定値 |
 |---|---|
@@ -134,10 +136,11 @@ release だけをビルドする独自トリプレット `triplets/x64-windows-r
 | `krbr material show <pcb> [--ref U3]` | 部品・部位ごとの材質と、どの段階で決まったか |
 | `krbr material set <pcb> --ref U3 [--part K] --material M` | 部品番号ごとの上書き（プロジェクトの overrides.toml） |
 | `krbr material set <pcb> --model <パス/ファイル名> [--part K] --material M [--global]` | 3D モデルごとの設定（プロジェクト、または `--global` で全体設定） |
+| `krbr kicad-plugin install` / `uninstall`（Rust 版） | KiCad の PCB エディタに「KRB Render でプレビュー」のボタンを足す・消す（「Rust 版」の「KiCad のプラグイン」） |
 
 `render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X,Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--spectral` / `--rgb`（色の計算）, `--mask-color <プリセット名 または r,g,b>`（レジストの色。下記）, `--lens pinhole|thin|realistic`, `--f-number`, `--focal-length`, `--focus-distance`, `--blades`, `--init`, `--no-cache`, `--no-kicad-cli`, `--debug-layers`（層テクスチャを PNG で出力）, `--validate`, `--normal-priority`, `-v`。
 
-## GPU の要件と、この PC（GTX 1060）での状況
+## GPU の要件と、GTX 1060 での状況
 
 描画には Vulkan 1.3 と `VK_KHR_acceleration_structure` に加えて、**`VK_KHR_ray_query` か `VK_KHR_ray_tracing_pipeline`** のどちらかが必要です。交差判定は `shaders/scene.glsl` の `rawTraceClosest` / `rawOccluded` に閉じていて、GPU に応じて次のどちらかで作ります（本文のシェーダは同じ。`shaders/stage.glsl` で切り替え）。
 
@@ -149,7 +152,7 @@ release だけをビルドする独自トリプレット `triplets/x64-windows-r
 | GPU | 状況 |
 |---|---|
 | RTX 3080 Ti（開発元の PC） | ray query。README の時間の数値はここで測ったもの |
-| GTX 1060 6GB（2026-10 からのこの PC、ドライバ 581） | `ray_query` なし → ray tracing pipeline。RT コアが無いのでドライバのエミュレーションで、RTX より大きく遅い（下記） |
+| GTX 1060 6GB（別の開発用の PC、ドライバ 581） | `ray_query` なし → ray tracing pipeline。RT コアが無いのでドライバのエミュレーションで、RTX より大きく遅い（下記） |
 
 `krbr probe` でどちらになったかを表示します（`GPU: ... ray tracing pipeline (no ray_query)`）。
 
@@ -164,7 +167,7 @@ GTX 1060 での実測（kachkojir_RK3506G2、135 万三角形、PT、深さ 8）
 
 白い炉テスト・積分器の一致・プリズムの分散などの GPU のテストは、ray tracing pipeline 版でも ray query 版と同じ値で通ります（25 件すべて合格）。watch テストの「保存から 1 秒以内」は、`ray_query` を持つ GPU が無い PC では 30 秒に緩めています（仕組みの検証が目的のため）。
 
-そのほか、この PC では OIDN の CUDA デバイス（Volta 以降が必要）が使えないので、ノイズ除去は CPU（Xeon E3-1290 V2、AVX2 なし）で行われ、1080p の high で 6〜8 秒かかります。VRAM が 6 GB なので、環境マップは 8k ではなく 4k を使ってください。
+そのほか、GTX 1060 では OIDN の CUDA デバイス（Volta 以降が必要）が使えないので、ノイズ除去は CPU（Xeon E3-1290 V2、AVX2 なし）で行われ、1080p の high で 6〜8 秒かかります。VRAM が 6 GB なので、環境マップは 8k ではなく 4k を使ってください。
 
 ## STEP 変換器 DLL（`step\krbr_step.dll`）
 
@@ -174,7 +177,7 @@ STEP の読み込み・三角形分割だけが OpenCASCADE を必要とする�
 - 出力は `.krbm`（`src/model/mesh_file.hpp`。頂点・法線・添字・三角形ごとの部位番号・部位の名前と色）。メッシュキャッシュと同じ形式
 - 本体（`model/step_loader.cpp`）は、exe と同じフォルダの `step\krbr_step.dll` を必要になったときに読み込み、無ければ STEP を「読めない」扱い（代替の箱）で動きます。API と形式の版を照合します
 - `build\release\` には本体と OIDN・GLFW などの DLL だけが残り、OpenCASCADE の 24 本の DLL は `build\release\step\` に入ります
-- Rust 版もこの DLL を同じ API で呼びます
+- Rust 版もこの DLL を同じ API で呼びます。配布用の一式では `dll\step\` に置きます（「Rust 版」の「配布用の一式」）
 
 ## 作業中の PC への配慮
 
@@ -223,7 +226,7 @@ krbr render board.kicad_pcb --hdr studio.exr --mask-color jlcpcb-purple
 ```
 全体設定とキャッシュの場所は、環境変数 `KRBR_CONFIG_DIR` / `KRBR_CACHE_DIR` で差し替えられます（テストで使用）。
 
-### 材質システム（フェーズ2）
+### 材質システム
 
 材質は OpenPBR Surface のパラメータで書きます（`scene/material.hpp`、色はリニア）。分散は `transmission_dispersion_abbe_number` と `transmission_dispersion_scale` で指定し、`specular_ior` を nd として扱います。アッベ数で表せない材質は、`[material.<名前>.krbr]` に Sellmeier の係数（`sellmeier_b`, `sellmeier_c`）を書けます。
 
@@ -255,24 +258,24 @@ bump_scale = 0.1
 - **subsurface**：krbr では簡易な形で扱います。`subsurface_weight` の割合で光が拡散して中へ入り、`subsurface_radius`（mm）進むと `subsurface_color` の透過率になる吸収を受けながら進み、反対側の面やふちから拡散して出ます（FR4 の透光性に使用）。
 - fuzz・thin_film・anisotropy・geometry_opacity・thin_walled・transmission_scatter は値を GPU まで渡していますが、描画には反映していません（使われるとログで知らせます）。発光（`emission_luminance`、cd/m²）は、放射輝度 1.0 = 1000 cd/m² として描きます。発光は片面（三角形の巻き方で決まる表側）から、余弦分布で放たれます。発光する三角形は光源として直接サンプリングします（輝度 × 面積に比例して選ぶ）。
 
-## Rust 版（移植中）
+## Rust 版
 
-`rust/` に Rust への移植を進めています（cargo のワークスペース。`rust-toolchain.toml` で MSVC の stable を指定）。シェーダ（GLSL → SPIR-V）はそのまま使い、C++ の本体を順に置き換えます。設定・キャッシュの場所と XXH64 のキーは C++ 版と同じで、メッシュキャッシュを共有します。
+`rust/` が Rust 版です（cargo のワークスペース。`rust-toolchain.toml` で MSVC の stable を指定）。C++ 版の機能は、層テクスチャ方式（`[relief] enabled = false`）を除いてすべて移植済みで、さらに Rust 版だけの機能（下記）があります。シェーダ（GLSL → SPIR-V）と STEP 変換器 DLL は、C++ 版のビルドの出力をそのまま使います。設定・キャッシュの場所と XXH64 のキーは C++ 版と同じで、メッシュキャッシュを共有します。
 
 ```
 cd rust
 cargo build --release
-target\release\krbr.exe info E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --models
-target\release\krbr.exe E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb   # ビューア（--hdr は省略可）
-target\release\krbr.exe render E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --hdr E:\desktop\hdr\brown_photostudio_02_4k.exr --out out\rs.png
-target\release\krbr.exe watch E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --out out\watch.png   # 保存のたびに PNG を書き直す
+target\release\krbr.exe info board.kicad_pcb --models
+target\release\krbr.exe board.kicad_pcb   # ビューア（--hdr は省略可）
+target\release\krbr.exe render board.kicad_pcb --hdr studio.exr --out out\rs.png
+target\release\krbr.exe watch board.kicad_pcb --out out\watch.png   # 保存のたびに PNG を書き直す
 cargo test
 cargo test --release -p krbr-app --test watch -- --ignored --nocapture      # 保存の監視（GPU と KiCad の 3D モデルが要る）
 cargo test --release -p krbr-app --test material -- --ignored --nocapture   # 材質の CLI（KiCad の 3D モデルが要る）
 cargo test --release -p krbr-app --test denoise -- --ignored --nocapture    # ノイズ除去（GPU と OIDN の DLL が要る）
 ```
 
-Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフォルダの `shaders\`、環境変数 `KRBR_SHADER_DIR`、開発中は `<リポジトリ>\build\release\shaders` の順で探します。STEP 変換器 DLL は exe と同じフォルダの `step\krbr_step.dll`、無ければ開発中は `<リポジトリ>\build\release\step\krbr_step.dll` です（どちらも exe のフォルダから上へたどって探すので、`deps\` に置かれるテストの実行ファイルからも見つかります）。ビューアの操作パネルは egui なので見た目は C++ 版（Dear ImGui）と違いますが、項目・操作・キーは同じです。Rust 版ではパネルをウィンドウの右端に上下いっぱいで固定し（幅は境目のドラッグで変更、× で閉じる）、3D 表示はその残りの領域に描きます。上端のメニュー（ファイル／表示／ヘルプ）の「表示」→「設定パネル」か `F1` / `Tab` で再表示できます。
+Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフォルダの `shaders\`、環境変数 `KRBR_SHADER_DIR`、開発中は `<リポジトリ>\build\release\shaders` の順で探します。STEP 変換器 DLL は exe と同じフォルダの `dll\step\krbr_step.dll`、`step\krbr_step.dll`、開発中は `<リポジトリ>\build\release\step\krbr_step.dll` の順です（開発中のものは exe のフォルダから上へたどって探すので、`deps\` に置かれるテストの実行ファイルからも見つかります）。ビューアの操作パネルは egui なので見た目は C++ 版（Dear ImGui）と違いますが、項目・操作・キーは同じです（Rust 版にはさらに、部品の選択と材質の割り当て、一時停止などがあります。下記）。Rust 版ではパネルをウィンドウの右端に上下いっぱいで固定し（幅は境目のドラッグで変更、× で閉じる）、3D 表示はその残りの領域に描きます。上端のメニュー（ファイル／表示／ヘルプ）の「表示」→「設定パネル」か `F1` / `Tab` で再表示できます。
 
 **環境マップ（Rust 版）**：`--hdr` は省略できます。次の順で決めます。
 
@@ -283,7 +286,7 @@ Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフ�
 
 最後に使ったものは `%APPDATA%\krbr\state.toml` に、基板ごとと最近使った一覧として覚えます。プロジェクトのファイルは書き換えません。覚えた後に environment.toml の `hdr` を書き換えたときは、そちらを使います。覚えたファイルが無くなっていたら 3・4 に戻ります。environment.toml で指定したファイルが読めないときは、内蔵のスタジオで代えて続けます（`--hdr` で指定したものが読めないときはエラー）。ビューアの「環境マップ」の一覧には、内蔵のスタジオ、最近使ったもの、今のものと同じフォルダの `.hdr` / `.exr` が出ます。「開く...」でファイルを選ぶか、`.hdr` / `.exr` をウィンドウへドラッグ＆ドロップしても切り替えられます。
 
-**保存の監視と差分更新（Rust 版）**：C++ 版（上の「保存の監視と差分更新」）と同じ仕組みです。ビューアは既定で `.kicad_pcb` の保存を監視し（`--no-watch` で無効）、裏のスレッドで読み直して、変わった範囲の凹凸タイルだけを作り直します。読み直し中と、変更の件数・作り直したタイルの数・かかった時間は、設定パネルの上に出ます。読み直しの間に変えたレジストの色は、差し替えのときに反映します。`krbr watch` はウィンドウを開かずに、保存のたびに `--out`（既定 `out\watch.png`）を書き直します（1 回の更新で積むのは `--spp`、既定 32。`--max-updates` 回で終わる。ノイズ除去は Rust 版では未対応）。この PC（1920x1080、32 spp）では、0603 のコンデンサを 1.5 mm 動かす保存から画像の更新まで約 0.5 秒です（監視の待ち 0.2〜0.3、読み直し 0.15（解析 0.05、タイル 4 枚）、GPU 0.04、描画 0.12、書き出し 0.02）。
+**保存の監視と差分更新（Rust 版）**：C++ 版（上の「保存の監視と差分更新」）と同じ仕組みです。ビューアは既定で `.kicad_pcb` の保存を監視し（`--no-watch` で無効）、裏のスレッドで読み直して、変わった範囲の凹凸タイルだけを作り直します。読み直し中と、変更の件数・作り直したタイルの数・かかった時間は、設定パネルの上に出ます。読み直しの間に変えたレジストの色は、差し替えのときに反映します。`krbr watch` はウィンドウを開かずに、保存のたびに `--out`（既定 `out\watch.png`）を書き直します（1 回の更新で積むのは `--spp`、既定 32。`--max-updates` 回で終わる。ノイズ除去は既定で有効、`--no-denoise` で無効）。この PC（1920x1080、32 spp）では、0603 のコンデンサを 1.5 mm 動かす保存から画像の更新まで約 0.5 秒です（監視の待ち 0.2〜0.3、読み直し 0.15（解析 0.05、タイル 4 枚）、GPU 0.04、描画 0.12、書き出し 0.02）。
 
 **線フォントの文字（Rust 版）**：KiCad の線フォント（ストロークフォント）の文字は形の情報を持たないので、C++ 版と同じく kicad-cli でシルクを SVG に書き出して取り込みます（`[kicad_cli] use_for_text` / `path`、`--no-kicad-cli`）。ただし C++ 版と違い、kicad-cli に渡すのは**シルク層に線フォントの文字（と文字の枠）だけを残した基板のコピー**です。TrueType の文字（`render_cache` を持つもの）はシルク層から部品図の層へ移し、線・図形・パッドなどは取り除きます。TrueType の文字・線・図形は krbr が自分で描くので、kicad-cli の形が重なって太ったり二重になったりしません（この基板で、kicad-cli の有無で変わるのは線フォントの文字の画素だけであることを確かめています）。書き出しは `%LOCALAPPDATA%\krbr\cache\silk\<キー>-stroke-F.svg` / `-B.svg` にキャッシュします（キーは渡す基板のコピーの内容から作るので、TrueType の文字を動かしただけでは書き出し直しません。C++ 版のキャッシュとは別）。作業フォルダはプロセスごとに分け、kicad-cli は 120 秒で打ち切ります。保存で線フォントの文字が変わったときは、ビューアと `krbr watch` が裏で書き出し直し、終わったら凹凸タイルを全部作り直します（それまでは前の文字のまま。書き出し中にまた変わったら、終わった後にもう一度書き出します）。
 
@@ -291,7 +294,7 @@ Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフ�
 
 **ビューアで材質を割り当てる（Rust 版）**：3D 表示の部品を**クリック**すると選び（ドラッグは回転、Ctrl ＋クリックはピント合わせのまま）、輪郭線をオレンジで重ねます（画像には入りません。実レンズのときは投影が違うので出しません）。設定パネルの「選んだ部品」に、部位ごとの材質（材質ライブラリから選べる）と、決まった段階が出ます。書き込む先は「この部品」（`overrides.toml` の部品番号）、「このモデル」（`overrides.toml` の 3D モデル）、「全基板」（`%APPDATA%\krbr\model_map.toml`）から選び、材質を選ぶとすぐ書いて描き直します（`krbr material set` と同じ書き方）。「上書きを消す」で規則どおりに戻せます。3D モデルが見つからない代わりの箱を選んだときは、探したパスと理由を出します。
 
-**ノイズ除去（Rust 版）**：C++ 版（上の「ノイズ除去（OIDN）」）と同じ仕組みです。OIDN の DLL（`OpenImageDenoise.dll` ほか一式）は実行時に読み、exe と同じフォルダ、無ければ開発中は `<リポジトリ>\build\release\` から探します（無ければノイズ除去だけが使えず、ほかはそのまま動きます）。Vulkan と同じ GPU の CUDA デバイスでバッファを共有して動かし（`VK_KHR_external_memory_win32`）、共有できなければ CPU デバイスにします。ビューアは既定で無効（パネルの「ノイズ除去 (OIDN)」、`--denoise`、`D` キー。かける間隔は C++ 版と同じ）、`krbr watch` は既定で有効（`--no-denoise`）、`krbr render --denoise` は `<名前>_denoised.png / .exr` も書き出します。
+**ノイズ除去（Rust 版）**：C++ 版（上の「ノイズ除去（OIDN）」）と同じ仕組みです。OIDN の DLL（`OpenImageDenoise.dll` ほか一式）は実行時に読み、exe と同じフォルダの `dll\oidn\`、exe と同じフォルダ、開発中は `<リポジトリ>\build\release\` の順に探します（無ければノイズ除去だけが使えず、ほかはそのまま動きます）。Vulkan と同じ GPU の CUDA デバイスでバッファを共有して動かし（`VK_KHR_external_memory_win32`）、共有できなければ CPU デバイスにします。ビューアは既定で無効（パネルの「ノイズ除去 (OIDN)」、`--denoise`、`D` キー。かける間隔は C++ 版と同じ）、`krbr watch` は既定で有効（`--no-denoise`）、`krbr render --denoise` は `<名前>_denoised.png / .exr` も書き出します。
 
 - **強さ**：OIDN 自体には強さの設定が無いので、ノイズ除去した画像と元の画像を混ぜる割合として調整します（パネルのスライダー、`--denoise-strength`。0〜1、既定 1 で OIDN の結果そのまま。下げると細部やざらつきが少し残る）。混ぜる処理は軽い（`shaders/denoise_blend.comp`）ので、ビューアではスライダーを動かすとすぐ反映されます。
 - ビューアで `S` を押したとき、ノイズ除去した画像を表示していれば `<名前>_NNN_denoised.png / .exr` も書きます（表示と同じ強さ）。
@@ -307,11 +310,13 @@ Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフ�
 |---|---|
 | `krbr.exe` | 本体（アイコン付き） |
 | `shaders\` | シェーダ（SPIR-V） |
-| `step\` | STEP 変換器（`krbr_step.dll`）と OpenCASCADE の DLL |
-| `OpenImageDenoise*.dll`、`tbb12.dll` | ノイズ除去（OIDN。CPU と CUDA のデバイス） |
-| `msvcp140*.dll`、`vcruntime140*.dll`、`concrt140.dll` | Visual C++ ランタイム（再頒布用のファイルを exe の横に置く。インストール不要） |
+| `dll\step\` | STEP 変換器（`krbr_step.dll`）と OpenCASCADE の DLL |
+| `dll\oidn\` | ノイズ除去（`OpenImageDenoise*.dll`、`tbb12.dll`。CPU と CUDA のデバイス） |
+| `dll\vcruntime\` | Visual C++ ランタイム（`msvcp140*.dll`、`vcruntime140*.dll`、`concrt140.dll` の再頒布用ファイル。インストール不要） |
 | `install_kicad_plugin.bat`、`uninstall_kicad_plugin.bat`、`kicad_plugin\` | KiCad のプラグインと、そのインストール・削除（同じフォルダの `krbr.exe` を使う） |
 | `README.txt`、`licenses\` | 使い方と、同梱物のライセンス（OIDN・oneTBB・OpenCASCADE） |
+
+直下には DLL を置きません。`krbr.exe` は Visual C++ ランタイムを静的に組み込み（`rust\.cargo\config.toml` の `+crt-static`）、起動の直後に `dll\vcruntime` を DLL の探し先に足してから、`dll\step`・`dll\oidn` の DLL を読みます（どちらも無ければ、従来の `step\`・exe の横、開発中の `build\release` を探す）。
 
 リポジトリの外に展開した zip だけで、空のキャッシュからの STEP の分割、ノイズ除去（CUDA）、kicad-cli のシルク、ビューア、プラグインのインストールが動くことを確かめています（リポジトリの中では、開発用に `build\release` を探してしまうので、足りないファイルに気づけない）。
 
@@ -319,13 +324,15 @@ Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフ�
 
 **exe のアイコンへのドラッグ＆ドロップ**：`krbr.exe`（またはそのショートカット）に `.kicad_pcb` をドロップすると、ビューアで開きます。このとき（エクスプローラーからの起動）は作業フォルダを基板のフォルダにするので、`S` で保存した画像は `<基板のフォルダ>\out\` に入ります。エラーで終わるときは、コンソールが閉じる前に Enter を待ちます。
 
+移植の段階：
+
 | 段階 | 内容 | 状況 |
 |---|---|---|
 | 1 | S 式パーサ、基板の構造（`krbr-kicad`）、3D モデルのパス解決、`info` | 済（C++ 版と同じ結果：250 部品・234 モデル解決） |
-| 2 | STEP → メッシュの変換器を C++ の薄い DLL（`stepkrbr_step.dll`）に切り出し、Rust はキャッシュと DLL だけを読む（`krbr-model`、`krbr models`） | 済（C++ 版と同じキャッシュを共有：38 モデル・21 万三角形） |
+| 2 | STEP → メッシュの変換器を C++ の薄い DLL（`step\krbr_step.dll`）に切り出し、Rust はキャッシュと DLL だけを読む（`krbr-model`、`krbr models`） | 済（C++ 版と同じキャッシュを共有：38 モデル・21 万三角形） |
 | 3 | 基板メッシュ、凹凸タイル、層の多角形、距離場（`krbr-geom`：Clipper2・earcut の crate、`krbr geom`） | 済（外形・穴の数は C++ 版と一致。凹凸は 168 万三角形、C++ 版 150 万：Clipper2 の丸め継ぎ目の分割数の違い） |
-| 4 | 描画（`krbr-scene`：材質・割り当て・分光・設定、`krbr-render`：ash でデバイス・BLAS/TLAS・カーネル（ray query / RT パイプライン）・累積・読み戻し・PNG/EXR）。`krbr render` | 済（同じシェーダ・同じカメラで C++ 版と同じ画像。kicad-cli の線フォントのシルクも済。`--init` も済。ノイズ除去（`--denoise`）も済。未移植：層テクスチャ方式） |
-| 5 | ビューア（winit + egui、`krbr-app`）、監視、ノイズ除去（OIDN）、材質 CLI | ビューアは済（`krbr <pcb> --hdr ...` でウィンドウ。パネル・マウス操作・キー・保存・テストモードは C++ 版と同じ。保存の監視と差分更新・`krbr watch`・kicad-cli のシルクも済。`material list / show / set`・`mask list`・`probe` も済（表示は C++ 版と同じ。設定ファイルは互いに読める）。ノイズ除去（OIDN）も済） |
+| 4 | 描画（`krbr-scene`：材質・割り当て・分光・設定、`krbr-render`：ash でデバイス・BLAS/TLAS・カーネル（ray query / RT パイプライン）・累積・読み戻し・PNG/EXR）。`krbr render` | 済（同じシェーダ・同じカメラで C++ 版と同じ画像。kicad-cli の線フォントのシルク、`--init`、ノイズ除去（`--denoise`）も済。層テクスチャ方式は未移植） |
+| 5 | ビューア（winit + egui、`krbr-app`）、監視、ノイズ除去（OIDN）、材質 CLI | 済（パネル・マウス操作・キー・保存・テストモードは C++ 版と同じ。保存の監視と差分更新・`krbr watch`・`material list / show / set`・`mask list`・`probe`・ノイズ除去も済。設定ファイルは互いに読める） |
 
 ## テスト
 
@@ -333,18 +340,20 @@ Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフ�
 build\release\krbr_tests.exe
 ```
 
+（C++ 版のテスト。Rust 版のテストは `rust/` で `cargo test`。GPU を使うものは「Rust 版」のコマンドの例を参照）
+
 doctest で、次をウィンドウを開かずに確かめます。基板を使うテストは `KRBR_TEST_PCB` の基板をコピーして使い、部品番号や座標は基板の中から選びます（KiCad 標準の色を持つ IC、`C_0603_1608Metric` のコンデンサ）。
 
 - 材質の TOML の往復、アッベ数からの屈折率、材質ライブラリの重ね方
 - 解決順序の5段階、パス・ハッシュでの照合、部位ごとの指定
-- フェーズ3：基板のコピーを書き換え、保存から画像の更新まで 1 秒以内であること、作り直すタイルが周辺だけであること、変更のない保存では何も作り直さないこと、未分割のモデルは箱で先に更新し裏での分割後に差し替わること
-- フェーズ2の完了条件：一時フォルダに2つのプロジェクトを作り、全体設定で U2 の材質を変えると両方に反映されること、部品番号の上書きが優先されること（全体設定は `KRBR_CONFIG_DIR` で一時フォルダに向ける）
+- 保存の監視：基板のコピーを書き換え、保存から画像の更新まで 1 秒以内であること、作り直すタイルが周辺だけであること、変更のない保存では何も作り直さないこと、未分割のモデルは箱で先に更新し裏での分割後に差し替わること
+- 全体設定の共有：一時フォルダに2つのプロジェクトを作り、全体設定で U2 の材質を変えると両方に反映されること、部品番号の上書きが優先されること（全体設定は `KRBR_CONFIG_DIR` で一時フォルダに向ける）
 - 距離場：半平面と 1 点からの距離、8bit への詰め方
 - 分光の土台：等色関数と白色点、RGB → スペクトルの往復（誤差 0.008 以下、値が 0..1 に収まること）、アッベ数からの屈折率
-- **プリズムの分散**（フェーズ5の完了条件）：下記
+- **プリズムの分散**：下記
 - **BDPT / VCM の白い炉テスト**：上の主な材質（拡散・金属・誘電体・subsurface・ガラス・分光のアクリル）で、PT と同じ値（差 0.003 以下）
-- **積分器の一致**（フェーズ6）：面光源・相互反射・光沢のある金属球のシーンを PT（2048 spp）・BDPT・VCM（1024 回）で描いて比べます。平均は 0.09825 / 0.09823 / 0.09829、4x4 画素ごとの相対的な差は PT どうし（種だけ違う）0.010、BDPT 0.009、VCM 0.017
-- **集光模様の収束**（フェーズ6の完了条件）：下記
+- **積分器の一致**：面光源・相互反射・光沢のある金属球のシーンを PT（2048 spp）・BDPT・VCM（1024 回）で描いて比べます。平均は 0.09825 / 0.09823 / 0.09829、4x4 画素ごとの相対的な差は PT どうし（種だけ違う）0.010、BDPT 0.009、VCM 0.017
+- **集光模様の収束**：下記
 - **分光モードの色の保存**：色のついた拡散を白い炉の中で RGB / 分光の両方で描き、チャンネルごとの差が 0.02 + 3% 以内であること（実測 0.0003 以下）
 - **白い炉テスト**：一様な白い環境光の中の球をオフスクリーンで描き、吸収のない材質で放射輝度が 1 になることを確かめます。エネルギーが増える（1 を超える）のは誤りとして扱います。粗さ 1 の金属は、単一散乱の GGX の理論値（数値積分で 0.409）と一致することを確かめます。
 
@@ -353,7 +362,7 @@ doctest で、次をウィンドウを開かずに確かめます。基板を使
 | Lambert（鏡面なし） | 0.9999 | 理想値 1 |
 | 完全な鏡 | 0.9998 | 理想値 1 |
 | 金属 粗さ 0.3 | 0.977 | 単一散乱による損失 |
-| 金属 粗さ 1.0 | 0.413 | 理論値 0.409（フェーズ8で多重散乱を補償する） |
+| 金属 粗さ 1.0 | 0.413 | 理論値 0.409（多重散乱の補償は今後の予定。`plan.md`） |
 | 拡散の透過（吸収なし） | 0.9994 | 理想値 1（基材の透光性の仕組み） |
 | ガラス（粗さ 0） | 0.9998 | 理想値 1（反射＋屈折） |
 | ガラス 粗さ 0.3 | 0.917 | 単一散乱による損失（中から当たったときの全反射が多い） |
@@ -363,6 +372,8 @@ doctest で、次をウィンドウを開かずに確かめます。基板を使
 | コートつき Lambert | 0.905 | 同上 |
 
 ## 処理の流れとモジュール構成
+
+C++ 版のモジュールです。Rust 版も同じ分け方の crate（`krbr-core` / `krbr-kicad` / `krbr-geom` / `krbr-model` / `krbr-scene` / `krbr-render` / `krbr-app`、exe は `rust/krbr`）になっています。
 
 ```
 .kicad_pcb ─▶ kicad/ ─▶ geom/ ─────────┐
@@ -408,7 +419,7 @@ HDR ─────────────────────────�
 - 材質の境界は形状そのもので決まるので、境界がぼやけません。
 - `enabled = false` にすると、以前の層テクスチャ方式（平らな面に R=銅, G=レジスト開口, B=シルク を描き、材質を確率的に選ぶ）になります。
 
-### 基板専用の材質（フェーズ4）
+### 基板専用の材質
 
 **レジストの厚み t(x)**：タイルごとに、銅箔とレジスト開口の縁からの符号付き距離場（20 µm/画素、±0.3 mm、厳密なユークリッド距離変換）を求め、RG8 のテクスチャにします（`raster/board_sdf`、保存のたびに変わったタイルの範囲だけを GPU に送る）。シェーダはそこから厚みを決めます（`maskThickness`）。
 
@@ -440,7 +451,7 @@ HDR ─────────────────────────�
 - 模様はインスタンスごとにずらしているので、同じ部品が並んでも同じ模様にはなりません。
 - 引きの画では、模様の周期が画素と同じくらいまで細かくなり、平均されずに砂粒のようなノイズに見えます。そこで、画素 1 つが覆う広さ（カメラからの距離 × 画素 1 つ分の角度）と模様の周期を比べ、粗さのむらは周期が 8 画素以下、凹凸は 12 画素以下になると弱め、3 画素で 0 にします（`shaders/scene.glsl` の `addDetail`。寄りの画では元のまま）。
 
-### 積分器：PT / BDPT / VCM（フェーズ6）
+### 積分器：PT / BDPT / VCM
 
 `--integrator pt|bdpt|vcm`（設定 `[render] integrator`、ビューアのパネルの「積分器」）で選びます。既定は PT です。
 
@@ -469,7 +480,7 @@ HDR ─────────────────────────�
 
 VCM（1024 回）の集光点のまわりの平均は 0.2023 で、PT（16384 spp）の 0.1974 と 2.5% 以内で一致します。画像は `out/p6_caustic_vcm_1024.png`、`out/p6_caustic_pt_16384.png` などです。
 
-### カメラとレンズ（フェーズ7）
+### カメラとレンズ
 
 `environment.toml` の `[lens]`、`--lens`、ビューアのパネルの「レンズ」で選びます。既定はピンホールです。ビューアでは **Ctrl + クリック**した点にピントを合わせます（CPU で全三角形と交差を調べる）。
 
@@ -498,9 +509,9 @@ VCM（1024 回）の集光点のまわりの平均は 0.2023 で、PT（16384 sp
 | 薄レンズでの積分器の一致：平均 | PT 0.07913 / BDPT 0.07924 / VCM 0.07924 |
 | 実レンズ：一様な環境光での中央の明るさ | 0.99 |
 
-完了条件の確認用の画像は `out/p7_showcase.png`（7 枚羽根、口径食、周辺減光、軸上・倍率色収差。ボケは暗いので +4 EV で保存）です。
+確認用の画像は `out/p7_showcase.png`（7 枚羽根、口径食、周辺減光、軸上・倍率色収差。ボケは暗いので +4 EV で保存）です。
 
-### 分光レンダリング（フェーズ5）
+### 分光レンダリング
 
 `--spectral`（設定 `[render] spectral = true`、ビューアのパネルの「色の計算」）で切り替えます。既定は RGB です。
 
@@ -522,30 +533,34 @@ VCM（1024 回）の集光点のまわりの平均は 0.2023 で、PT（16384 sp
 
 ### ホタル対策
 
-小さく明るい光源（HDR の中の電球など）が、拡散反射から光沢反射を経由して作る光の粒（ホタル）を抑えるため、**間接光だけ**に放射輝度の上限をかけています（既定 10、`--clamp` / `radiance_clamp`）。直接光のハイライトは制限しません。`0` にすると、偏りのない結果になります。
+小さく明るい光源（HDR の中の電球や太陽など）が、拡散反射から光沢反射やガラスを経由して作る光の粒（ホタル）を抑えるため、**間接光だけ**に放射輝度の上限をかけています（`--clamp` / `radiance_clamp`、既定 10。`0` で上限なし）。直接光のハイライトは制限しません。
+
+- **積むほど緩む上限**：上限はサンプル数 n とともに max(1, (n / 16)^(2/3)) 倍に緩めます（16 spp までは設定値、256 spp で 6.3 倍、1024 spp で 16 倍、4096 spp で 40 倍。VCM は繰り返しの回数）。序盤はホタルを抑え、積むほど偏りのない結果に近づきます（寄与は負にならないので、上限 τ で抑えた値の分散は τ × 平均 以下。τ を n より遅く伸ばせば、緩めた分のばらつきも平均で消える）。
+- **間接光の数え方**：経路が通った頂点の数で決めますが、カメラから最初の鏡面でない頂点までのガラス・鏡（透明な材質と、粗さ 0.05 未満の金属）は数えません。ガラス越しや鏡に映った物の直接光、LED のレンズ越しの発光面は抑えず、ガラスを通って光源へ向かう光（集光模様）は間接光として抑えます。PT と、BDPT / VCM のカメラ側（環境光・発光面に当たる、直接サンプリング）で同じです。
+- 例（代替の箱の下に太陽の光が入る基板、白いレジスト、上限なし・32768 spp の画像との差）：箱の下の明るさは、固定の上限では −25% のままでしたが、1024 spp で −16%、4096 spp で −7%、16384 spp で −1% です。その代わり、箱の下は数千 spp まで粒が目立ちます（ノイズ除去をかけると、4096 spp でほぼ参照どおり）。箱の側面越しに見える基板は、数え方の見直しで −39% から −8% になりました。
 
 ### 3D モデルが無い・読めない場合
 
 モデルが見つからない、STEP の読み込みや分割に失敗した、のいずれでも処理は止めません。
-部品の Courtyard（無ければパッドを囲む範囲）の大きさで、縁を面取りした透明な水晶（石英：nd 1.544、アッベ数 70）を置きます。下のパッドや配線が透けて見えます。高さは面積が大きいほど高くします（√面積 × 0.25、0.3〜5 mm。0603 の抵抗くらいで 0.3 mm、10 × 10 mm で 2.5 mm、20 × 20 mm 以上で 5 mm）。`board.toml` の `[placeholder] height_mm` に正の値を書くと、その高さに固定します（0 で自動）。色は `color`（中を 5 mm 進んだときの透過の色）です。面取りの幅は 0.2 mm です（縁が細く光って見える程度。箱がそれより薄いときは辺の長さに合わせて縮めます）。PT では透明な物体は光源の直接サンプリングをさえぎるので、水晶の下はノイズが多めになります。
+部品の Courtyard（無ければパッドを囲む範囲）の大きさで、縁を面取りした透明な水晶（石英：nd 1.544、アッベ数 70）を置きます。下のパッドや配線が透けて見えます。高さは面積が大きいほど高くします（√面積 × 0.25、0.3〜5 mm。0603 の抵抗くらいで 0.3 mm、10 × 10 mm で 2.5 mm、20 × 20 mm 以上で 5 mm）。`board.toml` の `[placeholder] height_mm` に正の値を書くと、その高さに固定します（0 で自動）。色は `color`（中を 5 mm 進んだときの透過の色）です。面取りの幅は 0.2 mm です（縁が細く光って見える程度。箱がそれより薄いときは辺の長さに合わせて縮めます）。PT では透明な物体は光源の直接サンプリングをさえぎるので、水晶の下には、水晶を通る経路でしか光が入りません。そのため水晶の下はノイズが多く、サンプルの少ないうちは上限（ホタル対策）で暗めになり、積むほど正しい明るさになります。
 終了時に一覧をログ・`missing_models.txt`・`missing_models.json` に出します。
 
-## 将来の拡張ポイント
+## 拡張ポイント
+
+今後の予定は `plan.md` にあります。コードの拡張の入り口（C++ 版）は次のとおりです。
 
 | 拡張 | 入り口 |
 |---|---|
 | **積分器の追加** | `render/integrator.hpp` の `Integrator` を実装し、`createIntegrator()` に名前を足します。計算シェーダと記述子の組は `render/kernel` の `ComputeKernel` / `sceneBindings` で作れます。 |
-| **KiCad の保存を監視してリアルタイム更新** | ビューア（`app/viewer.cpp`）のループに、ファイルの変更検知を足します。解析（`kicad::loadBoard`）→ `scene::buildScene` → `GpuScene::build` は分かれていて、STEP の分割はキャッシュされます。変更時はシーンを作り直して `Progressive::setFrame` で累積を 0 からやり直せば済みます。 |
 | **モデル形式の追加（VRML など）** | `model::IModelLoader` を実装して `ModelLibrary` に登録します。キャッシュはそのまま使えます。 |
 | **材質の対応表の拡充** | `model_map.toml` の `[presets.*]` と `[[rules]]`（ファイル名のワイルドカード、HSV の条件）。 |
-| **ノイズ除去** | `*_albedo.exr` / `*_normal.exr` を出しているので、OIDN などを後段に追加できます。 |
 
-## 既知の制限（フェーズ1）
+## 既知の制限
 
 - 3D モデルは STEP のみ読み込みます。`.wrl` の指定は、同名の `.step` があれば差し替えます。無ければ代替の箱になります。
 - パッドの `padstack`（層ごとに形が違うパッド）は既定の形だけを使います。内層は描きません。
 - 線フォント（KiCad 標準のストロークフォント）の文字は `render_cache` を持たないため、kicad-cli の SVG 出力から取り込みます。kicad-cli が無ければ、その文字は描かれません（警告を出します）。
 - レジストの縁の丸みは法線（見え方）だけで表し、形状は垂直な段差のままです。
-- PT では、透明な物体は光源の直接サンプリングの光をさえぎります。透明な物体越しの光（集光模様など）は収束が遅いので、VCM を使ってください。
+- PT では、透明な物体は光源の直接サンプリングの光をさえぎります。透明な物体越しの光（集光模様、ガラスの下の明るさ）は収束が遅いので、サンプルを多めに積むか、VCM を使ってください（多重散乱の補償と同じく、MNEE やパスガイディングは今後の予定。`plan.md`）。
 - 透明な物体は、閉じた形状で三角形の巻き方が外向き（表から見て反時計回り）であることを前提にしています。
 - プロセスの終了時に、NVIDIA ドライバの GPU コンテキストの解放で数秒かかることがあります。この間、CPU と GPU はほとんど使いません。

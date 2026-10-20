@@ -13,8 +13,8 @@ fs::path exeDir();
 fs::path cacheDir();
 // 全体設定（Windows: %APPDATA%\krbr、他: $XDG_CONFIG_HOME/krbr。KRBR_CONFIG_DIR で差し替え可）
 fs::path configDir();
-// 一時作業用（プロセスごとに分ける）
-fs::path tempDir();
+// 一時作業用の名前（%TEMP%\krbr_<名前>_<pid>_<連番>。作るのも、使い終えたら消すのも呼んだ側）
+fs::path tempPath(const std::string& stem);
 
 std::optional<std::string> getEnv(const std::string& name);
 

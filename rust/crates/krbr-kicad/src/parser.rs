@@ -619,13 +619,19 @@ mod tests {
 )"#;
 
     fn parse_sample() -> Board {
-        // テストは並列に走るので、呼び出しごとに別のフォルダにする（同じファイルだと書きかけを読むことがある）
+        load_text("sample.kicad_pcb", SAMPLE)
+    }
+
+    fn load_text(name: &str, text: &str) -> Board {
+        // テストは並列に走るので、呼び出しごとに別のフォルダにする（同じファイルだと書きかけを読むことがある）。読んだら消す
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!("krbr_rust_parser_test_{}_{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("sample.kicad_pcb");
-        std::fs::write(&file, SAMPLE).unwrap();
-        load_board(&file).unwrap()
+        let file = dir.join(name);
+        std::fs::write(&file, text).unwrap();
+        let b = load_board(&file);
+        let _ = std::fs::remove_dir_all(&dir);
+        b.unwrap()
     }
 
     #[test]
@@ -692,10 +698,7 @@ mod tests {
         assert!(!d.full && d.dirty.is_empty());
 
         let moved = SAMPLE.replace("(via (at 3 3)", "(via (at 4 3)");
-        let dir = std::env::temp_dir().join("krbr_rust_parser_test");
-        let file = dir.join("moved.kicad_pcb");
-        std::fs::write(&file, moved).unwrap();
-        let b2 = load_board(&file).unwrap();
+        let b2 = load_text("moved.kicad_pcb", &moved);
         let d = diff_boards(&b, &b2);
         assert_eq!((d.added, d.removed, d.changed), (0, 0, 1));
         assert!(d.holes_changed && !d.full);

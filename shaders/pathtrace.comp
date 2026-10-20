@@ -36,6 +36,7 @@ void main() {
     st.insideSigma = vec4(0.0);
     st.mediumSigma = vec4(0.0);
     st.terminated = cameraIsChromatic();  // 色収差：波長で光線が変わるので代表波長だけを追う
+    st.rough = 0u;
     if (st.terminated) st.beta = vec4(4.0 * st.beta.x, 0.0, 0.0, 0.0);
     gClampScale = cr.weight;
     vec3 albedo = vec3(0.0), normal = vec3(0.0);

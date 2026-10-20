@@ -27,7 +27,7 @@ inline void setEnv(const char* name, const std::string& value) {
 struct TempWorkspace {
     fs::path dir;
     explicit TempWorkspace(const std::string& name) {
-        dir = platform::tempDir() / ("test_" + name);
+        dir = platform::tempPath("test_" + name);
         std::error_code ec;
         fs::remove_all(dir, ec);
         fs::create_directories(dir / "config", ec);

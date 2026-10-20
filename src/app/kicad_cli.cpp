@@ -79,7 +79,7 @@ SilkPlot plotSilkWithKicadCli(const fs::path& cli, const kicad::Board& board, co
         out.fromCache = svg[0] && svg[1];
     }
     if (!out.fromCache) {
-        const fs::path work = platform::tempDir() / "kicad";
+        const fs::path work = platform::tempPath("kicad");
         fs::create_directories(work, ec);
         const fs::path pcbCopy = work / board.file.filename();
         fs::copy_file(board.file, pcbCopy, fs::copy_options::overwrite_existing, ec);

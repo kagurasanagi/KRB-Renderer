@@ -49,3 +49,28 @@ pub fn exe_dir() -> PathBuf {
 pub fn dev_build_dir(rel: &str, probe: &str) -> Option<PathBuf> {
     exe_dir().ancestors().take(6).map(|a| a.join("build").join("release").join(rel)).find(|d| d.join(probe).exists())
 }
+
+/// 配布用の一式の DLL のフォルダ（exe と同じ所の dll\<種類>。step / oidn / vcruntime）
+pub fn dll_dir(kind: &str) -> PathBuf {
+    exe_dir().join("dll").join(kind)
+}
+
+/// dll\vcruntime（Visual C++ ランタイム）を DLL の探し先に足す。起動の直後に一度だけ呼ぶ。
+/// STEP 変換器・OIDN は LOAD_LIBRARY_SEARCH_DEFAULT_DIRS で読むので、それらとその依存（OpenCASCADE など）が
+/// ここからランタイムを見つける。krbr.exe 自身はランタイムを静的に組み込んでいる（rust/.cargo/config.toml）
+pub fn add_dll_search_dirs() {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn AddDllDirectory(dir: *const u16) -> *mut std::ffi::c_void;
+        }
+        let dir = dll_dir("vcruntime");
+        if dir.is_dir() {
+            use std::os::windows::ffi::OsStrExt;
+            let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+            // 安全性：wide は 0 終端の絶対パス
+            unsafe { AddDllDirectory(wide.as_ptr()) };
+        }
+    }
+}

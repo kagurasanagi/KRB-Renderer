@@ -57,8 +57,11 @@ unsafe impl Sync for StepDll {}
 fn step_dll() -> Result<&'static StepDll, &'static str> {
     static DLL: OnceLock<Result<StepDll, String>> = OnceLock::new();
     DLL.get_or_init(|| {
-        // exe と同じフォルダの step\、開発中は C++ 版のビルド出力（<repo>/build/release/step）
-        let mut path = krbr_core::platform::exe_dir().join("step").join("krbr_step.dll");
+        // 配布用の一式の dll\step、exe と同じフォルダの step\（C++ 版と同じ置き方）、開発中は C++ 版のビルド出力（<repo>/build/release/step）
+        let mut path = krbr_core::platform::dll_dir("step").join("krbr_step.dll");
+        if !path.exists() {
+            path = krbr_core::platform::exe_dir().join("step").join("krbr_step.dll");
+        }
         if !path.exists() {
             if let Some(dev) = krbr_core::platform::dev_build_dir("step", "krbr_step.dll") {
                 path = dev.join("krbr_step.dll");
@@ -107,11 +110,10 @@ pub fn step_support() -> Result<(), &'static str> {
 
 fn tessellate_step(p: &Path, params: MeshParams) -> Result<ModelMesh, String> {
     let dll = step_dll().map_err(|e| format!("STEP converter unavailable: {e}"))?;
-    let tmp_dir = std::env::temp_dir().join("krbr").join(std::process::id().to_string()).join("step");
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    // 一時ファイルは %TEMP% の直下に置き、読んだら消す（フォルダを作ると、消すときに並列の変換とぶつかり、残りもする）
     static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = tmp_dir.join(format!("{n}.krbm"));
+    let tmp = std::env::temp_dir().join(format!("krbr_step_{}_{n}.krbm", std::process::id()));
     let step_c = CString::new(p.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
     let out_c = CString::new(tmp.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
     let mut err = vec![0u8; 512];

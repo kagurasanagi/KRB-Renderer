@@ -79,11 +79,7 @@ void bidirWavelengths(uint pathIdx) {
 vec4 maskTerminated(vec4 c, bool terminated) { return terminated ? vec4(4.0 * c.x, 0.0, 0.0, 0.0) : c; }
 
 // ---------------------------------------------------------------- 材質の性質
-// ほぼ鏡面の頂点（透過する材質、粗さの小さい金属）。接続・まとめを行わず、サンプリングだけで通り抜ける
-bool isDeltaLike(Shade s) {
-    if (s.transWeight > 0.0) return true;
-    return s.metalness >= 0.99 && s.roughness < 0.05 && s.coatWeight <= 0.0;
-}
+// ほぼ鏡面の頂点（isDeltaLike、bsdf.glsl）は、接続・まとめを行わず、サンプリングだけで通り抜ける
 // 経路を続ける確率（方向によらない値にする。MIS の確率密度にも含める）
 float continuationProb(Shade s) {
     vec3 a = shadeAlbedoRgb(s);

@@ -95,11 +95,9 @@ LoadResult StepLoader::load(const std::filesystem::path& p, const MeshParams& pa
         return res;
     }
     // 変換器は .krbm をファイルに書くので、一時ファイル経由で受け取る
-    static std::atomic<unsigned> counter{0};
-    const std::filesystem::path tmpDir = platform::tempDir() / "step";
     std::error_code ec;
-    std::filesystem::create_directories(tmpDir, ec);
-    const std::filesystem::path tmp = tmpDir / std::format("{}.krbm", counter++);
+    std::filesystem::path tmp = platform::tempPath("step");
+    tmp += ".krbm";
     char err[512] = {};
     const int rc = dll.toMeshFile(platform::pathToUtf8(p).c_str(), params.linearDeflection, params.angularDeflection,
                                   platform::pathToUtf8(tmp).c_str(), err, sizeof err);

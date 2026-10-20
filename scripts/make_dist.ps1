@@ -2,8 +2,10 @@
 # フォルダごとどこへ置いても動く（ポータブル版）。インストーラや KiCad の PCM パッケージもこれを元に作る。
 #   powershell -ExecutionPolicy Bypass -File scripts\make_dist.ps1            # ビルドしてからまとめる
 #   powershell -ExecutionPolicy Bypass -File scripts\make_dist.ps1 -NoBuild   # ビルド済みのものをまとめる
-# 中身：krbr.exe、shaders\、step\（STEP 変換器と OpenCASCADE）、OIDN（ノイズ除去）、Visual C++ ランタイム、
+# 中身：krbr.exe、shaders\、dll\（step：STEP 変換器と OpenCASCADE、oidn：ノイズ除去、vcruntime：Visual C++ ランタイム）、
 #       KiCad のプラグイン（kicad_plugin\）とそのインストール・削除のバッチ、使い方、ライセンス
+# 直下には DLL を置かない。krbr.exe は Visual C++ ランタイムを静的に組み込んでいて（rust\.cargo\config.toml）、
+# 起動の直後に dll\vcruntime を DLL の探し先に足す（STEP 変換器・OIDN の DLL が使う）
 param(
     [switch]$NoBuild,
     [string]$OutDir = ""
@@ -42,17 +44,19 @@ foreach ($p in @($rustExe, "$cppOut\shaders\pathtrace.comp.spv", "$cppOut\step\k
 
 Write-Host "== $dst にまとめる"
 if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
-New-Item -ItemType Directory -Force "$dst\shaders", "$dst\step", "$dst\kicad_plugin\krbr_preview", "$dst\licenses" | Out-Null
+New-Item -ItemType Directory -Force "$dst\shaders", "$dst\dll\step", "$dst\dll\oidn", "$dst\dll\vcruntime", "$dst\kicad_plugin\krbr_preview", "$dst\licenses" | Out-Null
 Copy-Item $rustExe $dst
 Copy-Item "$cppOut\shaders\*.spv" "$dst\shaders"
-Copy-Item "$cppOut\step\krbr_step.dll", "$cppOut\step\TK*.dll" "$dst\step"
+Copy-Item "$cppOut\step\krbr_step.dll", "$cppOut\step\TK*.dll" "$dst\dll\step"
 # ノイズ除去（OIDN）。HIP・SYCL のデバイスは使わないので入れない
-Copy-Item "$cppOut\OpenImageDenoise.dll", "$cppOut\OpenImageDenoise_core.dll", "$cppOut\OpenImageDenoise_device_cpu.dll", "$cppOut\OpenImageDenoise_device_cuda.dll", "$cppOut\tbb12.dll" $dst
-# Visual C++ ランタイム（アプリの横に置いてよい再頒布用ファイル。krbr.exe・STEP 変換器・OpenCASCADE が使う）
+Copy-Item "$cppOut\OpenImageDenoise.dll", "$cppOut\OpenImageDenoise_core.dll", "$cppOut\OpenImageDenoise_device_cpu.dll", "$cppOut\OpenImageDenoise_device_cuda.dll", "$cppOut\tbb12.dll" "$dst\dll\oidn"
+# Visual C++ ランタイム（アプリと一緒に置いてよい再頒布用ファイル。STEP 変換器・OpenCASCADE・OIDN が使う）
 $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory | Sort-Object FullName | Select-Object -Last 1
 foreach ($f in @("msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll")) {
-    Copy-Item (Join-Path $crt.FullName $f) $dst
+    Copy-Item (Join-Path $crt.FullName $f) "$dst\dll\vcruntime"
 }
+$rootDlls = Get-ChildItem "$dst\*.dll"
+if ($rootDlls) { throw "直下に DLL があります: $($rootDlls.Name -join ', ')" }
 # KiCad のプラグインと、そのインストール・削除（バッチは同じフォルダの krbr.exe を使う）
 Copy-Item "$repo\kicad_plugin\krbr_preview\*" "$dst\kicad_plugin\krbr_preview" -Exclude "krbr_path.txt", "__pycache__"
 Copy-Item "$repo\scripts\install_kicad_plugin.bat", "$repo\scripts\uninstall_kicad_plugin.bat" $dst
@@ -77,6 +81,15 @@ KRB-Renderer $version（Rust 版）  KiCad の基板の物理ベースのレン�
 ・install_kicad_plugin.bat をダブルクリックすると、KiCad 9 以降に入ります。KiCad を開き直すと出ます。
 ・削除は uninstall_kicad_plugin.bat です。
 ・このフォルダを移動したら、install_kicad_plugin.bat をもう一度実行してください（krbr.exe の場所を書き直します）。
+
+■ フォルダの中身（フォルダごと移動して使えます。中のファイルは動かさないでください）
+・krbr.exe          本体
+・shaders\          シェーダ
+・dll\step\         STEP 変換器（3D モデルの読み込み）と OpenCASCADE
+・dll\oidn\         ノイズ除去（Intel Open Image Denoise）
+・dll\vcruntime\    Visual C++ ランタイム（インストール不要）
+・kicad_plugin\     KiCad のプラグイン（install_kicad_plugin.bat で入れる）
+・licenses\         同梱物のライセンス
 
 ■ 動かすのに必要なもの
 ・Windows 10 / 11（64 bit）、Vulkan 1.3 とレイトレーシングに対応した GPU（NVIDIA GTX 10 系以降など）。

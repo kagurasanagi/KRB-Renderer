@@ -1,5 +1,6 @@
 #include "core/platform.hpp"
 
+#include <atomic>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -84,16 +85,16 @@ fs::path configDir() {
 #endif
 }
 
-fs::path tempDir() {
+fs::path tempPath(const std::string& stem) {
 #ifdef _WIN32
     const auto pid = static_cast<unsigned long>(GetCurrentProcessId());
 #else
     const auto pid = static_cast<unsigned long>(getpid());
 #endif
-    fs::path p = fs::temp_directory_path() / "krbr" / std::to_string(pid);
-    std::error_code ec;
-    fs::create_directories(p, ec);
-    return p;
+    // プロセスごとのフォルダは作らない（消すときに並列の処理とぶつかり、残りもする）
+    static std::atomic<unsigned> counter{0};
+    return fs::temp_directory_path() /
+           ("krbr_" + stem + "_" + std::to_string(pid) + "_" + std::to_string(counter++));
 }
 
 void setLowPriority() {
