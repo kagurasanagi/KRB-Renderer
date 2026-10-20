@@ -1,9 +1,12 @@
-//! 基板ごとに最後に使った環境マップと、最近使った環境マップの一覧を覚えておく（`%APPDATA%\krbr\state.toml`）。
-//! プロジェクトのファイル（`<名前>.krbr\environment.toml`）は書き換えない。
+//! 基板ごとに最後に使った環境マップとパネルの設定、最近使った環境マップの一覧を覚えておく（`%APPDATA%\krbr\state.toml`）。
+//! プロジェクトのファイル（`<名前>.krbr\environment.toml` / `board.toml`）は書き換えない。
+//! どの項目も、覚えたときの設定ファイルの値を一緒に残し、後で設定ファイルの方が書き換えられたら、そちらを優先する。
 
 use std::path::{Path, PathBuf};
 
 use krbr_core::warn;
+use krbr_scene::config::{apply_mask_color_spec, ProjectConfig};
+use krbr_scene::{LensModel, LensParams};
 use toml::{Table, Value};
 
 const MAX_RECENT: usize = 12;
@@ -69,20 +72,28 @@ fn remembered_in(t: &Table, pcb: &Path) -> Option<Remembered> {
 }
 
 fn remember_in(t: &mut Table, pcb: &Path, hdr: &str, config_hdr: &str) {
-    let boards = t.entry("boards").or_insert_with(|| Value::Table(Table::new()));
-    if !boards.is_table() {
-        *boards = Value::Table(Table::new());
-    }
-    let mut b = Table::new();
+    let b = board_table(t, pcb);
     b.insert("hdr".into(), Value::String(hdr.to_string()));
     b.insert("config_hdr".into(), Value::String(config_hdr.to_string()));
-    boards.as_table_mut().unwrap().insert(board_key(pcb), Value::Table(b));
 
     let mut recent = recent_in(t);
     recent.retain(|r| r != hdr);
     recent.insert(0, hdr.to_string());
     recent.truncate(MAX_RECENT);
     t.insert("recent_hdr".into(), Value::Array(recent.into_iter().map(Value::String).collect()));
+}
+
+/// この基板の表（無ければ作る）。環境マップとパネルの設定は同じ表に入れる
+fn board_table<'a>(t: &'a mut Table, pcb: &Path) -> &'a mut Table {
+    let boards = t.entry("boards").or_insert_with(|| Value::Table(Table::new()));
+    if !boards.is_table() {
+        *boards = Value::Table(Table::new());
+    }
+    let b = boards.as_table_mut().unwrap().entry(board_key(pcb)).or_insert_with(|| Value::Table(Table::new()));
+    if !b.is_table() {
+        *b = Value::Table(Table::new());
+    }
+    b.as_table_mut().unwrap()
 }
 
 fn recent_in(t: &Table) -> Vec<String> {
@@ -107,6 +118,191 @@ pub fn recent_hdrs() -> Vec<String> {
     recent_in(&load(&state_file()))
 }
 
+// ---------------------------------------------------------------- パネルの設定
+
+/// パネルの設定の値（項目の名前 → 値）。設定ファイルにもある項目と、ビューアだけの項目（VIEWER_ONLY）がある
+pub type ViewValues = Table;
+
+/// ビューアだけの項目（render / watch には使わない。設定ファイルには無い）
+pub const VIEWER_ONLY: [&str; 3] = ["denoise", "denoise_strength", "max_spp"];
+
+/// 画像に関わるパネルの設定（設定ファイル・コマンドラインにもある項目）
+#[derive(Debug, Clone)]
+pub struct ViewSettings<'a> {
+    pub env_intensity: f32,
+    pub env_rotation_deg: f32,
+    pub exposure_ev: f32,
+    pub integrator: &'a str,
+    pub spectral: bool,
+    pub bump_intensity: f32,
+    /// レジストの色：プリセットの名前、r,g,b、または空（stackup の色・既定）
+    pub mask: String,
+    pub fov_deg: f64,
+    pub lens: &'a LensParams,
+}
+
+impl<'a> ViewSettings<'a> {
+    pub fn of(cfg: &'a ProjectConfig) -> Self {
+        Self {
+            env_intensity: cfg.env_intensity,
+            env_rotation_deg: cfg.env_rotation_deg,
+            exposure_ev: cfg.exposure_ev,
+            integrator: &cfg.integrator,
+            spectral: cfg.spectral,
+            bump_intensity: cfg.scene.bump_intensity,
+            mask: mask_spec(&cfg.scene),
+            fov_deg: cfg.fov_deg,
+            lens: &cfg.lens,
+        }
+    }
+
+    pub fn values(&self) -> ViewValues {
+        let mut t = Table::new();
+        let mut f = |k: &str, v: f64| {
+            t.insert(k.into(), Value::Float(v));
+        };
+        f("env_intensity", self.env_intensity as f64);
+        f("env_rotation_deg", self.env_rotation_deg as f64);
+        f("exposure_ev", self.exposure_ev as f64);
+        f("bump_intensity", self.bump_intensity as f64);
+        f("fov_deg", self.fov_deg);
+        let l = self.lens;
+        for (k, v) in [
+            ("lens_f_number", l.f_number),
+            ("lens_focal_length_mm", l.focal_length_mm),
+            ("lens_focus_distance_mm", l.focus_distance_mm),
+            ("lens_blade_rotation_deg", l.blade_rotation_deg),
+            ("lens_blade_roundness", l.blade_roundness),
+            ("lens_optical_vignetting", l.optical_vignetting),
+            ("lens_abbe_number", l.abbe_number),
+            ("lens_lateral_ca", l.lateral_ca),
+        ] {
+            f(k, v as f64);
+        }
+        t.insert("integrator".into(), Value::String(self.integrator.to_string()));
+        t.insert("spectral".into(), Value::Boolean(self.spectral));
+        t.insert("mask".into(), Value::String(self.mask.clone()));
+        t.insert("lens_model".into(), Value::String(lens_model_name(l.model).into()));
+        t.insert("lens_blades".into(), Value::Integer(l.blades as i64));
+        t.insert("lens_natural_vignetting".into(), Value::Boolean(l.natural_vignetting));
+        t
+    }
+}
+
+/// レジストの色の指定：プリセットの名前、r,g,b、または空（stackup の色・既定）
+pub fn mask_spec(s: &krbr_scene::SceneOptions) -> String {
+    if !s.mask_preset.is_empty() {
+        s.mask_preset.clone()
+    } else if s.mask_color_set {
+        format!("{:.6},{:.6},{:.6}", s.mask_color.x, s.mask_color.y, s.mask_color.z)
+    } else {
+        String::new()
+    }
+}
+
+fn lens_model_name(m: LensModel) -> &'static str {
+    match m {
+        LensModel::Pinhole => "pinhole",
+        LensModel::Thin => "thin",
+        LensModel::Realistic => "realistic",
+    }
+}
+
+/// 覚えた値を設定に当てる（ある項目だけ。ビューアだけの項目は当てない）
+pub fn apply_view_values(cfg: &mut ProjectConfig, v: &ViewValues) {
+    let f = |k: &str| v.get(k).and_then(|x| x.as_float());
+    let set = |dst: &mut f32, k: &str| {
+        if let Some(x) = f(k) {
+            *dst = x as f32;
+        }
+    };
+    set(&mut cfg.env_intensity, "env_intensity");
+    set(&mut cfg.env_rotation_deg, "env_rotation_deg");
+    set(&mut cfg.exposure_ev, "exposure_ev");
+    set(&mut cfg.scene.bump_intensity, "bump_intensity");
+    if let Some(x) = f("fov_deg") {
+        cfg.fov_deg = x;
+    }
+    let l = &mut cfg.lens;
+    set(&mut l.f_number, "lens_f_number");
+    set(&mut l.focal_length_mm, "lens_focal_length_mm");
+    set(&mut l.focus_distance_mm, "lens_focus_distance_mm");
+    set(&mut l.blade_rotation_deg, "lens_blade_rotation_deg");
+    set(&mut l.blade_roundness, "lens_blade_roundness");
+    set(&mut l.optical_vignetting, "lens_optical_vignetting");
+    set(&mut l.abbe_number, "lens_abbe_number");
+    set(&mut l.lateral_ca, "lens_lateral_ca");
+    if let Some(m) = v.get("lens_model").and_then(|x| x.as_str()) {
+        l.model = match m {
+            "thin" => LensModel::Thin,
+            "realistic" => LensModel::Realistic,
+            _ => LensModel::Pinhole,
+        };
+    }
+    if let Some(n) = v.get("lens_blades").and_then(|x| x.as_integer()) {
+        l.blades = n as i32;
+    }
+    if let Some(b) = v.get("lens_natural_vignetting").and_then(|x| x.as_bool()) {
+        l.natural_vignetting = b;
+    }
+    if let Some(i) = v.get("integrator").and_then(|x| x.as_str()) {
+        cfg.integrator = i.to_string();
+    }
+    if let Some(b) = v.get("spectral").and_then(|x| x.as_bool()) {
+        cfg.spectral = b;
+    }
+    if let Some(m) = v.get("mask").and_then(|x| x.as_str()).filter(|m| !m.is_empty()) {
+        if let Err(e) = apply_mask_color_spec(&mut cfg.scene, m) {
+            warn!("remembered mask color {}: {}", m, e);
+        }
+    }
+}
+
+/// 覚えたパネルの設定のうち、覚えたときから設定ファイルの値が変わっていない項目（ビューアだけの項目は常に）
+fn usable_view_values(t: &Table, pcb: &Path, config_now: &ViewValues) -> ViewValues {
+    let Some(b) = t.get("boards").and_then(|b| b.as_table()).and_then(|b| b.get(&board_key(pcb))).and_then(|b| b.as_table()) else {
+        return ViewValues::new();
+    };
+    let Some(values) = b.get("view").and_then(|v| v.as_table()) else {
+        return ViewValues::new();
+    };
+    let config_then = b.get("view_config").and_then(|v| v.as_table());
+    values.iter().filter(|(k, _)| config_then.and_then(|c| c.get(*k)) == config_now.get(*k)).map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
+fn remember_view_in(t: &mut Table, pcb: &Path, values: &ViewValues, config: &ViewValues) {
+    let b = board_table(t, pcb);
+    b.insert("view".into(), Value::Table(values.clone()));
+    b.insert("view_config".into(), Value::Table(config.clone()));
+}
+
+fn forget_in(t: &mut Table, pcb: &Path) {
+    if let Some(b) = t.get_mut("boards").and_then(|b| b.as_table_mut()) {
+        b.remove(&board_key(pcb));
+    }
+}
+
+/// この基板で覚えているパネルの設定（設定ファイルが変わった項目は除く）。config_now は今の設定ファイルの値
+pub fn remembered_view(pcb: &Path, config_now: &ViewValues) -> ViewValues {
+    usable_view_values(&load(&state_file()), pcb, config_now)
+}
+
+/// この基板のパネルの設定を覚える。config は今の設定ファイルの値（ViewSettings::of(設定ファイルだけの設定).values()）
+pub fn remember_view(pcb: &Path, values: &ViewValues, config: &ViewValues) {
+    let file = state_file();
+    let mut t = load(&file);
+    remember_view_in(&mut t, pcb, values, config);
+    save(&file, &t);
+}
+
+/// この基板について覚えたもの（環境マップとパネルの設定）をすべて忘れる。最近使った環境マップの一覧は残す
+pub fn forget_board(pcb: &Path) {
+    let file = state_file();
+    let mut t = load(&file);
+    forget_in(&mut t, pcb);
+    save(&file, &t);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +320,50 @@ mod tests {
         assert_eq!(remembered_in(&t, b).unwrap().config_hdr, "/cfg.exr");
         assert_eq!(remembered_in(&t, Path::new("/x/c.kicad_pcb")), None);
         assert_eq!(recent_in(&t), vec!["/hdr/two.exr".to_string(), "/hdr/one.exr".to_string()]);
+    }
+
+    #[test]
+    fn view_settings_round_trip_and_config_changes_win() {
+        let mut cfg = ProjectConfig::default();
+        let config_then = ViewSettings::of(&cfg).values();
+        // パネルで変えた値
+        let mut panel = cfg.clone();
+        panel.exposure_ev = 1.5;
+        panel.integrator = "vcm".into();
+        panel.spectral = true;
+        panel.lens.model = LensModel::Thin;
+        panel.lens.blades = 6;
+        apply_mask_color_spec(&mut panel.scene, "jlcpcb-purple").unwrap();
+        let mut values = ViewSettings::of(&panel).values();
+        values.insert("max_spp".into(), Value::Integer(1024));
+
+        let (pcb, other) = (Path::new("/x/a.kicad_pcb"), Path::new("/x/b.kicad_pcb"));
+        let mut t = Table::new();
+        remember_in(&mut t, pcb, "/hdr/one.exr", "");
+        remember_view_in(&mut t, pcb, &values, &config_then);
+        remember_in(&mut t, other, "/hdr/two.exr", "");
+        let mut t: Table = t.to_string().parse().unwrap();
+        assert_eq!(remembered_in(&t, pcb).unwrap().hdr, "/hdr/one.exr"); // 環境マップも残っている
+
+        // 設定ファイルが同じなら全部使う
+        let got = usable_view_values(&t, pcb, &config_then);
+        assert_eq!(got, values);
+        apply_view_values(&mut cfg, &got);
+        assert_eq!((cfg.exposure_ev, cfg.integrator.as_str(), cfg.spectral, cfg.lens.model, cfg.lens.blades), (1.5, "vcm", true, LensModel::Thin, 6));
+        assert_eq!(cfg.scene.mask_preset, "jlcpcb-purple");
+
+        // 設定ファイルの露出が書き換えられたら、露出だけ設定ファイルを使う（ほかの項目とビューアだけの項目は覚えたもの）
+        let mut edited = ProjectConfig::default();
+        edited.exposure_ev = -1.0;
+        let got = usable_view_values(&t, pcb, &ViewSettings::of(&edited).values());
+        assert!(!got.contains_key("exposure_ev"));
+        assert_eq!(got.get("integrator").and_then(|v| v.as_str()), Some("vcm"));
+        assert_eq!(got.get("max_spp").and_then(|v| v.as_integer()), Some(1024));
+
+        // 忘れる：環境マップも含めて、この基板の分だけ消える
+        forget_in(&mut t, pcb);
+        assert!(usable_view_values(&t, pcb, &config_then).is_empty());
+        assert_eq!(remembered_in(&t, pcb), None);
+        assert!(remembered_in(&t, other).is_some());
     }
 }

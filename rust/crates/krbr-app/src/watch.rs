@@ -72,7 +72,7 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
     let mut watcher = FileWatcher::with_defaults(&prep.board.file);
     // ノイズ除去は既定で有効（C++ 版と同じ。--no-denoise で無効）
     let denoise = common.denoise.unwrap_or(true);
-    let mut r = Renderer { ctx: &ctx, integrator: prep.cfg.integrator.clone(), width: w, height: h, spp, exposure: prep.cfg.exposure_ev, frame, denoise, denoise_strength: common.denoise_strength, denoiser: None };
+    let mut r = Renderer { ctx: &ctx, integrator: prep.cfg.integrator.clone(), width: w, height: h, spp, exposure: prep.cfg.exposure_ev, frame, denoise, denoise_strength: common.denoise_strength.unwrap_or(1.0), denoiser: None };
     let (render_ms, write_ms, _) = r.render_and_write(&gpu, &out)?;
     info!("watch: wrote {} ({}x{}, {} spp, render {:.0} ms, write {:.0} ms); watching {} for saves", out.display(), w, h, spp, render_ms, write_ms, prep.board.file.display());
     if !on_event(WatchEvent::Ready(&out)) {

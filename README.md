@@ -26,7 +26,7 @@ krbr render board.kicad_pcb --hdr studio.exr --spp 256 --width 1920 --height 108
 | 強さ・回転 | 環境マップの明るさと、縦軸まわりの回転 |
 | 露出 | EV のスライダー。「自動」は、いまの画像の対数平均輝度を中間の灰色（0.18）に合わせる |
 | 凹凸の強さ | 表面の微細な凹凸の倍率（`bump_intensity`） |
-| レジスト | レジストの色のプリセット（「設定どおり」か、KiCad の色名／JLCPCB の色）。色・粗さ・散乱をまとめて切り替え、累積をやり直す。基板を読み直しても選択は保たれる |
+| レジスト | レジストの色のプリセット（「設定どおり」か、KiCad の色名／JLCPCB の色）。色・粗さ・散乱をまとめて切り替え、累積をやり直す。基板ごとに覚え、次に開いたときにも使う（下記「前回の設定を覚える」） |
 | 表示 | 画像 / アルベド / 法線、最大 spp（2 の累乗） |
 | カメラ | 画角、視点を戻す、保存 |
 | 積分器・レンズ・色の計算 | PT / BDPT / VCM、ピンホール / 薄レンズ / 実レンズ、RGB / 分光 |
@@ -144,7 +144,7 @@ STEP 変換器 DLL と OIDN が無くても krbr.exe は動きます（STEP の�
 | `krbr geom <pcb>` / `krbr models <pcb>` | 開発用：基板の形状と凹凸タイル（GPU を使わない）／全 3D モデルの読み込みの統計 |
 | `krbr diff <a> <b>` | 開発用：2 枚の画像（PNG / EXR）の差の平均と最大 |
 
-`render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--integrator pt|bdpt|vcm`, `--seed`, `--spectral`（色の計算）, `--mask-color <プリセット名 または r,g,b>`（レジストの色。下記）, `--lens pinhole|thin|realistic`, `--f-number`, `--focal-length`, `--focus-distance`, `--blades`, `--denoise` / `--no-denoise` / `--denoise-strength`, `--init`, `--no-cache`, `--no-kicad-cli`, `--validate`, `--normal-priority`, `-v`。
+`render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--integrator pt|bdpt|vcm`, `--seed`, `--spectral` / `--rgb`（色の計算）, `--mask-color <プリセット名 または r,g,b>`（レジストの色。下記）, `--lens pinhole|thin|realistic`, `--f-number`, `--focal-length`, `--focus-distance`, `--blades`, `--denoise` / `--no-denoise` / `--denoise-strength`, `--init`, `--no-cache`, `--no-kicad-cli`, `--validate`, `--normal-priority`, `-v`。
 
 ## GPU の要件と、GTX 1060 での状況
 
@@ -211,7 +211,7 @@ STEP の読み込み・三角形分割だけが OpenCASCADE（C++ のライブ�
 
 ### レジストの色
 
-レジストの色は次の順で決まります：`--mask-color` ＞ `board.toml` の `mask_color` ＞ `.kicad_pcb` の stackup の色（KiCad の基板設定で選んだ色）＞ 緑。
+レジストの色は次の順で決まります：`--mask-color` ＞ ビューアで選んで覚えたもの ＞ `board.toml` の `mask_color` ＞ `.kicad_pcb` の stackup の色（KiCad の基板設定で選んだ色）＞ 緑。
 
 `mask_color` と `--mask-color` には、sRGB の値（`[r, g, b]` / `r,g,b`）のほかに**プリセット名**を書けます。プリセットは色だけでなく、コートの粗さ（光沢／つや消し）と顔料の散乱（透明さ）もまとめて設定します。一覧は `krbr mask list`。
 
@@ -265,6 +265,18 @@ bump_scale = 0.1
 
 ## そのほかの機能
 
+**前回の設定を覚える**：ビューアのパネルで変えた設定は、基板ごとに `%APPDATA%\krbr\state.toml` に覚え、次に開いたときにも使います（変えてから 1 秒後と終了時に書く）。プロジェクトのファイル（`environment.toml` / `board.toml`）は書き換えません。
+
+| 覚える項目 | render / watch にも使うか |
+|---|---|
+| 環境マップ（ファイル・強さ・回転）、露出、積分器、レンズ（種類・F 値・ピント・焦点距離・羽根・周辺減光・口径食・色収差）、色の計算（RGB / 分光）、凹凸の強さ、レジストの色、画角 | 使う |
+| ノイズ除去のオン・オフと強さ、最大 spp | ビューアだけ |
+
+- 使う順番は、コマンドライン → 覚えたもの → 設定ファイル → 既定値です（`--rgb` は覚えた分光モードを打ち消す）。
+- 項目ごとに覚えたときの設定ファイルの値も残し、後で設定ファイルのその項目を書き換えたときは、設定ファイルの方を使います。
+- 視点（回転・移動・拡大）、表示モード、一時停止は覚えません。
+- メニューの「表示」→「設定をすべて既定に戻す」で、パネルの設定を設定ファイルとコマンドラインの値に戻し、その基板について覚えたもの（環境マップも含む）を消します。
+
 **環境マップ**：`--hdr` は省略できます。次の順で決めます。
 
 1. `--hdr`（`render` / `view` とも）
@@ -272,7 +284,7 @@ bump_scale = 0.1
 3. `<名前>.krbr\environment.toml` の `[environment] hdr`
 4. 内蔵の **スタジオ**（`builtin:studio`）：灰色の撮影ブースに大きなソフトボックスを置いた環境を、その場で生成します（ファイル不要）。`--hdr builtin:studio` や `hdr = "builtin:studio"` でも指定できます
 
-最後に使ったものは `%APPDATA%\krbr\state.toml` に、基板ごとと最近使った一覧として覚えます。プロジェクトのファイルは書き換えません。覚えた後に environment.toml の `hdr` を書き換えたときは、そちらを使います。覚えたファイルが無くなっていたら 3・4 に戻ります。environment.toml で指定したファイルが読めないときは、内蔵のスタジオで代えて続けます（`--hdr` で指定したものが読めないときはエラー）。ビューアの「環境マップ」の一覧には、内蔵のスタジオ、最近使ったもの、今のものと同じフォルダの `.hdr` / `.exr` が出ます。「開く...」でファイルを選ぶか、`.hdr` / `.exr` をウィンドウへドラッグ＆ドロップしても切り替えられます。
+最後に使ったものは、基板ごとと最近使った一覧として `state.toml` に覚えます。覚えた後に environment.toml の `hdr` を書き換えたときは、そちらを使います。覚えたファイルが無くなっていたら 3・4 に戻ります。environment.toml で指定したファイルが読めないときは、内蔵のスタジオで代えて続けます（`--hdr` で指定したものが読めないときはエラー）。ビューアの「環境マップ」の一覧には、内蔵のスタジオ、最近使ったもの、今のものと同じフォルダの `.hdr` / `.exr` が出ます。「開く...」でファイルを選ぶか、`.hdr` / `.exr` をウィンドウへドラッグ＆ドロップしても切り替えられます。
 
 **線フォントの文字**：KiCad の線フォント（ストロークフォント）の文字は形の情報を持たないので、kicad-cli でシルクを SVG に書き出して取り込みます（`[kicad_cli] use_for_text` / `path`、`--no-kicad-cli`）。kicad-cli に渡すのは**シルク層に線フォントの文字（と文字の枠）だけを残した基板のコピー**です。TrueType の文字（`render_cache` を持つもの）はシルク層から部品図の層へ移し、線・図形・パッドなどは取り除きます。TrueType の文字・線・図形は krbr が自分で描くので、kicad-cli の形が重なって太ったり二重になったりしません（この基板で、kicad-cli の有無で変わるのは線フォントの文字の画素だけであることを確かめています）。書き出しは `%LOCALAPPDATA%\krbr\cache\silk\<キー>-stroke-F.svg` / `-B.svg` にキャッシュします（キーは渡す基板のコピーの内容から作るので、TrueType の文字を動かしただけでは書き出し直しません）。作業フォルダはプロセスごとに分け、kicad-cli は 120 秒で打ち切ります。保存で線フォントの文字が変わったときは、ビューアと `krbr watch` が裏で書き出し直し、終わったら凹凸タイルを全部作り直します（それまでは前の文字のまま。書き出し中にまた変わったら、終わった後にもう一度書き出します）。
 

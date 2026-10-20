@@ -54,6 +54,10 @@ pub struct ViewOptions {
     pub test_pick: Option<(f64, f64)>,
     /// 開発用：test_pick で選んだ部品の全部位に、この材質を割り当てる（この部品だけ）
     pub test_assign: String,
+    /// 開発用：テスト中に、パネルでこのレジストの色（プリセット）を選んだことにする
+    pub test_mask: String,
+    /// 開発用：テスト中に、メニューの「設定をすべて既定に戻す」を押したことにする
+    pub test_reset_settings: bool,
     /// レンダリングを一時停止した状態で開く（GPU の弱い PC 向け）
     pub paused: bool,
 }
@@ -98,6 +102,8 @@ struct ViewState {
     save_requested: bool,
     reset_requested: bool,
     auto_exposure_requested: bool,
+    /// メニュー：パネルの設定をすべて既定（設定ファイルとコマンドライン）に戻し、覚えたものを忘れる
+    reset_all_requested: bool,
     quit_requested: bool,
     /// レンダリングを一時停止する（サンプルを積み足さない。GPU の弱い PC で操作を軽くする）
     paused: bool,
@@ -308,6 +314,14 @@ struct App {
     last_change_at: Instant,
     last_frame_ms: f64,
     last_gpu_ms: f64,
+    /// パネルの設定：最後に見た値、最後に覚えた（state.toml に書いた）値、最後に変わった時刻。変わってから 1 秒たったら書く
+    view_seen: remember::ViewValues,
+    view_saved: remember::ViewValues,
+    view_changed_at: Instant,
+    /// 「すべて既定に戻す」の直後：戻した値が反映されたら、それを覚えずに基準にする（覚えていない状態のままにする）
+    view_rebase: bool,
+    /// 次に読み終えた環境マップを覚えない（「すべて既定に戻す」で設定ファイルのものに戻したとき）
+    env_no_remember: bool,
     out_dir: PathBuf,
     stem: String,
     rc: i32,
@@ -328,7 +342,94 @@ fn viewport_px(r: egui::Rect, ppp: f32, w: u32, h: u32) -> Viewport {
 
 const TARGET_FRAME_MS: f64 = 10.0; // 60fps（16.7 ms）に収まるよう、表示処理の分を残す
 
+/// 最大のサンプル数は 2 の累乗にそろえる（それ以上で最も近い 2 の累乗に切り上げる。16 .. 65536）
+fn pow2_spp(spp: u32) -> u32 {
+    let mut m = 16u32;
+    while m < spp && m < (1 << 16) {
+        m <<= 1;
+    }
+    m
+}
+
 impl App {
+    /// 今のパネルの設定の値（覚える値）
+    fn current_view(&self) -> remember::ViewValues {
+        let mut c = remember::ViewSettings::of(&self.prep.cfg);
+        let st = &self.st;
+        c.env_intensity = st.env_intensity;
+        c.env_rotation_deg = st.env_rotation_deg;
+        c.exposure_ev = st.exposure;
+        c.spectral = st.spectral;
+        c.bump_intensity = st.bump_intensity;
+        c.fov_deg = st.fov;
+        let mut v = c.values();
+        v.insert("denoise".into(), toml::Value::Boolean(st.denoise));
+        v.insert("denoise_strength".into(), toml::Value::Float(st.denoise_strength as f64));
+        v.insert("max_spp".into(), toml::Value::Integer(st.max_spp as i64));
+        v
+    }
+
+    /// パネルの設定が変わっていたら覚える（最後に変わってから 1 秒たったら。now なら待たずに）
+    fn save_view(&mut self, now: bool) {
+        let cur = self.current_view();
+        if self.view_rebase {
+            // レジストの色などは次のフレームで設定に反映されるので、ここで基準を取り直す
+            self.view_rebase = false;
+            self.view_seen = cur.clone();
+            self.view_saved = cur;
+            return;
+        }
+        if cur != self.view_seen {
+            self.view_seen = cur;
+            self.view_changed_at = Instant::now();
+        }
+        if self.view_seen != self.view_saved && (now || self.view_changed_at.elapsed() >= Duration::from_secs(1)) {
+            remember::remember_view(&self.prep.board.file, &self.view_seen, &self.prep.config_view);
+            self.view_saved = self.view_seen.clone();
+        }
+    }
+
+    /// パネルの設定をすべて既定（設定ファイルとコマンドライン）に戻し、この基板について覚えたものを忘れる
+    fn reset_all_settings(&mut self) {
+        remember::forget_board(&self.prep.board.file);
+        let c = self.prep.configured.clone();
+        let st = &mut self.st;
+        st.exposure = c.exposure_ev;
+        st.env_intensity = c.env_intensity;
+        st.env_rotation_deg = c.env_rotation_deg;
+        st.bump_intensity = c.scene.bump_intensity;
+        st.fov = c.fov_deg;
+        st.spectral = c.spectral;
+        st.max_spp = self.vo.common.spp.map(pow2_spp).unwrap_or(4096);
+        st.denoise = self.vo.common.denoise.unwrap_or(false);
+        st.denoise_strength = self.vo.common.denoise_strength.unwrap_or(1.0);
+        st.mask_choice = if c.scene.mask_preset.is_empty() { None } else { mask_presets().iter().position(|p| p.name == c.scene.mask_preset) };
+        st.mask_changed = true;
+        st.materials_dirty = true;
+        st.dirty = true;
+        if self.prep.cfg.integrator != c.integrator {
+            self.prep.cfg.integrator = c.integrator.clone();
+            st.integrator_changed = true;
+        }
+        self.prep.cfg.lens = c.lens.clone();
+        // 環境マップ：--hdr、environment.toml、内蔵のスタジオ（読み込みが終わると、それを覚え直す）
+        let hdr = if !self.vo.common.hdr.is_empty() {
+            remember::normalize_hdr(&self.vo.common.hdr)
+        } else if !self.prep.config_hdr.is_empty() {
+            remember::normalize_hdr(&self.prep.config_hdr)
+        } else {
+            STUDIO.to_string()
+        };
+        if self.env_job.is_none() && !same_env(&hdr, &self.env_path) {
+            self.env_no_remember = true;
+            self.start_env_load(hdr);
+        }
+        // 戻した値は覚えない（忘れた状態のままにする。次に変えたときから、また覚える）
+        self.view_rebase = true;
+        self.last_update = "設定をすべて既定に戻した".into();
+        info!("panel settings reset to the configuration files");
+    }
+
     fn reset_camera(&mut self, w: u32, h: u32) {
         let c = initial_camera(&self.prep, &self.vo.common, w, h);
         let cfg = &self.prep.cfg;
@@ -1085,6 +1186,11 @@ impl App {
                         st.auto_exposure_requested = true;
                         ui.close();
                     }
+                    ui.separator();
+                    if ui.button("設定をすべて既定に戻す").on_hover_text("パネルの設定（環境マップ・露出・積分器・レンズ・色の計算・表面など）を設定ファイルとコマンドラインの値に戻し、この基板について覚えたものを忘れる").clicked() {
+                        st.reset_all_requested = true;
+                        ui.close();
+                    }
                 });
                 ui.menu_button("ヘルプ", |ui| {
                     ui.label("左ドラッグ: 回転");
@@ -1155,6 +1261,19 @@ impl App {
         let primitives = egui_ctx.tessellate(full.shapes, full.pixels_per_point);
 
         // ---- 状態の反映（GPU は前のフレームの完了を待っているので、ここで資源を触ってよい）
+        if self.frames == 3 {
+            if let Some(i) = mask_presets().iter().position(|p| !self.vo.test_mask.is_empty() && p.name == self.vo.test_mask) {
+                self.st.mask_choice = Some(i);
+                self.st.mask_changed = true;
+            }
+            self.st.reset_all_requested |= self.vo.test_reset_settings;
+        }
+        // 覚えるのは前のフレームまでに反映した値（「すべて既定に戻す」で変えた値は、反映した次のフレームで基準にする）
+        self.save_view(false);
+        if self.st.reset_all_requested {
+            self.st.reset_all_requested = false;
+            self.reset_all_settings();
+        }
         self.apply_reload()?;
         self.poll_silk();
         self.start_reload_if_needed();
@@ -1174,13 +1293,16 @@ impl App {
             if let Ok(d) = rx.try_recv() {
                 let _ = path;
                 self.env_job = None;
+                let no_remember = std::mem::take(&mut self.env_no_remember);
                 if d.error.is_empty() {
                     let g = self.gpu.as_mut().unwrap();
                     g.ctx.wait_idle();
                     g.gpu.set_environment(&d.image, &d.dist);
                     g.prog.rebuild_integrator()?;
                     self.env_path = remember::normalize_hdr(&d.path);
-                    remember::remember_hdr(&self.prep.board.file, &self.env_path, &self.prep.config_hdr);
+                    if !no_remember {
+                        remember::remember_hdr(&self.prep.board.file, &self.env_path, &self.prep.config_hdr);
+                    }
                     self.env_list = list_environments(&self.env_path);
                     self.st.dirty = true;
                     info!("environment: {} ({}x{})", self.env_path, d.image.width, d.image.height);
@@ -1693,14 +1815,8 @@ impl ApplicationHandler for App {
 pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
     let Some(prep) = prepare_scene(&vo.common) else { anyhow::bail!("scene preparation failed") };
     let cfg = &prep.cfg;
-    // 最大のサンプル数は 2 の累乗にそろえる（--spp の値は、それ以上で最も近い 2 の累乗に切り上げる）
-    let mut max_spp = 4096u32;
-    if let Some(spp) = vo.common.spp {
-        max_spp = 16;
-        while max_spp < spp && max_spp < (1 << 16) {
-            max_spp <<= 1;
-        }
-    }
+    let rv = &prep.remembered_view;
+    let max_spp = vo.common.spp.map(pow2_spp).or_else(|| rv.get("max_spp").and_then(|v| v.as_integer()).map(|v| pow2_spp(v as u32))).unwrap_or(4096);
     let mask_choice = if cfg.scene.mask_preset.is_empty() { None } else { mask_presets().iter().position(|p| p.name == cfg.scene.mask_preset) };
     let st = ViewState {
         target: Vec3::ZERO,
@@ -1722,6 +1838,7 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         save_requested: false,
         reset_requested: false,
         auto_exposure_requested: false,
+        reset_all_requested: false,
         quit_requested: false,
         paused: vo.paused,
         spectral: cfg.spectral,
@@ -1732,8 +1849,8 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         press_at: None,
         press_moved: 0.0,
         part_pick: None,
-        denoise: vo.common.denoise.unwrap_or(false),
-        denoise_strength: vo.common.denoise_strength,
+        denoise: vo.common.denoise.or_else(|| rv.get("denoise").and_then(|v| v.as_bool())).unwrap_or(false),
+        denoise_strength: vo.common.denoise_strength.or_else(|| rv.get("denoise_strength").and_then(|v| v.as_float()).map(|v| v as f32)).unwrap_or(1.0),
         denoise_requested: false,
         last_cursor: (0.0, 0.0),
         ctrl: false,
@@ -1753,7 +1870,7 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
     let material_names = prep.source.as_ref().map(|s| s.materials.library.names()).unwrap_or_default();
     let mut app = App {
         base_title: format!("krbr - {}", prep.board.project_name),
-        scene_as_configured: cfg.scene.clone(),
+        scene_as_configured: prep.configured.scene.clone(),
         vo,
         prep,
         st,
@@ -1798,11 +1915,18 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         last_change_at: Instant::now(),
         last_frame_ms: 0.0,
         last_gpu_ms: 0.0,
+        view_seen: remember::ViewValues::new(),
+        view_saved: remember::ViewValues::new(),
+        view_changed_at: Instant::now(),
+        view_rebase: false,
+        env_no_remember: false,
         out_dir,
         stem,
         rc: 0,
         done: false,
     };
+    app.view_seen = app.current_view();
+    app.view_saved = app.view_seen.clone();
     let event_loop = EventLoop::new().map_err(|e| anyhow::anyhow!("event loop: {e}"))?;
     event_loop.run_app(&mut app).map_err(|e| anyhow::anyhow!("event loop: {e}"))?;
     // GPU の資源はコンテキストより先に捨てる
@@ -1825,5 +1949,6 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         unsafe { drop(Box::from_raw(ctx as *const Context as *mut Context)) };
     }
     let _ = app.last_change_at;
+    app.save_view(true);
     Ok(app.rc)
 }

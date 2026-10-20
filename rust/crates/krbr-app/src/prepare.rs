@@ -53,8 +53,8 @@ pub struct RenderOptions {
     pub init: bool,
     /// ノイズ除去（OIDN）。None ならコマンドの既定（render・view は無効、watch は有効）
     pub denoise: Option<bool>,
-    /// ノイズ除去した画像と元の画像を混ぜる強さ（0..1、1 で OIDN の結果そのまま）
-    pub denoise_strength: f32,
+    /// ノイズ除去した画像と元の画像を混ぜる強さ（0..1、1 で OIDN の結果そのまま）。None なら 1（ビューアは覚えた値）
+    pub denoise_strength: Option<f32>,
 }
 
 pub struct PreparedScene {
@@ -65,6 +65,12 @@ pub struct PreparedScene {
     pub dist: krbr_render::EnvDistribution,
     /// environment.toml の hdr（空なら指定なし）。選んだ環境マップを覚えるときに一緒に残す
     pub config_hdr: String,
+    /// 設定ファイルとコマンドラインだけの設定（覚えたパネルの設定を当てる前）。ビューアの「設定どおり」「すべて既定に戻す」で使う
+    pub configured: ProjectConfig,
+    /// 設定ファイルだけのパネルの設定の値。パネルの設定を覚えるときに一緒に残す
+    pub config_view: remember::ViewValues,
+    /// この基板で覚えていたパネルの設定（設定ファイルが変わった項目を除く。ビューアだけの項目も入っている）
+    pub remembered_view: remember::ViewValues,
     /// 線フォントの文字の書き出しに使う kicad-cli（無効・見つからなければ None）
     pub kicad_cli: Option<KicadCliSilk>,
     /// シーンを組み立て直すための状態。裏のスレッドで読み直している間は None（スレッドが持っている）
@@ -180,12 +186,8 @@ pub fn load_board_or_report(pcb: &Path) -> Option<Board> {
     }
 }
 
-pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
-    let board = load_board_or_report(&o.pcb)?;
-    if o.init {
-        write_default_configs(&board.file);
-    }
-    let mut cfg = load_project_config(&board.file);
+/// コマンドラインの指定を設定に重ねる（環境マップ（--hdr）は別に扱う）
+fn apply_command_line(cfg: &mut ProjectConfig, o: &RenderOptions) {
     if let Some(v) = o.spp {
         cfg.spp = v;
     }
@@ -249,6 +251,26 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
     if !o.integrator.is_empty() {
         cfg.integrator = o.integrator.clone();
     }
+}
+
+pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
+    let board = load_board_or_report(&o.pcb)?;
+    if o.init {
+        write_default_configs(&board.file);
+    }
+    // 設定ファイル → この基板で覚えたパネルの設定 → コマンドライン の順に重ねる
+    let files = load_project_config(&board.file);
+    let config_view = remember::ViewSettings::of(&files).values();
+    let remembered_view = remember::remembered_view(&board.file, &config_view);
+    let mut configured = files.clone();
+    apply_command_line(&mut configured, o);
+    let mut cfg = files;
+    if !remembered_view.is_empty() {
+        info!("panel settings: {} item(s) last used for this board", remembered_view.len());
+        remember::apply_view_values(&mut cfg, &remembered_view);
+    }
+    apply_command_line(&mut cfg, o);
+    debug!("solder mask: {}", { let m = remember::mask_spec(&cfg.scene); if m.is_empty() { "stackup / default".to_string() } else { m } });
     // 環境マップ：--hdr、この基板で最後に使ったもの、environment.toml、内蔵のスタジオ、の順
     let config_hdr = cfg.hdr.clone();
     let from_cli = !o.hdr.is_empty();
@@ -306,7 +328,7 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
         remember::remember_hdr(&board.file, &cfg.hdr, &config_hdr);
     }
     let dist = build_env_distribution(&env, 2048);
-    Some(PreparedScene { board, cfg, scene, env, dist, config_hdr, kicad_cli, source: Some(source) })
+    Some(PreparedScene { board, cfg, scene, env, dist, config_hdr, configured, config_view, remembered_view, kicad_cli, source: Some(source) })
 }
 
 pub fn camera_params(cfg: &ProjectConfig, width: u32, height: u32) -> CameraParams {
@@ -357,7 +379,7 @@ pub fn cmd_render(o: &RenderOptions) -> anyhow::Result<()> {
         let mut gpu = GpuScene::new(&ctx);
         gpu.build(&prep.scene, &prep.env, &prep.dist, cfg.scene.bump_intensity);
         prep.env.rgba = Vec::new();
-        let denoise = o.denoise.unwrap_or(false).then_some((DenoiseQuality::High, o.denoise_strength));
+        let denoise = o.denoise.unwrap_or(false).then_some((DenoiseQuality::High, o.denoise_strength.unwrap_or(1.0)));
         let rs = RenderSettings { width: cfg.width, height: cfg.height, spp: cfg.spp, integrator: cfg.integrator.clone(), frame: frame_params(cfg, cam, o.seed), denoise };
         render_offscreen(&ctx, &gpu, &rs).map_err(|e| anyhow::anyhow!("render failed: {e}"))?
     };

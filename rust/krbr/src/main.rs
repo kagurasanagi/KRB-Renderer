@@ -193,15 +193,18 @@ struct RenderArgs {
     /// do not denoise
     #[arg(long)]
     no_denoise: bool,
-    /// mix of the denoised and the noisy image (0..1; 1 = OIDN result as is)
-    #[arg(long, default_value_t = 1.0)]
-    denoise_strength: f32,
+    /// mix of the denoised and the noisy image (0..1; default 1 = OIDN result as is)
+    #[arg(long)]
+    denoise_strength: Option<f32>,
     /// enable the Vulkan validation layer
     #[arg(long)]
     validate: bool,
     /// spectral rendering (hero wavelengths)
     #[arg(long)]
     spectral: bool,
+    /// RGB rendering (overrides the spectral mode remembered for the board or set in environment.toml)
+    #[arg(long, conflicts_with = "spectral")]
+    rgb: bool,
     /// camera lens: pinhole (default), thin, realistic
     #[arg(long, default_value = "")]
     lens: String,
@@ -246,6 +249,12 @@ struct ViewArgs {
     /// development: assign this material to all parts of the part selected by --test-pick (this part only)
     #[arg(long, default_value = "")]
     test_assign: String,
+    /// development: choose this solder mask preset in the panel during the test
+    #[arg(long, default_value = "")]
+    test_mask: String,
+    /// development: press "reset all settings" in the menu during the test
+    #[arg(long)]
+    test_reset_settings: bool,
     /// open with rendering paused (P or the toolbar button resumes); for weak GPUs
     #[arg(long)]
     paused: bool,
@@ -286,9 +295,9 @@ impl RenderArgs {
             no_kicad_cli: self.no_kicad_cli,
             init: self.init,
             denoise: if self.no_denoise { Some(false) } else if self.denoise { Some(true) } else { None },
-            denoise_strength: self.denoise_strength.clamp(0.0, 1.0),
+            denoise_strength: self.denoise_strength.map(|v| v.clamp(0.0, 1.0)),
             validate: self.validate,
-            spectral: if self.spectral { Some(true) } else { None },
+            spectral: if self.spectral { Some(true) } else if self.rgb { Some(false) } else { None },
             lens: self.lens.clone(),
             f_number: self.f_number,
             focal_length: self.focal_length,
@@ -514,6 +523,8 @@ fn main() {
                 test_reload: args.test_reload,
                 test_pick: (args.test_pick.len() == 2).then(|| (args.test_pick[0], args.test_pick[1])),
                 test_assign: args.test_assign.clone(),
+                test_mask: args.test_mask.clone(),
+                test_reset_settings: args.test_reset_settings,
                 paused: args.paused,
             };
             krbr_app::run_viewer(vo).map(|rc| {
