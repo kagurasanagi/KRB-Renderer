@@ -144,10 +144,17 @@ STEP 変換器 DLL と OIDN が無くても krbr.exe は動きます（STEP の�
 | `krbr material set <pcb> --ref U3 [--part K] --material M` | 部品番号ごとの上書き（プロジェクトの overrides.toml） |
 | `krbr material set <pcb> --model <パス/ファイル名> [--part K] --material M [--global]` | 3D モデルごとの設定（プロジェクト、または `--global` で全体設定） |
 | `krbr kicad-plugin install` / `uninstall` | KiCad の PCB エディタに「KRB Render でプレビュー」のボタンを足す・消す（下記「KiCad のプラグイン」） |
+| `krbr bench <pcb> [--spp 64] [--width 1920 --height 1080]` | 同じ条件でレンダリングの速さを測る（GPU を替えたときの比較用。下記） |
 | `krbr geom <pcb>` / `krbr models <pcb>` | 開発用：基板の形状と凹凸タイル（GPU を使わない）／全 3D モデルの読み込みの統計 |
 | `krbr diff <a> <b>` | 開発用：2 枚の画像（PNG / EXR）の差の平均と最大 |
 
 `render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--integrator pt|bdpt|vcm`, `--seed`, `--spectral` / `--rgb`（色の計算）, `--mask-color <プリセット名 または r,g,b>`（レジストの色。下記）, `--lens pinhole|thin|realistic`, `--f-number`, `--focal-length`, `--focus-distance`, `--blades`, `--denoise` / `--no-denoise` / `--denoise-strength`, `--init`, `--no-cache`, `--no-kicad-cli`, `--validate`, `--normal-priority`, `-v`。
+
+### 速さの計測（`krbr bench`）
+
+GPU を替えたときなどに、同じ条件でレンダリングの速さを測ります。覚えた設定（パネルの設定・視点・環境マップ）は使わず、条件を固定します：1920x1080、内蔵のスタジオ、自動の構図（仰角 35°・方位 45°・画角 30°）、ピンホール、露出 0、乱数の種 0、ノイズ除去なし。PT（RGB）・PT（分光）・BDPT・VCM のそれぞれで、準備の 8 サンプル（測らない）の後、`--spp`（既定 64）サンプルの時間を測ります。基板の読み込みとシーンの準備の時間は含みません。CPU の優先度は下げません。
+
+結果は `%APPDATA%\krbr\bench.csv` に追記します（日時、GPU、ドライバ、方式、基板とその内容のハッシュ、条件、1 サンプルあたりの時間）。同じ基板（内容が同じもの）・同じ条件で別の GPU の記録があれば、最後のものと比べて何倍速いかを表示します。GPU を替える前に一度測っておけば、替えた後に同じコマンドで比べられます。最大の深さなど設定ファイルの項目は使うので、比べる間は設定ファイルを変えないでください。
 
 ## GPU の要件と、GTX 1060 での状況
 

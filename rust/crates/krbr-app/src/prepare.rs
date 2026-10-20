@@ -55,6 +55,8 @@ pub struct RenderOptions {
     pub denoise: Option<bool>,
     /// ノイズ除去した画像と元の画像を混ぜる強さ（0..1、1 で OIDN の結果そのまま）。None なら 1（ビューアは覚えた値）
     pub denoise_strength: Option<f32>,
+    /// この基板で覚えた設定（パネルの設定・視点・環境マップ）を使わない（krbr bench：同じ条件で測るため）
+    pub ignore_remembered: bool,
 }
 
 pub struct PreparedScene {
@@ -261,7 +263,7 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
     // 設定ファイル → この基板で覚えたパネルの設定 → コマンドライン の順に重ねる
     let files = load_project_config(&board.file);
     let config_view = remember::ViewSettings::of(&files).values();
-    let remembered_view = remember::remembered_view(&board.file, &config_view);
+    let remembered_view = if o.ignore_remembered { remember::ViewValues::new() } else { remember::remembered_view(&board.file, &config_view) };
     let mut configured = files.clone();
     apply_command_line(&mut configured, o);
     let mut cfg = files;
@@ -276,7 +278,7 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
     let from_cli = !o.hdr.is_empty();
     if from_cli {
         cfg.hdr = o.hdr.clone();
-    } else if let Some(r) = remember::remembered_hdr(&board.file) {
+    } else if let Some(r) = remember::remembered_hdr(&board.file).filter(|_| !o.ignore_remembered) {
         if r.config_hdr != config_hdr {
             info!("environment.toml changed since the last run; using its environment map");
         } else if is_builtin(&r.hdr) || Path::new(&r.hdr).is_file() {
@@ -323,7 +325,7 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
         }
     };
     info!("environment: {} ({}x{})", cfg.hdr, env.width, env.height);
-    if from_cli {
+    if from_cli && !o.ignore_remembered {
         cfg.hdr = remember::normalize_hdr(&cfg.hdr);
         remember::remember_hdr(&board.file, &cfg.hdr, &config_hdr);
     }

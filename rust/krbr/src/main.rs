@@ -54,6 +54,18 @@ enum Command {
         #[command(subcommand)]
         cmd: KicadPluginCmd,
     },
+    /// measure the rendering speed under fixed conditions (to compare GPUs); results are appended to bench.csv in the config folder
+    Bench {
+        /// .kicad_pcb file
+        pcb: PathBuf,
+        /// samples per case (after 8 warm-up samples)
+        #[arg(long, default_value_t = 64)]
+        spp: u32,
+        #[arg(long, default_value_t = 1920)]
+        width: u32,
+        #[arg(long, default_value_t = 1080)]
+        height: u32,
+    },
     /// build the board geometry and the relief tiles (no GPU) and print statistics
     Geom {
         /// .kicad_pcb file
@@ -296,6 +308,7 @@ impl RenderArgs {
             init: self.init,
             denoise: if self.no_denoise { Some(false) } else if self.denoise { Some(true) } else { None },
             denoise_strength: self.denoise_strength.map(|v| v.clamp(0.0, 1.0)),
+            ignore_remembered: false,
             validate: self.validate,
             spectral: if self.spectral { Some(true) } else if self.rgb { Some(false) } else { None },
             lens: self.lens.clone(),
@@ -550,6 +563,7 @@ fn main() {
         Command::Mask { cmd: MaskCmd::List } => krbr_app::material_cmd::cmd_mask_list(),
         Command::KicadPlugin { cmd: KicadPluginCmd::Install { dir } } => krbr_app::kicad_plugin::cmd_install(dir.as_deref()),
         Command::KicadPlugin { cmd: KicadPluginCmd::Uninstall { dir } } => krbr_app::kicad_plugin::cmd_uninstall(dir.as_deref()),
+        Command::Bench { pcb, spp, width, height } => krbr_app::bench::cmd_bench(&krbr_app::bench::BenchOptions { pcb: pcb.clone(), width: *width, height: *height, spp: *spp }),
         Command::Geom { pcb } => cmd_geom(pcb),
         Command::Diff { a, b } => cmd_diff(a, b),
         Command::Models { pcb, no_cache } => cmd_models(pcb, *no_cache),
