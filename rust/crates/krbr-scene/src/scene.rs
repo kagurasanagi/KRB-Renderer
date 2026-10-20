@@ -134,7 +134,7 @@ pub struct SceneOptions {
     pub silk_color: Vec3,
     pub silk_color_set: bool,
     pub fr4_color: Vec3,
-    /// mm
+    /// 代替の箱の高さ（mm）。0 なら面積から決める（placeholder_height_for）
     pub placeholder_height: f64,
     /// 代替の水晶の、中を 5 mm 進んだときの透過の色（sRGB）
     pub placeholder_color: Vec3,
@@ -160,7 +160,7 @@ impl Default for SceneOptions {
             silk_color: Vec3::new(0.93, 0.93, 0.90),
             silk_color_set: false,
             fr4_color: Vec3::new(0.62, 0.58, 0.42),
-            placeholder_height: 1.0,
+            placeholder_height: 0.0,
             placeholder_color: Vec3::new(0.92, 0.96, 1.0),
             include_dnp: true,
             layer_art: LayerArtOptions::default(),
@@ -491,6 +491,16 @@ fn footprint_local_box(board: &Board, fp_index: usize) -> Option<(Vec2, Vec2)> {
 }
 
 /// 代替の箱を置く行列：部品の向きに回し、基板の表（裏）の面の上（下）に置く
+/// 代替の箱の高さ（mm）：設定（> 0）があればそれ。無ければ面積が大きいほど高く（√面積 × 0.25、0.3〜5 mm）。
+/// 0603 の抵抗くらいで 0.3、5 x 4 mm の IC で約 1.1、10 x 10 mm で 2.5、20 x 20 mm 以上で 5
+pub fn placeholder_height_for(fixed: f64, lo: Vec2, hi: Vec2) -> f64 {
+    if fixed > 0.0 {
+        return fixed;
+    }
+    let area = ((hi.x - lo.x) * (hi.y - lo.y)).max(0.0);
+    (0.25 * area.sqrt()).clamp(0.3, 5.0)
+}
+
 fn placeholder_matrix(fp: &Footprint, lo: Vec2, hi: Vec2, height: f64, thickness: f64, center: Vec2) -> Mat4 {
     let ex = rotate_point(Vec2::X, fp.angle_deg);
     let ez = rotate_point(Vec2::Y, fp.angle_deg);
@@ -687,12 +697,14 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
         }
         if wanted > 0 && placed == 0 {
             let (lo, hi) = footprint_local_box(board, fi).unwrap_or((Vec2::splat(-0.5), Vec2::splat(0.5)));
-            let half = Vec3::new(((hi.x - lo.x) / 2.0) as f32, (opts.placeholder_height / 2.0) as f32, ((hi.y - lo.y) / 2.0) as f32);
-            // 面取りの幅：いちばん短い辺の 20%（最大 0.6 mm）
-            let bevel = (0.4 * half.x.min(half.y).min(half.z)).min(0.6);
+            let height = placeholder_height_for(opts.placeholder_height, lo, hi);
+            krbr_core::debug!("placeholder {}: {:.1} x {:.1} mm, height {:.2} mm", fp.reference, hi.x - lo.x, hi.y - lo.y, height);
+            let half = Vec3::new(((hi.x - lo.x) / 2.0) as f32, (height / 2.0) as f32, ((hi.y - lo.y) / 2.0) as f32);
+            // 面取りの幅：0.2 mm（縁が細く光って見える程度。小さい箱では beveled_box が辺の長さに合わせて縮める）
+            let bevel = 0.2;
             let box_mesh = s.meshes.len() as u32;
             s.meshes.push(SceneMesh { name: format!("placeholder_{}", fp.reference), mesh: beveled_box(half, bevel, ph_mat) });
-            let xf = placeholder_matrix(fp, lo, hi, opts.placeholder_height, s.board.thickness, s.board.center);
+            let xf = placeholder_matrix(fp, lo, hi, height, s.board.thickness, s.board.center);
             s.instances.push(Instance { mesh: box_mesh, xform: xf, material_base: 0 });
             add_instance_bounds(&mut s, box_mesh, &xf);
             s.placeholders += 1;
@@ -817,4 +829,21 @@ pub fn load_material_setup(pcb: &std::path::Path) -> MaterialSetup {
         Default::default()
     };
     MaterialSetup { library, global, project, global_file, project_file }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placeholder_height_grows_with_area_up_to_5mm() {
+        let h = |w: f64, d: f64| placeholder_height_for(0.0, Vec2::new(-w / 2.0, -d / 2.0), Vec2::new(w / 2.0, d / 2.0));
+        assert_eq!(h(1.6, 0.8), 0.3); // 小さい部品は下限
+        assert!((h(10.0, 10.0) - 2.5).abs() < 1e-9);
+        assert!(h(5.0, 4.0) < h(10.0, 10.0));
+        assert_eq!(h(20.0, 20.0), 5.0);
+        assert_eq!(h(60.0, 40.0), 5.0); // 上限
+        // 設定で固定した高さはそのまま
+        assert_eq!(placeholder_height_for(1.0, Vec2::ZERO, Vec2::new(30.0, 30.0)), 1.0);
+    }
 }

@@ -299,6 +299,14 @@ bool footprintLocalBox(const kicad::Board& board, int fpIndex, Vec2& lo, Vec2& h
     return false;
 }
 
+// 代替の箱の高さ（mm）：設定（> 0）があればそれ。無ければ面積が大きいほど高く（√面積 × 0.25、0.3〜5 mm）。
+// 0603 の抵抗くらいで 0.3、5 x 4 mm の IC で約 1.1、10 x 10 mm で 2.5、20 x 20 mm 以上で 5
+double placeholderHeightFor(double fixed, Vec2 lo, Vec2 hi) {
+    if (fixed > 0.0) return fixed;
+    const double area = std::max((hi.x - lo.x) * (hi.y - lo.y), 0.0);
+    return std::clamp(0.25 * std::sqrt(area), 0.3, 5.0);
+}
+
 // 代替の箱（中心が原点の実寸のメッシュ）を置く行列：部品の向きに回し、基板の表（裏）の面の上（下）に置く。
 // 伸縮や反転を含めない（透明な材質の内外の判定と、面取りの幅を保つため）
 glm::mat4 placeholderMatrix(const Footprint& fp, Vec2 lo, Vec2 hi, double height, double thickness, Vec2 center) {
@@ -665,14 +673,16 @@ Scene buildScene(const SceneContext& ctx) {
                 lo = {-0.5, -0.5};
                 hi = {0.5, 0.5};
             }
-            const glm::vec3 half(static_cast<float>(hi.x - lo.x) / 2, static_cast<float>(opts.placeholderHeight) / 2,
+            const double height = placeholderHeightFor(opts.placeholderHeight, lo, hi);
+            log::debug("placeholder {}: {:.1f} x {:.1f} mm, height {:.2f} mm", fp.reference, hi.x - lo.x, hi.y - lo.y, height);
+            const glm::vec3 half(static_cast<float>(hi.x - lo.x) / 2, static_cast<float>(height) / 2,
                                  static_cast<float>(hi.y - lo.y) / 2);
-            // 面取りの幅：いちばん短い辺の 20%（最大 0.6 mm）
-            const float bevel = std::min(0.4f * std::min({half.x, half.y, half.z}), 0.6f);
+            // 面取りの幅：0.2 mm（縁が細く光って見える程度。小さい箱では beveledBox が辺の長さに合わせて縮める）
+            const float bevel = 0.2f;
             const uint32_t boxMesh = static_cast<uint32_t>(s.meshes.size());
             s.meshes.push_back({"placeholder_" + fp.reference, beveledBox(half, bevel, phMat)});
             const glm::mat4 xf =
-                placeholderMatrix(fp, lo, hi, opts.placeholderHeight, s.board.thickness, s.board.center);
+                placeholderMatrix(fp, lo, hi, height, s.board.thickness, s.board.center);
             s.instances.push_back({boxMesh, xf});
             addInstanceBounds(s, boxMesh, xf);
             ++s.placeholders;

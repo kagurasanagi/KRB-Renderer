@@ -116,7 +116,7 @@ struct SceneOptions {
     glm::vec3 silkColor{0.93f, 0.93f, 0.90f};   // sRGB
     bool silkColorSet = false;                  // false ならレジストのプリセットに合わせる（黄・白なら黒）
     glm::vec3 fr4Color{0.62f, 0.58f, 0.42f};    // sRGB
-    double placeholderHeight = 1.0;             // mm
+    double placeholderHeight = 0.0;             // mm。0 なら面積から決める（placeholderHeightFor）
     glm::vec3 placeholderColor{0.92f, 0.96f, 1.0f};  // sRGB：代替の水晶の、中を 5 mm 進んだときの透過の色
     bool includeDnp = true;
     raster::LayerArtOptions layerArt;
