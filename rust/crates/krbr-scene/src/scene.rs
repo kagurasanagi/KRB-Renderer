@@ -103,8 +103,8 @@ pub struct Scene {
     pub sdf_grid: krbr_geom::Grid,
     /// 基板全体の距離場（RG8：R = 銅, G = レジスト開口）。表・裏
     pub sdf_image: [Vec<u8>; 2],
-    /// 作り直した（面, タイル）。GPU にはこの範囲だけ送る
-    pub sdf_dirty: Vec<(usize, usize)>,
+    /// 作り直したタイルの（面, 距離場の画素の矩形 [x0, y0, x1, y1]）。GPU にはこの範囲だけ送る
+    pub sdf_dirty: Vec<(usize, [usize; 4])>,
     pub mask: MaskModel,
     pub board_mats: BoardMaterialIds,
     pub missing: Vec<MissingModel>,
@@ -584,7 +584,14 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
         }
         s.sdf_grid = cache.sdf_grid;
         s.sdf_image = [cache.sdf_image[0].clone(), cache.sdf_image[1].clone()];
-        s.sdf_dirty = cache.last_rebuilt.clone();
+        s.sdf_dirty = cache
+            .last_rebuilt
+            .iter()
+            .map(|&(side, t)| {
+                let (x0, y0, x1, y1) = cache.tile_pixels(t);
+                (side, [x0, y0, x1, y1])
+            })
+            .collect();
         let _ = ReliefMat::Fr4; // 材質の番号は rmap で写した
         let _ = BoardMat::Top;
     } else {

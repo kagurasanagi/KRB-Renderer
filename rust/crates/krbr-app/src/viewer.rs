@@ -3,13 +3,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use ash::vk;
 use egui_ash_renderer::{DynamicRendering, Options as EguiOptions, RenderMode, Renderer as EguiRenderer};
 use egui_winit::State as EguiState;
 use glam::Vec3;
-use krbr_core::{error, info, warn};
+use krbr_core::{error, info, warn, FileWatcher};
+use krbr_kicad::Board;
 use krbr_render::image_io::{self, ImageF};
 use krbr_render::tonemapper::{DisplayMode, Tonemapper};
 use krbr_render::vk::{image_barrier, Buffer};
@@ -17,7 +18,7 @@ use krbr_render::studio_env::STUDIO;
 use krbr_render::{build_env_distribution, environment_label, is_builtin, load_environment_map, Context, ContextOptions, EnvDistribution, GpuScene, Progressive};
 use krbr_scene::config::apply_mask_color_spec;
 use krbr_scene::scene::{raycast, update_mask_material};
-use krbr_scene::{mask_presets, orbit_camera, LensModel, SceneOptions};
+use krbr_scene::{mask_presets, orbit_camera, LensModel, Scene, SceneOptions};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -25,6 +26,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use crate::prepare::{ReloadStats, SceneSource};
 use crate::remember;
 use crate::prepare::{frame_params, initial_camera, prepare_scene, PreparedScene, RenderOptions};
 use crate::swapchain::Swapchain;
@@ -40,6 +42,21 @@ pub struct ViewOptions {
     pub hidden: bool,
     /// 開発用：毎フレームこの角度だけカメラを回す
     pub test_orbit_deg: f64,
+    /// .kicad_pcb の保存を監視して描き直す（--no-watch で無効）
+    pub watch: bool,
+    /// 開発用：テスト中に一度だけ基板を読み直す（保存の代わり）
+    pub test_reload: bool,
+}
+
+/// 基板の読み直し（裏のスレッド）の結果
+struct ReloadDone {
+    source: SceneSource,
+    /// 保存による読み直しか（false：裏で分割していた 3D モデルが揃ったので組み直しただけ）
+    saved: bool,
+    /// 新しい基板（保存のとき）、シーン、統計
+    result: Result<(Option<Board>, Scene, ReloadStats), String>,
+    /// 保存したファイルの更新時刻（保存から画面の更新までの時間を測る）
+    saved_at: Option<SystemTime>,
 }
 
 /// 入力・操作パネルで変わる表示の状態
@@ -221,6 +238,13 @@ struct App {
     open_dialog: Option<mpsc::Receiver<Option<PathBuf>>>,
     env_job: Option<(String, mpsc::Receiver<EnvData>)>,
     env_error: String,
+    /// 保存の監視（--no-watch なら None）
+    watcher: Option<FileWatcher>,
+    reload_job: Option<mpsc::Receiver<ReloadDone>>,
+    /// 前回シーンを組み立てたときの、裏で分割し終えた 3D モデルの数（増えたら組み直す）
+    models_seen: usize,
+    test_reload_started: bool,
+    test_reload_applied: bool,
     last_update: String,
     samples_per_frame: u32,
     need_recreate: bool,
@@ -342,6 +366,12 @@ impl App {
         let st = &mut self.st;
         ui.label(format!("{} / {} spp   {:.1} ms/frame (GPU {:.1} ms)", g.prog.samples(), st.max_spp, self.last_frame_ms, self.last_gpu_ms));
         ui.add(egui::ProgressBar::new((g.prog.samples() as f32 / st.max_spp.max(1) as f32).min(1.0)));
+        if self.reload_job.is_some() {
+            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), "基板を読み直し中...");
+        }
+        if self.prep.scene.pending_models > 0 {
+            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), format!("3D モデルを分割中: {}（それまでは箱で表示）", self.prep.scene.pending_models));
+        }
         if !self.last_update.is_empty() {
             ui.weak(&self.last_update);
         }
@@ -534,6 +564,89 @@ impl App {
         }
     }
 
+    /// 保存（または裏での 3D モデルの分割の完了）を見つけたら、裏のスレッドで基板を読み直す（C++ 版 viewer の reloadJob）
+    fn start_reload_if_needed(&mut self) {
+        if self.reload_job.is_some() {
+            return;
+        }
+        let Some(src) = &self.prep.source else { return };
+        let mut saved = self.watcher.as_mut().is_some_and(|w| w.poll());
+        if self.vo.test_reload && !self.test_reload_started && self.frames >= 5 {
+            saved = true;
+            self.test_reload_started = true;
+        }
+        let models_done = src.library.completed();
+        if !saved && models_done == self.models_seen {
+            return;
+        }
+        self.models_seen = models_done;
+        let mut source = self.prep.source.take().unwrap();
+        let old = self.prep.board.clone();
+        let options = self.prep.cfg.scene.clone();
+        let saved_at = if saved { self.watcher.as_ref().and_then(|w| w.saved_at()) } else { None };
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = if saved { source.reload(&old, &options).map(|(b, s, st)| (Some(b), s, st)) } else { Ok((None, source.build(&old, &options, true), ReloadStats::default())) };
+            let _ = tx.send(ReloadDone { source, saved, result, saved_at });
+        });
+        self.reload_job = Some(rx);
+    }
+
+    /// 読み直しが終わっていれば、新しいシーンに差し替える（GPU の形状と積分器を作り直す）
+    fn apply_reload(&mut self) -> Result<(), String> {
+        let Some(rx) = &self.reload_job else { return Ok(()) };
+        let d = match rx.try_recv() {
+            Ok(d) => d,
+            Err(mpsc::TryRecvError::Empty) => return Ok(()),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                // スレッドが異常終了した（組み立ての状態も失ったので、これ以降は読み直さない）
+                self.reload_job = None;
+                self.watcher = None;
+                error!("board reload thread failed; watching stopped");
+                self.last_update = "読み直しに失敗したので、保存の監視を止めた".into();
+                return Ok(());
+            }
+        };
+        self.reload_job = None;
+        self.prep.source = Some(d.source);
+        if d.saved {
+            self.test_reload_applied = true;
+        }
+        match d.result {
+            Err(e) => {
+                warn!("reload {}: {} (keeping the previous board; waiting for the next save)", self.prep.board.file.display(), e);
+                self.last_update = format!("読み直せなかった（次の保存を待つ）: {e}");
+            }
+            Ok((board, mut scene, stats)) => {
+                if let Some(b) = board {
+                    self.prep.board = b;
+                }
+                // 読み直しの間に変えたレジストの色も反映する
+                update_mask_material(&mut scene, &self.prep.board, &self.prep.cfg.scene);
+                self.prep.scene = scene;
+                let t0 = Instant::now();
+                let g = self.gpu.as_mut().unwrap();
+                g.gpu.rebuild_geometry(&self.prep.scene, self.st.bump_intensity);
+                g.prog.rebuild_integrator()?;
+                let gpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                self.st.dirty = true;
+                let pending = self.prep.scene.pending_models;
+                if d.saved {
+                    let since = d.saved_at.and_then(|t| t.elapsed().ok()).map(|e| format!("、保存から {:.2} 秒", e.as_secs_f64())).unwrap_or_default();
+                    let df = &stats.diff;
+                    let full = if df.full { "（全体）" } else { "" };
+                    self.last_update = format!("読み直し：変更 {}・追加 {}・削除 {}{}、タイル {} 枚（解析 {:.0} ms、組み立て {:.0} ms、GPU {:.0} ms{}）", df.changed, df.added, df.removed, full, stats.tiles_rebuilt, stats.parse_ms, stats.build_ms, gpu_ms, since);
+                    let meshing = if pending > 0 { format!(", {pending} model(s) still meshing") } else { String::new() };
+                    info!("reload: {} changed, {} added, {} removed{}, {} tile(s) rebuilt; parse {:.0} ms, build {:.0} ms, GPU {:.0} ms{}", df.changed, df.added, df.removed, if df.full { " (full)" } else { "" }, stats.tiles_rebuilt, stats.parse_ms, stats.build_ms, gpu_ms, meshing);
+                } else {
+                    self.last_update = if pending > 0 { format!("3D モデルを反映した（残り {pending}）") } else { "3D モデルをすべて反映した".into() };
+                    info!("models finished meshing; scene rebuilt ({} pending)", pending);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// ファイルを選ぶダイアログを別スレッドで開く（その間も描画を続ける）
     fn start_open_dialog(&mut self) {
         if self.open_dialog.is_some() {
@@ -654,6 +767,8 @@ impl App {
         let primitives = egui_ctx.tessellate(full.shapes, full.pixels_per_point);
 
         // ---- 状態の反映（GPU は前のフレームの完了を待っているので、ここで資源を触ってよい）
+        self.apply_reload()?;
+        self.start_reload_if_needed();
         if let Some(rx) = &self.open_dialog {
             match rx.try_recv() {
                 Ok(picked) => {
@@ -796,7 +911,7 @@ impl App {
         };
         let max_spp = self.st.max_spp;
         let add = if g.prog.samples() >= max_spp { 0 } else { self.samples_per_frame.min(max_spp - g.prog.samples()) };
-        let last_test_frame = self.vo.test_frames > 0 && self.frames + 1 >= self.vo.test_frames && self.env_job.is_none();
+        let last_test_frame = self.vo.test_frames > 0 && self.frames + 1 >= self.vo.test_frames && self.env_job.is_none() && self.reload_job.is_none() && (!self.vo.test_reload || self.test_reload_applied);
 
         // egui のテクスチャ
         for (id, deltas) in &full.textures_delta.set {
@@ -1065,10 +1180,11 @@ impl ApplicationHandler for App {
             el.exit();
             return;
         }
-        let idle = self.gpu.as_ref().map(|g| g.prog.samples() >= self.st.max_spp).unwrap_or(false) && !self.st.dirty && self.env_job.is_none() && self.vo.test_frames == 0;
+        let idle = self.gpu.as_ref().map(|g| g.prog.samples() >= self.st.max_spp).unwrap_or(false) && !self.st.dirty && self.env_job.is_none() && self.reload_job.is_none() && self.vo.test_frames == 0;
         if idle {
-            // 収束したら GPU を休ませ、入力を待つ
-            el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250)));
+            // 収束したら GPU を休ませ、入力と保存を待つ
+            let wait = if self.watcher.is_some() || self.prep.scene.pending_models > 0 { 100 } else { 250 };
+            el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(wait)));
         } else {
             el.set_control_flow(ControlFlow::Poll);
         }
@@ -1123,6 +1239,11 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
     let stem = out_png.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "view".into());
     let env_path = cfg.hdr.clone();
     let env_list = list_environments(&env_path);
+    let watcher = vo.watch.then(|| FileWatcher::with_defaults(&prep.board.file));
+    if watcher.is_some() {
+        info!("watching {} for saves", prep.board.file.display());
+    }
+    let models_seen = prep.source.as_ref().map(|s| s.library.completed()).unwrap_or(0);
     let mut app = App {
         base_title: format!("krbr - {}", prep.board.project_name),
         scene_as_configured: cfg.scene.clone(),
@@ -1138,6 +1259,11 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         open_dialog: None,
         env_job: None,
         env_error: String::new(),
+        watcher,
+        reload_job: None,
+        models_seen,
+        test_reload_started: false,
+        test_reload_applied: false,
         last_update: String::new(),
         samples_per_frame: 1,
         need_recreate: false,

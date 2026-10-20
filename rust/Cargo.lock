@@ -1453,6 +1453,7 @@ dependencies = [
  "egui-winit",
  "glam",
  "gpu-allocator",
+ "image",
  "krbr-core",
  "krbr-geom",
  "krbr-kicad",

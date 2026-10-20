@@ -33,14 +33,5 @@ pub fn shader_dir() -> PathBuf {
     if local.join("pathtrace.comp.spv").exists() {
         return local;
     }
-    // rust/target/<profile>/krbr.exe → <repo>/build/release/shaders
-    let mut p = exe.clone();
-    for _ in 0..3 {
-        p = p.parent().map(|d| d.to_path_buf()).unwrap_or(p);
-    }
-    let dev = p.join("build").join("release").join("shaders");
-    if dev.join("pathtrace.comp.spv").exists() {
-        return dev;
-    }
-    local
+    krbr_core::platform::dev_build_dir("shaders", "pathtrace.comp.spv").unwrap_or(local)
 }

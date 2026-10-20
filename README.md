@@ -263,10 +263,12 @@ cargo build --release
 target\release\krbr.exe info E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --models
 target\release\krbr.exe E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb   # ビューア（--hdr は省略可）
 target\release\krbr.exe render E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --hdr E:\desktop\hdr\brown_photostudio_02_4k.exr --out out\rs.png
+target\release\krbr.exe watch E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --out out\watch.png   # 保存のたびに PNG を書き直す
 cargo test
+cargo test --release -p krbr-app --test watch -- --ignored --nocapture   # 保存の監視（GPU と KiCad の 3D モデルが要る）
 ```
 
-Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフォルダの `shaders\`、環境変数 `KRBR_SHADER_DIR`、開発中は `<リポジトリ>\build\release\shaders` の順で探します。STEP 変換器 DLL は exe と同じフォルダの `step\krbr_step.dll` です（`build\release\step\` をコピーしておく）。ビューアの操作パネルは egui なので見た目は C++ 版（Dear ImGui）と違いますが、項目・操作・キーは同じです。Rust 版ではパネルをウィンドウの右端に上下いっぱいで固定し（幅は境目のドラッグで変更、× で閉じる）、3D 表示はその残りの領域に描きます。上端のメニュー（ファイル／表示／ヘルプ）の「表示」→「設定パネル」か `F1` / `Tab` で再表示できます。
+Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフォルダの `shaders\`、環境変数 `KRBR_SHADER_DIR`、開発中は `<リポジトリ>\build\release\shaders` の順で探します。STEP 変換器 DLL は exe と同じフォルダの `step\krbr_step.dll`、無ければ開発中は `<リポジトリ>\build\release\step\krbr_step.dll` です（どちらも exe のフォルダから上へたどって探すので、`deps\` に置かれるテストの実行ファイルからも見つかります）。ビューアの操作パネルは egui なので見た目は C++ 版（Dear ImGui）と違いますが、項目・操作・キーは同じです。Rust 版ではパネルをウィンドウの右端に上下いっぱいで固定し（幅は境目のドラッグで変更、× で閉じる）、3D 表示はその残りの領域に描きます。上端のメニュー（ファイル／表示／ヘルプ）の「表示」→「設定パネル」か `F1` / `Tab` で再表示できます。
 
 **環境マップ（Rust 版）**：`--hdr` は省略できます。次の順で決めます。
 
@@ -277,6 +279,8 @@ Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフ�
 
 最後に使ったものは `%APPDATA%\krbr\state.toml` に、基板ごとと最近使った一覧として覚えます。プロジェクトのファイルは書き換えません。覚えた後に environment.toml の `hdr` を書き換えたときは、そちらを使います。覚えたファイルが無くなっていたら 3・4 に戻ります。environment.toml で指定したファイルが読めないときは、内蔵のスタジオで代えて続けます（`--hdr` で指定したものが読めないときはエラー）。ビューアの「環境マップ」の一覧には、内蔵のスタジオ、最近使ったもの、今のものと同じフォルダの `.hdr` / `.exr` が出ます。「開く...」でファイルを選ぶか、`.hdr` / `.exr` をウィンドウへドラッグ＆ドロップしても切り替えられます。
 
+**保存の監視と差分更新（Rust 版）**：C++ 版（上の「保存の監視と差分更新」）と同じ仕組みです。ビューアは既定で `.kicad_pcb` の保存を監視し（`--no-watch` で無効）、裏のスレッドで読み直して、変わった範囲の凹凸タイルだけを作り直します。読み直し中と、変更の件数・作り直したタイルの数・かかった時間は、設定パネルの上に出ます。読み直しの間に変えたレジストの色は、差し替えのときに反映します。`krbr watch` はウィンドウを開かずに、保存のたびに `--out`（既定 `out\watch.png`）を書き直します（1 回の更新で積むのは `--spp`、既定 32。`--max-updates` 回で終わる。ノイズ除去は Rust 版では未対応）。この PC（1920x1080、32 spp）では、0603 のコンデンサを 1.5 mm 動かす保存から画像の更新まで約 0.5 秒です（監視の待ち 0.2〜0.3、読み直し 0.15（解析 0.05、タイル 4 枚）、GPU 0.04、描画 0.12、書き出し 0.02）。
+
 **exe のアイコンへのドラッグ＆ドロップ**：`krbr.exe`（またはそのショートカット）に `.kicad_pcb` をドロップすると、ビューアで開きます。このとき（エクスプローラーからの起動）は作業フォルダを基板のフォルダにするので、`S` で保存した画像は `<基板のフォルダ>\out\` に入ります。エラーで終わるときは、コンソールが閉じる前に Enter を待ちます。
 
 | 段階 | 内容 | 状況 |
@@ -285,7 +289,7 @@ Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフ�
 | 2 | STEP → メッシュの変換器を C++ の薄い DLL（`stepkrbr_step.dll`）に切り出し、Rust はキャッシュと DLL だけを読む（`krbr-model`、`krbr models`） | 済（C++ 版と同じキャッシュを共有：38 モデル・21 万三角形） |
 | 3 | 基板メッシュ、凹凸タイル、層の多角形、距離場（`krbr-geom`：Clipper2・earcut の crate、`krbr geom`） | 済（外形・穴の数は C++ 版と一致。凹凸は 168 万三角形、C++ 版 150 万：Clipper2 の丸め継ぎ目の分割数の違い） |
 | 4 | 描画（`krbr-scene`：材質・割り当て・分光・設定、`krbr-render`：ash でデバイス・BLAS/TLAS・カーネル（ray query / RT パイプライン）・累積・読み戻し・PNG/EXR）。`krbr render` | 済（同じシェーダ・同じカメラで C++ 版と同じ画像。未移植：kicad-cli の線フォントのシルク、ノイズ除去、層テクスチャ方式、`--init`） |
-| 5 | ビューア（winit + egui、`krbr-app`）、監視、ノイズ除去（OIDN）、材質 CLI | ビューアは済（`krbr <pcb> --hdr ...` でウィンドウ。パネル・マウス操作・キー・保存・テストモードは C++ 版と同じ。未：保存の監視と差分更新、ノイズ除去、`material` / `mask list` / `--init`、kicad-cli のシルク） |
+| 5 | ビューア（winit + egui、`krbr-app`）、監視、ノイズ除去（OIDN）、材質 CLI | ビューアは済（`krbr <pcb> --hdr ...` でウィンドウ。パネル・マウス操作・キー・保存・テストモードは C++ 版と同じ。保存の監視と差分更新・`krbr watch` も済。未：ノイズ除去、`material` / `mask list` / `--init`、kicad-cli のシルク） |
 
 ## テスト
 

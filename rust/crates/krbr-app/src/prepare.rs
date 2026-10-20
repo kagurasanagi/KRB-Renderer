@@ -1,16 +1,20 @@
 //! render：基板の読み込み、設定、シーン構築、環境マップ、オフスクリーン描画、ファイル出力（C++ 版 prepare.cpp + cmdRender）
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 
 use krbr_core::{debug, info, warn};
-use krbr_kicad::{load_board, Board, ModelResolver};
+use krbr_geom::tiles::ReliefTileCache;
+use krbr_kicad::{diff_boards, load_board, Board, BoardDiff, ModelResolver};
 use krbr_model::{MeshParams, ModelLibrary};
 use krbr_render::studio_env::STUDIO;
 use krbr_render::{build_env_distribution, image_io, is_builtin, load_environment_map, render_offscreen, Context, ContextOptions, FrameParams, GpuScene, RenderSettings};
 use krbr_scene::config::{apply_mask_color_spec, load_project_config, ProjectConfig};
-use krbr_scene::scene::{build_scene, load_material_setup, SceneContext};
+use krbr_scene::scene::{build_scene, load_material_setup, MaterialSetup, SceneContext};
+use krbr_scene::{frame_camera, orbit_camera, Camera, CameraParams, LensModel, MaterialResolver, Scene, SceneOptions};
+
 use crate::remember;
-use krbr_scene::{frame_camera, orbit_camera, Camera, CameraParams, LensModel, MaterialResolver, Scene};
 
 #[derive(Debug, Clone, Default)]
 pub struct RenderOptions {
@@ -52,6 +56,56 @@ pub struct PreparedScene {
     pub dist: krbr_render::EnvDistribution,
     /// environment.toml の hdr（空なら指定なし）。選んだ環境マップを覚えるときに一緒に残す
     pub config_hdr: String,
+    /// シーンを組み立て直すための状態。裏のスレッドで読み直している間は None（スレッドが持っている）
+    pub source: Option<SceneSource>,
+}
+
+/// シーンを組み立てるのに使う状態（C++ 版 PreparedScene の resolver / library / materials / tiles）。
+/// 保存の監視中は、読み直しのたびに裏のスレッドへ渡し、新しいシーンと一緒に返してもらう
+pub struct SceneSource {
+    pub resolver: ModelResolver,
+    pub library: Arc<ModelLibrary>,
+    pub materials: MaterialSetup,
+    /// 凹凸タイルのキャッシュ。変わった範囲のタイルだけを作り直す
+    pub tiles: ReliefTileCache,
+}
+
+/// 読み直しの統計
+#[derive(Debug, Clone, Default)]
+pub struct ReloadStats {
+    pub diff: BoardDiff,
+    pub parse_ms: f64,
+    pub build_ms: f64,
+    /// 作り直した凹凸タイルの数（面ごとに数える）
+    pub tiles_rebuilt: usize,
+}
+
+impl SceneSource {
+    /// シーンを組み立てる。async_models なら、まだ分割していない STEP は裏で分割し、それまでは箱で仮表示する
+    pub fn build(&mut self, board: &Board, options: &SceneOptions, async_models: bool) -> Scene {
+        let material_resolver = MaterialResolver::new(&self.materials.library, &self.materials.project, &self.materials.global);
+        build_scene(SceneContext { board, resolver: &self.resolver, library: &self.library, materials: &material_resolver, options, relief_cache: Some(&mut self.tiles), async_models })
+    }
+
+    /// 基板を読み直し、前の基板との差分で変わった範囲のタイルを無効にしてから組み立てる（C++ 版 PreparedScene::reload）。
+    /// 読めなければ Err（タイルのキャッシュは前のまま。次の保存を待つ）
+    pub fn reload(&mut self, old: &Board, options: &SceneOptions) -> Result<(Board, Scene, ReloadStats), String> {
+        let mut st = ReloadStats::default();
+        let t0 = Instant::now();
+        let board = load_board(&old.file).map_err(|e| format!("{e}"))?;
+        st.parse_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        st.diff = diff_boards(old, &board);
+        if st.diff.full {
+            self.tiles.invalidate_all();
+        } else {
+            self.tiles.invalidate(&st.diff.dirty);
+        }
+        let t1 = Instant::now();
+        let scene = self.build(&board, options, true);
+        st.build_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        st.tiles_rebuilt = self.tiles.last_rebuilt.len();
+        Ok((board, scene, st))
+    }
 }
 
 pub fn load_board_or_report(pcb: &Path) -> Option<Board> {
@@ -168,13 +222,11 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
         warn!("{} stroke-font silkscreen text(s) will be missing (kicad-cli silk is not ported yet)", stroke);
     }
     let resolver = ModelResolver::new(&board.project_dir, &cfg.path_vars, &cfg.model_search_dirs);
-    let library = ModelLibrary::new(cache_dir.clone(), MeshParams::default(), !o.no_cache);
+    let library = Arc::new(ModelLibrary::new(cache_dir.clone(), MeshParams::default(), !o.no_cache));
     info!("mesh cache: {}{}", cache_dir.join("meshes").display(), if o.no_cache { " (disabled)" } else { "" });
-    let scene = {
-        let material_resolver = MaterialResolver::new(&materials.library, &materials.project, &materials.global);
-        build_scene(SceneContext { board: &board, resolver: &resolver, library: &library, materials: &material_resolver, options: &cfg.scene, relief_cache: None, async_models: false })
-    };
-    let st = library.stats();
+    let mut source = SceneSource { resolver, library, materials, tiles: ReliefTileCache::default() };
+    let scene = source.build(&board, &cfg.scene, false);
+    let st = source.library.stats();
     info!("models: {} loaded+meshed, {} from cache, {} failed", st.loaded, st.cache_hits, st.failed);
     for a in &scene.assignments {
         debug!("material: {} {} [{}] -> {} ({})", a.reference, a.model_file, a.part_keys, a.material, a.source);
@@ -199,7 +251,7 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
         remember::remember_hdr(&board.file, &cfg.hdr, &config_hdr);
     }
     let dist = build_env_distribution(&env, 2048);
-    Some(PreparedScene { board, cfg, scene, env, dist, config_hdr })
+    Some(PreparedScene { board, cfg, scene, env, dist, config_hdr, source: Some(source) })
 }
 
 pub fn camera_params(cfg: &ProjectConfig, width: u32, height: u32) -> CameraParams {

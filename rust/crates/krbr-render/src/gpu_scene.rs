@@ -167,12 +167,7 @@ impl<'a> GpuScene<'a> {
         // 作り直したタイルの画素を詰めて 1 回で送る
         let mut staging: Vec<u8> = Vec::new();
         let mut regions: Vec<vk::BufferImageCopy> = Vec::new();
-        // タイルの矩形はシーンの格子から求める（ReliefTileCache と同じ規則）
-        let cache = krbr_geom::ReliefTileCache { bounds: krbr_kicad_box(sc), center: sc.board.center, core_half: sc.board.core_half, sdf_grid: *g, ..Default::default() };
-        let (nx, ny) = tile_counts(sc);
-        let cache = krbr_geom::ReliefTileCache { nx, ny, ..cache };
-        for &(side, t) in &sc.sdf_dirty {
-            let (x0, y0, x1, y1) = cache.tile_pixels(t);
+        for &(side, [x0, y0, x1, y1]) in &sc.sdf_dirty {
             if x1 <= x0 || y1 <= y0 {
                 continue;
             }
@@ -530,12 +525,4 @@ impl Drop for GpuScene<'_> {
     }
 }
 
-fn krbr_kicad_box(sc: &Scene) -> krbr_kicad::Box2 {
-    krbr_kicad::Box2 { lo: sc.board.bounds.lo, hi: sc.board.bounds.hi }
-}
 
-fn tile_counts(sc: &Scene) -> (usize, usize) {
-    let size = 8.0;
-    let b = &sc.board.bounds;
-    ((((b.hi.x - b.lo.x) / size).ceil() as usize).max(1), (((b.hi.y - b.lo.y) / size).ceil() as usize).max(1))
-}

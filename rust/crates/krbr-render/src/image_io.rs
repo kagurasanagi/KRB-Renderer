@@ -92,6 +92,17 @@ pub fn save_png_rgba8(p: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), Strin
     std::fs::rename(&tmp, p).map_err(|e| format!("{e}"))
 }
 
+/// 圧縮を軽くした PNG（保存のたびに書き直す watch 用。1080p で数十 ms）。一時ファイルに書いてから置き換える
+pub fn save_png_rgba8_fast(p: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), String> {
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    use image::ImageEncoder;
+    let tmp = p.with_extension("png.tmp");
+    let file = std::fs::File::create(&tmp).map_err(|e| format!("{e}"))?;
+    let enc = PngEncoder::new_with_quality(std::io::BufWriter::new(file), CompressionType::Fast, FilterType::Sub);
+    enc.write_image(rgba, w, h, image::ExtendedColorType::Rgba8).map_err(|e| format!("{e}"))?;
+    std::fs::rename(&tmp, p).map_err(|e| format!("{e}"))
+}
+
 pub fn save_png_tonemapped(p: &Path, img: &ImageF, exposure_ev: f32) -> Result<(), String> {
     save_png_rgba8(p, img.width, img.height, &tonemap_rgba8(img, exposure_ev))
 }
@@ -120,7 +131,8 @@ mod tests {
 
     #[test]
     fn aces_maps_white_below_one() {
+        // RRT + ODT の近似（C++ 版と同じ式）では、白 1.0 は約 0.62 になる
         let (r, g, b) = aces_fitted(1.0, 1.0, 1.0);
-        assert!(r < 1.0 && r > 0.7 && (r - g).abs() < 0.02 && (g - b).abs() < 0.02);
+        assert!(r < 1.0 && r > 0.55 && (r - g).abs() < 0.02 && (g - b).abs() < 0.02, "{r} {g} {b}");
     }
 }

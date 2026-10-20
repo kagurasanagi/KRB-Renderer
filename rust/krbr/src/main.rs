@@ -32,6 +32,8 @@ enum Command {
     Render(RenderArgs),
     /// real-time viewer window (default command when the first argument is a .kicad_pcb)
     View(ViewArgs),
+    /// headless: re-render whenever the board is saved (no window)
+    Watch(WatchArgs),
     /// build the board geometry and the relief tiles (no GPU) and print statistics
     Geom {
         /// .kicad_pcb file
@@ -60,9 +62,9 @@ struct RenderArgs {
     /// if omitted: the one last used for this board, else [environment] hdr in environment.toml, else builtin:studio
     #[arg(long, default_value = "")]
     hdr: String,
-    /// output PNG (EXR and AOVs are written next to it)
-    #[arg(long, default_value = "out/board.png")]
-    out: PathBuf,
+    /// output PNG (render: EXR and AOVs are written next to it; default out/board.png, watch: out/watch.png)
+    #[arg(long, short)]
+    out: Option<PathBuf>,
     #[arg(long)]
     spp: Option<u32>,
     #[arg(long)]
@@ -142,14 +144,30 @@ struct ViewArgs {
     /// development: rotate the camera by this many degrees per frame
     #[arg(long, default_value_t = 0.0)]
     test_orbit: f64,
+    /// do not reload when the board file is saved
+    #[arg(long)]
+    no_watch: bool,
+    /// development: reload the board once during the test
+    #[arg(long)]
+    test_reload: bool,
+}
+
+#[derive(Args, Debug)]
+struct WatchArgs {
+    #[command(flatten)]
+    render: RenderArgs,
+    /// stop after this many updates (0 = run until stopped)
+    #[arg(long, default_value_t = 0)]
+    max_updates: u32,
 }
 
 impl RenderArgs {
-    fn to_options(&self) -> krbr_app::RenderOptions {
+    /// default_out：--out を省略したときの出力先
+    fn to_options(&self, default_out: &str) -> krbr_app::RenderOptions {
         krbr_app::RenderOptions {
             pcb: self.pcb.clone(),
             hdr: self.hdr.clone(),
-            out: self.out.clone(),
+            out: self.out.clone().unwrap_or_else(|| PathBuf::from(default_out)),
             spp: self.spp,
             width: self.width,
             height: self.height,
@@ -373,15 +391,24 @@ fn main() {
     }
     let result = match &cli.command {
         Command::Info { pcb, models } => cmd_info(pcb, *models),
-        Command::Render(args) => krbr_app::cmd_render(&args.to_options()),
+        Command::Render(args) => krbr_app::cmd_render(&args.to_options("out/board.png")),
         Command::View(args) => {
-            let vo = krbr_app::ViewOptions { common: args.render.to_options(), test_frames: args.test_frames, screenshot: args.screenshot.clone(), hidden: args.hidden, test_orbit_deg: args.test_orbit };
+            let vo = krbr_app::ViewOptions {
+                common: args.render.to_options("out/board.png"),
+                test_frames: args.test_frames,
+                screenshot: args.screenshot.clone(),
+                hidden: args.hidden,
+                test_orbit_deg: args.test_orbit,
+                watch: !args.no_watch,
+                test_reload: args.test_reload,
+            };
             krbr_app::run_viewer(vo).map(|rc| {
                 if rc != 0 {
                     exit_with(rc, explorer);
                 }
             })
         }
+        Command::Watch(args) => krbr_app::cmd_watch(&krbr_app::WatchOptions { common: args.render.to_options("out/watch.png"), max_updates: args.max_updates }),
         Command::Geom { pcb } => cmd_geom(pcb),
         Command::Diff { a, b } => cmd_diff(a, b),
         Command::Models { pcb, no_cache } => cmd_models(pcb, *no_cache),

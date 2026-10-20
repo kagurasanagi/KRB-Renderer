@@ -1,10 +1,12 @@
 //! KRB-Renderer の土台：ログ、パス（設定・キャッシュの場所）、ハッシュ。
 //! C++ 版の `core/` に相当し、ファイルの置き場所と XXH64 のキーは C++ 版と同じにしてある（キャッシュを共有するため）。
 
+pub mod file_watcher;
 pub mod log;
 pub mod mesh;
 pub mod platform;
 
+pub use file_watcher::FileWatcher;
 pub use mesh::{Bounds3, Mesh};
 
 /// XXH64（seed 0）。C++ 版の `krbr::xxh64` と同じ値になる
