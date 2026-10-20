@@ -335,9 +335,20 @@ pub fn camera_params(cfg: &ProjectConfig, width: u32, height: u32) -> CameraPara
     CameraParams { elevation_deg: cfg.elevation_deg, azimuth_deg: cfg.azimuth_deg, fov_deg: cfg.fov_deg, margin: cfg.margin, width, height }
 }
 
-/// 自動の構図に --look-at / --zoom を反映したカメラ
+/// 最初のカメラ：この基板で覚えた視点（--look-at / --zoom を指定しなければ）。覚えていなければ自動の構図
 pub fn initial_camera(prep: &PreparedScene, o: &RenderOptions, width: u32, height: u32) -> Camera {
     let cfg = &prep.cfg;
+    if o.look_at.is_empty() && (o.zoom == 0.0 || o.zoom == 1.0) {
+        if let Some((target, distance)) = remember::camera_of(&prep.remembered_view) {
+            debug!("camera: last used for this board (distance {:.1} mm, elevation {:.1}, azimuth {:.1})", distance, cfg.elevation_deg, cfg.azimuth_deg);
+            return orbit_camera(target, distance, cfg.elevation_deg, cfg.azimuth_deg, cfg.fov_deg, width as f32 / height.max(1) as f32);
+        }
+    }
+    framed_camera(cfg, prep, o, width, height)
+}
+
+/// 自動の構図に --look-at / --zoom を反映したカメラ（cfg の仰角・方位・画角で）。ビューアの「視点を戻す」もこれ
+pub fn framed_camera(cfg: &ProjectConfig, prep: &PreparedScene, o: &RenderOptions, width: u32, height: u32) -> Camera {
     let cam = frame_camera(&camera_params(cfg, width, height), &prep.scene.framing_points);
     let mut target = cam.target;
     if o.look_at.len() == 2 {

@@ -124,7 +124,7 @@ pub fn recent_hdrs() -> Vec<String> {
 pub type ViewValues = Table;
 
 /// ビューアだけの項目（render / watch には使わない。設定ファイルには無い）
-pub const VIEWER_ONLY: [&str; 3] = ["denoise", "denoise_strength", "max_spp"];
+pub const VIEWER_ONLY: [&str; 4] = ["denoise", "denoise_strength", "max_spp", "display_mode"];
 
 /// 画像に関わるパネルの設定（設定ファイル・コマンドラインにもある項目）
 #[derive(Debug, Clone)]
@@ -138,6 +138,9 @@ pub struct ViewSettings<'a> {
     /// レジストの色：プリセットの名前、r,g,b、または空（stackup の色・既定）
     pub mask: String,
     pub fov_deg: f64,
+    /// 視点の仰角・方位（注視点と距離は camera_of / set_camera で別に扱う）
+    pub elevation_deg: f64,
+    pub azimuth_deg: f64,
     pub lens: &'a LensParams,
 }
 
@@ -152,6 +155,8 @@ impl<'a> ViewSettings<'a> {
             bump_intensity: cfg.scene.bump_intensity,
             mask: mask_spec(&cfg.scene),
             fov_deg: cfg.fov_deg,
+            elevation_deg: cfg.elevation_deg,
+            azimuth_deg: cfg.azimuth_deg,
             lens: &cfg.lens,
         }
     }
@@ -166,6 +171,8 @@ impl<'a> ViewSettings<'a> {
         f("exposure_ev", self.exposure_ev as f64);
         f("bump_intensity", self.bump_intensity as f64);
         f("fov_deg", self.fov_deg);
+        f("elevation_deg", self.elevation_deg);
+        f("azimuth_deg", self.azimuth_deg);
         let l = self.lens;
         for (k, v) in [
             ("lens_f_number", l.f_number),
@@ -223,6 +230,12 @@ pub fn apply_view_values(cfg: &mut ProjectConfig, v: &ViewValues) {
     if let Some(x) = f("fov_deg") {
         cfg.fov_deg = x;
     }
+    if let Some(x) = f("elevation_deg") {
+        cfg.elevation_deg = x;
+    }
+    if let Some(x) = f("azimuth_deg") {
+        cfg.azimuth_deg = x;
+    }
     let l = &mut cfg.lens;
     set(&mut l.f_number, "lens_f_number");
     set(&mut l.focal_length_mm, "lens_focal_length_mm");
@@ -256,6 +269,20 @@ pub fn apply_view_values(cfg: &mut ProjectConfig, v: &ViewValues) {
             warn!("remembered mask color {}: {}", m, e);
         }
     }
+}
+
+/// 覚えた視点の注視点（ワールド座標）と距離（mm）
+pub fn camera_of(v: &ViewValues) -> Option<(glam::Vec3, f32)> {
+    let t = v.get("camera_target")?.as_array()?;
+    let c: Vec<f32> = t.iter().filter_map(|x| x.as_float()).map(|x| x as f32).collect();
+    let d = v.get("camera_distance")?.as_float()? as f32;
+    (c.len() == 3 && d > 0.0 && c.iter().all(|x| x.is_finite())).then(|| (glam::Vec3::new(c[0], c[1], c[2]), d))
+}
+
+/// 視点の注視点と距離を値に入れる
+pub fn set_camera(v: &mut ViewValues, target: glam::Vec3, distance: f32) {
+    v.insert("camera_target".into(), Value::Array(target.to_array().iter().map(|&x| Value::Float(x as f64)).collect()));
+    v.insert("camera_distance".into(), Value::Float(distance as f64));
 }
 
 /// 覚えたパネルの設定のうち、覚えたときから設定ファイルの値が変わっていない項目（ビューアだけの項目は常に）
@@ -300,6 +327,72 @@ pub fn forget_board(pcb: &Path) {
     let file = state_file();
     let mut t = load(&file);
     forget_in(&mut t, pcb);
+    save(&file, &t);
+}
+
+// ---------------------------------------------------------------- ウィンドウ（基板によらず 1 つ）
+
+/// ビューアのウィンドウの大きさ・位置・最大化と、設定パネルを出すかとその幅
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowState {
+    /// 最大化していないときの中の大きさ（物理ピクセル）
+    pub size: Option<(u32, u32)>,
+    /// 最大化していないときの外側の位置（物理ピクセル）
+    pub position: Option<(i32, i32)>,
+    pub maximized: bool,
+    pub panel_shown: bool,
+    /// 設定パネルの幅（egui のポイント）
+    pub panel_width: Option<f32>,
+}
+
+impl Default for WindowState {
+    fn default() -> Self {
+        Self { size: None, position: None, maximized: false, panel_shown: true, panel_width: None }
+    }
+}
+
+fn window_state_in(t: &Table) -> WindowState {
+    let mut w = WindowState::default();
+    let Some(v) = t.get("window").and_then(|v| v.as_table()) else { return w };
+    let pair = |k: &str| -> Option<(i64, i64)> {
+        let a = v.get(k)?.as_array()?;
+        Some((a.first()?.as_integer()?, a.get(1)?.as_integer()?))
+    };
+    w.size = pair("size").filter(|&(x, y)| x > 0 && y > 0).map(|(x, y)| (x as u32, y as u32));
+    w.position = pair("position").map(|(x, y)| (x as i32, y as i32));
+    w.maximized = v.get("maximized").and_then(|x| x.as_bool()).unwrap_or(false);
+    w.panel_shown = v.get("panel_shown").and_then(|x| x.as_bool()).unwrap_or(true);
+    w.panel_width = v.get("panel_width").and_then(|x| x.as_float()).map(|x| x as f32);
+    w
+}
+
+fn remember_window_in(t: &mut Table, w: &WindowState) {
+    let mut v = Table::new();
+    let pair = |a: i64, b: i64| Value::Array(vec![Value::Integer(a), Value::Integer(b)]);
+    if let Some((x, y)) = w.size {
+        v.insert("size".into(), pair(x as i64, y as i64));
+    }
+    if let Some((x, y)) = w.position {
+        v.insert("position".into(), pair(x as i64, y as i64));
+    }
+    v.insert("maximized".into(), Value::Boolean(w.maximized));
+    v.insert("panel_shown".into(), Value::Boolean(w.panel_shown));
+    if let Some(pw) = w.panel_width {
+        v.insert("panel_width".into(), Value::Float(pw as f64));
+    }
+    t.insert("window".into(), Value::Table(v));
+}
+
+/// 前回のウィンドウの状態
+pub fn window_state() -> WindowState {
+    window_state_in(&load(&state_file()))
+}
+
+/// ウィンドウの状態を覚える
+pub fn remember_window(w: &WindowState) {
+    let file = state_file();
+    let mut t = load(&file);
+    remember_window_in(&mut t, w);
     save(&file, &t);
 }
 
@@ -360,10 +453,27 @@ mod tests {
         assert_eq!(got.get("integrator").and_then(|v| v.as_str()), Some("vcm"));
         assert_eq!(got.get("max_spp").and_then(|v| v.as_integer()), Some(1024));
 
+        // 視点
+        let mut v = ViewValues::new();
+        assert_eq!(camera_of(&v), None);
+        set_camera(&mut v, glam::Vec3::new(1.0, -2.0, 3.5), 120.0);
+        let v: Table = Table::from_iter([("view".to_string(), Value::Table(v))]).to_string().parse::<Table>().unwrap()["view"].as_table().unwrap().clone();
+        assert_eq!(camera_of(&v), Some((glam::Vec3::new(1.0, -2.0, 3.5), 120.0)));
+
         // 忘れる：環境マップも含めて、この基板の分だけ消える
         forget_in(&mut t, pcb);
         assert!(usable_view_values(&t, pcb, &config_then).is_empty());
         assert_eq!(remembered_in(&t, pcb), None);
         assert!(remembered_in(&t, other).is_some());
+    }
+
+    #[test]
+    fn window_state_round_trip() {
+        let mut t = Table::new();
+        assert_eq!(window_state_in(&t), WindowState::default());
+        let w = WindowState { size: Some((1600, 900)), position: Some((-1200, 40)), maximized: true, panel_shown: false, panel_width: Some(420.0) };
+        remember_window_in(&mut t, &w);
+        let t: Table = t.to_string().parse().unwrap();
+        assert_eq!(window_state_in(&t), w);
     }
 }

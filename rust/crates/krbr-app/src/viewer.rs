@@ -32,7 +32,7 @@ use crate::selection::{Outline, Selected};
 use krbr_scene::material_library::{split_variant, with_smooth};
 use crate::prepare::{ReloadStats, SceneSource};
 use crate::remember;
-use crate::prepare::{frame_params, initial_camera, prepare_scene, PreparedScene, RenderOptions};
+use crate::prepare::{frame_params, framed_camera, initial_camera, prepare_scene, PreparedScene, RenderOptions};
 use crate::swapchain::Swapchain;
 
 #[derive(Debug, Clone, Default)]
@@ -104,6 +104,8 @@ struct ViewState {
     auto_exposure_requested: bool,
     /// メニュー：パネルの設定をすべて既定（設定ファイルとコマンドライン）に戻し、覚えたものを忘れる
     reset_all_requested: bool,
+    /// 最初のフレーム：3D 表示の大きさが決まったので、最初の視点（覚えた視点、無ければ自動の構図）を合わせ直す
+    start_requested: bool,
     quit_requested: bool,
     /// レンダリングを一時停止する（サンプルを積み足さない。GPU の弱い PC で操作を軽くする）
     paused: bool,
@@ -323,6 +325,13 @@ struct App {
     view_changed_at: Instant,
     /// 「すべて既定に戻す」の直後：戻した値が反映されたら、それを覚えずに基準にする（覚えていない状態のままにする）
     view_rebase: bool,
+    /// ウィンドウの状態（基板によらず 1 つ）：起動時に読んだもの・最後に見たもの・最後に覚えたもの・最後に変わった時刻
+    win_start: remember::WindowState,
+    win_seen: remember::WindowState,
+    win_saved: remember::WindowState,
+    win_changed_at: Instant,
+    /// 設定パネルの今の幅（egui のポイント）
+    panel_width: f32,
     /// 次に読み終えた環境マップを覚えない（「すべて既定に戻す」で設定ファイルのものに戻したとき）
     env_no_remember: bool,
     out_dir: PathBuf,
@@ -344,6 +353,22 @@ fn viewport_px(r: egui::Rect, ppp: f32, w: u32, h: u32) -> Viewport {
 }
 
 const TARGET_FRAME_MS: f64 = 10.0; // 60fps（16.7 ms）に収まるよう、表示処理の分を残す
+
+fn display_mode_name(m: DisplayMode) -> &'static str {
+    match m {
+        DisplayMode::Beauty => "image",
+        DisplayMode::Albedo => "albedo",
+        DisplayMode::Normal => "normal",
+    }
+}
+
+fn display_mode_of(name: &str) -> DisplayMode {
+    match name {
+        "albedo" => DisplayMode::Albedo,
+        "normal" => DisplayMode::Normal,
+        _ => DisplayMode::Beauty,
+    }
+}
 
 /// 経過時間の表示：1 分未満は「12.3 秒」、それ以上は「m:ss」「h:mm:ss」
 fn format_duration(secs: f64) -> String {
@@ -378,15 +403,49 @@ impl App {
         c.spectral = st.spectral;
         c.bump_intensity = st.bump_intensity;
         c.fov_deg = st.fov;
+        c.elevation_deg = st.elevation;
+        c.azimuth_deg = st.azimuth;
         let mut v = c.values();
+        remember::set_camera(&mut v, st.target, st.distance);
+        v.insert("display_mode".into(), toml::Value::String(display_mode_name(st.mode).into()));
         v.insert("denoise".into(), toml::Value::Boolean(st.denoise));
         v.insert("denoise_strength".into(), toml::Value::Float(st.denoise_strength as f64));
         v.insert("max_spp".into(), toml::Value::Integer(st.max_spp as i64));
         v
     }
 
-    /// パネルの設定が変わっていたら覚える（最後に変わってから 1 秒たったら。now なら待たずに）
+    /// 今のウィンドウの状態（最大化している間は、最大化する前の大きさと位置を残す）
+    fn current_window(&self) -> Option<remember::WindowState> {
+        let window = self.window.as_ref()?;
+        let mut w = self.win_seen.clone();
+        w.maximized = window.is_maximized();
+        if !w.maximized && !window.is_minimized().unwrap_or(false) {
+            let size = window.inner_size();
+            w.size = Some((size.width, size.height));
+            w.position = window.outer_position().ok().map(|p| (p.x, p.y));
+        }
+        w.panel_shown = self.st.show_panel;
+        if self.st.show_panel {
+            w.panel_width = Some(self.panel_width.round());
+        }
+        Some(w)
+    }
+
+    /// パネルの設定とウィンドウの状態が変わっていたら覚える（最後に変わってから 1 秒たったら。now なら待たずに）
     fn save_view(&mut self, now: bool) {
+        // ウィンドウ（表示しないテストのときは覚えない）
+        if !(self.vo.hidden || self.vo.test_frames > 0) {
+            if let Some(w) = self.current_window() {
+                if w != self.win_seen {
+                    self.win_seen = w;
+                    self.win_changed_at = Instant::now();
+                }
+                if self.win_seen != self.win_saved && (now || self.win_changed_at.elapsed() >= Duration::from_secs(1)) {
+                    remember::remember_window(&self.win_seen);
+                    self.win_saved = self.win_seen.clone();
+                }
+            }
+        }
         let cur = self.current_view();
         if self.view_rebase {
             // レジストの色などは次のフレームで設定に反映されるので、ここで基準を取り直す
@@ -419,6 +478,8 @@ impl App {
         st.max_spp = self.vo.common.spp.map(pow2_spp).unwrap_or(4096);
         st.denoise = self.vo.common.denoise.unwrap_or(false);
         st.denoise_strength = self.vo.common.denoise_strength.unwrap_or(1.0);
+        st.mode = DisplayMode::Beauty;
+        st.reset_requested = true; // 視点も自動の構図に
         st.mask_choice = if c.scene.mask_preset.is_empty() { None } else { mask_presets().iter().position(|p| p.name == c.scene.mask_preset) };
         st.mask_changed = true;
         st.materials_dirty = true;
@@ -446,9 +507,24 @@ impl App {
         info!("panel settings reset to the configuration files");
     }
 
-    fn reset_camera(&mut self, w: u32, h: u32) {
+    /// 最初の視点：この基板で覚えた視点、無ければ自動の構図
+    fn start_camera(&mut self, w: u32, h: u32) {
         let c = initial_camera(&self.prep, &self.vo.common, w, h);
         let cfg = &self.prep.cfg;
+        self.st.target = c.target;
+        self.st.distance = c.distance;
+        self.st.elevation = cfg.elevation_deg;
+        self.st.azimuth = cfg.azimuth_deg;
+        self.st.fov = cfg.fov_deg;
+        self.st.tan_half_fov_y = c.tan_half_fov_y;
+        self.st.dirty = true;
+    }
+
+    /// 視点を戻す（R）：設定ファイルとコマンドラインの仰角・方位・画角での自動の構図
+    fn reset_camera(&mut self, w: u32, h: u32) {
+        let cfg = self.prep.configured.clone();
+        let c = framed_camera(&cfg, &self.prep, &self.vo.common, w, h);
+        let cfg = &cfg;
         self.st.target = c.target;
         self.st.distance = c.distance;
         self.st.elevation = cfg.elevation_deg;
@@ -485,10 +561,21 @@ impl App {
 
     fn init_gpu(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
         let hidden = self.vo.hidden || self.vo.test_frames > 0;
-        let (w, h) = (self.vo.common.width.unwrap_or(1600), self.vo.common.height.unwrap_or(900));
+        let sized = self.vo.common.width.is_some() || self.vo.common.height.is_some();
+        let saved = if hidden || sized { remember::WindowState::default() } else { self.win_start.clone() };
+        let (sw, sh) = saved.size.unwrap_or((1600, 900));
+        let (w, h) = (self.vo.common.width.unwrap_or(sw), self.vo.common.height.unwrap_or(sh));
         // ウィンドウのアイコン（exe に埋め込んだものと同じ絵。scripts/make_icon.py で作る 64x64 の RGBA）
         let icon = winit::window::Icon::from_rgba(include_bytes!("../../../krbr/assets/krbr_64.rgba").to_vec(), 64, 64).ok();
-        let attrs = Window::default_attributes().with_window_icon(icon).with_title(self.base_title.clone()).with_inner_size(winit::dpi::PhysicalSize::new(w, h)).with_visible(!hidden).with_active(!hidden);
+        let attrs = Window::default_attributes().with_window_icon(icon).with_title(self.base_title.clone()).with_inner_size(winit::dpi::PhysicalSize::new(w, h)).with_visible(!hidden).with_active(!hidden).with_maximized(saved.maximized);
+        // 前回の位置：今つながっている画面のどれかに、ウィンドウの左上の近くが入っているときだけ（画面を外した後に見えない所へ出さない）
+        let attrs = match saved.position {
+            Some((x, y)) if el.available_monitors().any(|m| {
+                let (p, s) = (m.position(), m.size());
+                x + 40 >= p.x && y + 10 >= p.y && x + 40 < p.x + s.width as i32 && y + 10 < p.y + s.height as i32
+            }) => attrs.with_position(winit::dpi::PhysicalPosition::new(x, y)),
+            _ => attrs,
+        };
         let window = el.create_window(attrs).map_err(|e| format!("window: {e}"))?;
         let display = window.display_handle().map_err(|e| format!("{e}"))?.as_raw();
         let wh = window.window_handle().map_err(|e| format!("{e}"))?.as_raw();
@@ -504,9 +591,9 @@ impl App {
         }
         let size = window.inner_size();
         let (fbw, fbh) = (size.width.max(1), size.height.max(1));
-        self.reset_camera(fbw, fbh);
-        // 3D 表示の大きさはメニューとパネルを置いてから決まるので、最初のフレームで視点を合わせ直す
-        self.st.reset_requested = true;
+        self.start_camera(fbw, fbh);
+        // 3D 表示の大きさはメニューとパネルを置いてから決まるので、最初のフレームで視点を合わせ直す（覚えた視点があればそれ）
+        self.st.start_requested = true;
         let swap = Swapchain::new(ctx, fbw, fbh)?;
         let frame = self.current_frame(swap.extent.width, swap.extent.height);
         // 安全性：Box の中身はムーブされず、Gpu を捨てるときに prog を gpu より先に捨てる（run_viewer）
@@ -1167,7 +1254,7 @@ impl App {
             notes.push((self.last_update.clone(), false));
         }
         egui::Panel::bottom("status").show(root, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if st.paused {
                     ui.colored_label(yellow, "一時停止中");
                 } else if done {
@@ -1272,7 +1359,7 @@ impl App {
     /// 右端に上下いっぱいで固定する設定パネル（幅は境目のドラッグで変えられる、× で閉じる）
     fn side_panel(&mut self, root: &mut egui::Ui) {
         let mut close = false;
-        egui::Panel::right("settings").resizable(true).default_size(340.0).size_range(300.0..=640.0).show(root, |ui| {
+        let shown = egui::Panel::right("settings").resizable(true).default_size(self.panel_width).size_range(300.0..=640.0).show(root, |ui| {
             ui.horizontal(|ui| {
                 ui.strong("設定");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1284,6 +1371,7 @@ impl App {
             ui.separator();
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.panel(ui));
         });
+        self.panel_width = shown.response.rect.width();
         if close {
             self.st.show_panel = false;
         }
@@ -1466,6 +1554,10 @@ impl App {
                 self.last_update = format!("ピントを {:.1} mm に合わせた", self.prep.cfg.lens.focus_distance_mm);
                 self.st.dirty = true;
             }
+        }
+        if self.st.start_requested {
+            self.st.start_requested = false;
+            self.start_camera(self.st.viewport.w, self.st.viewport.h);
         }
         if self.st.reset_requested {
             self.st.reset_requested = false;
@@ -1885,6 +1977,7 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
     let Some(prep) = prepare_scene(&vo.common) else { anyhow::bail!("scene preparation failed") };
     let cfg = &prep.cfg;
     let rv = &prep.remembered_view;
+    let win = remember::window_state();
     let max_spp = vo.common.spp.map(pow2_spp).or_else(|| rv.get("max_spp").and_then(|v| v.as_integer()).map(|v| pow2_spp(v as u32))).unwrap_or(4096);
     let mask_choice = if cfg.scene.mask_preset.is_empty() { None } else { mask_presets().iter().position(|p| p.name == cfg.scene.mask_preset) };
     let st = ViewState {
@@ -1898,8 +1991,8 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         env_intensity: cfg.env_intensity,
         bump_intensity: cfg.scene.bump_intensity,
         max_spp,
-        mode: DisplayMode::Beauty,
-        show_panel: true,
+        mode: rv.get("display_mode").and_then(|v| v.as_str()).map(display_mode_of).unwrap_or(DisplayMode::Beauty),
+        show_panel: win.panel_shown,
         dirty: true,
         materials_dirty: false,
         mask_choice,
@@ -1908,6 +2001,7 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         reset_requested: false,
         auto_exposure_requested: false,
         reset_all_requested: false,
+        start_requested: false,
         quit_requested: false,
         paused: vo.paused,
         spectral: cfg.spectral,
@@ -1990,6 +2084,11 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         view_saved: remember::ViewValues::new(),
         view_changed_at: Instant::now(),
         view_rebase: false,
+        win_start: win.clone(),
+        win_seen: win.clone(),
+        win_saved: win.clone(),
+        win_changed_at: Instant::now(),
+        panel_width: win.panel_width.unwrap_or(340.0),
         env_no_remember: false,
         out_dir,
         stem,
