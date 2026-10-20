@@ -9,6 +9,8 @@ use crate::material_io::read_material;
 /// krbr 組み込みの材質（OpenPBR Surface）。色はリニア。base_color を書かなければ 3D モデルの面の色を使う
 pub const BUILTIN_MATERIALS: &str = r#"# krbr 組み込みの材質（OpenPBR Surface）。色はリニア
 # 全体設定の materials/*.toml に同じ名前を書くと、書いた項目だけ上書きされる
+# roughness_variation（粗さのむら）は 0.1〜0.8 mm 周期の模様。引きの画では画素と同じくらいの細かさになり
+# 砂粒のようなノイズに見えるので、部品ではごく弱くしている（部品の質感は specular_roughness で表す）
 
 [material.metal_tin]           # 錫めっきのリード・端子
 base_metalness = 1.0
@@ -17,7 +19,7 @@ specular_roughness = 0.28
 bump_pattern = "noise"
 bump_strength = 0.012
 bump_scale = 0.08
-roughness_variation = 0.2
+roughness_variation = 0.03
 
 [material.metal_gold]          # 金めっきの端子
 base_metalness = 1.0
@@ -26,7 +28,7 @@ specular_roughness = 0.22
 bump_pattern = "noise"
 bump_strength = 0.01
 bump_scale = 0.08
-roughness_variation = 0.2
+roughness_variation = 0.03
 
 [material.plastic]             # 樹脂のボディ
 specular_roughness = 0.45
@@ -35,7 +37,7 @@ specular_ior = 1.5
 bump_pattern = "noise"
 bump_strength = 0.012
 bump_scale = 0.3
-roughness_variation = 0.15
+roughness_variation = 0.02
 
 [material.glossy_plastic]      # 白い樹脂など、つやのあるもの
 specular_roughness = 0.3
@@ -44,7 +46,7 @@ specular_ior = 1.5
 bump_pattern = "noise"
 bump_strength = 0.01
 bump_scale = 0.3
-roughness_variation = 0.15
+roughness_variation = 0.02
 
 [material.epoxy_black]         # IC のモールド樹脂（つや消しの黒）
 base_color = [0.018, 0.018, 0.018]
@@ -54,7 +56,7 @@ specular_ior = 1.55
 bump_pattern = "noise"
 bump_strength = 0.015
 bump_scale = 0.1
-roughness_variation = 0.2
+roughness_variation = 0.03
 
 [material.ceramic]             # チップ部品のセラミック
 specular_roughness = 0.4
@@ -63,7 +65,7 @@ specular_ior = 1.6
 bump_pattern = "noise"
 bump_strength = 0.015
 bump_scale = 0.05
-roughness_variation = 0.2
+roughness_variation = 0.03
 
 [material.aluminum]            # 電解コンデンサの缶など
 base_color = [0.91, 0.92, 0.92]
@@ -73,7 +75,7 @@ specular_roughness = 0.35
 bump_pattern = "noise"
 bump_strength = 0.01
 bump_scale = 0.2
-roughness_variation = 0.2
+roughness_variation = 0.03
 
 [material.acrylic]             # アクリル（PMMA）
 base_color = [1.0, 1.0, 1.0]
