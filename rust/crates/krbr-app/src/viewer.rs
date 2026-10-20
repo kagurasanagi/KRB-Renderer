@@ -1939,8 +1939,15 @@ impl App {
             self.save_index += 1;
             let _ = std::fs::create_dir_all(&self.out_dir);
             match image_io::save_png_tonemapped(&png, &aov.color, self.st.exposure).and_then(|_| image_io::save_exr(&exr, &aov.color)) {
-                Ok(()) => info!("saved {} / {} ({} spp)", png.display(), exr.display(), g.prog.samples()),
-                Err(e) => error!("save failed: {}", e),
+                Ok(()) => {
+                    info!("saved {} / {} ({} spp)", png.display(), exr.display(), g.prog.samples());
+                    let shown = std::path::absolute(&png).unwrap_or(png.clone());
+                    self.last_update = format!("保存した：{}（.exr も、{} spp）", shown.display(), g.prog.samples());
+                }
+                Err(e) => {
+                    error!("save failed: {}", e);
+                    self.last_update = format!("保存できなかった：{e}");
+                }
             }
             // ノイズ除去した画像を表示しているなら、それも書く（表示と同じ強さで混ぜたもの）
             if let (true, Some(d)) = (show_denoised, g.denoiser.as_ref()) {
@@ -1951,7 +1958,10 @@ impl App {
                 let png = png.with_file_name(format!("{}_{:03}_denoised.png", self.stem, self.save_index - 1));
                 let exr = png.with_extension("exr");
                 match image_io::save_png_tonemapped(&png, &img, self.st.exposure).and_then(|_| image_io::save_exr(&exr, &img)) {
-                    Ok(()) => info!("saved {} / {} (denoised, strength {:.2})", png.display(), exr.display(), self.st.denoise_strength),
+                    Ok(()) => {
+                        info!("saved {} / {} (denoised, strength {:.2})", png.display(), exr.display(), self.st.denoise_strength);
+                        self.last_update.push_str("。ノイズ除去した画像も保存した（_denoised）");
+                    }
                     Err(e) => error!("save failed: {}", e),
                 }
             }
