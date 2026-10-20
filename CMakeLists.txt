@@ -39,7 +39,7 @@ set(SHADER_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
 set(SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/shaders")
 file(GLOB SHADER_INCLUDES CONFIGURE_DEPENDS "${SHADER_SRC_DIR}/*.glsl")
 set(SHADER_SOURCES "${SHADER_SRC_DIR}/pathtrace.comp" "${SHADER_SRC_DIR}/tonemap.comp"
-                   "${SHADER_SRC_DIR}/denoise_prep.comp" "${SHADER_SRC_DIR}/vcm_light.comp"
+                   "${SHADER_SRC_DIR}/denoise_prep.comp" "${SHADER_SRC_DIR}/denoise_blend.comp" "${SHADER_SRC_DIR}/vcm_light.comp"
                    "${SHADER_SRC_DIR}/vcm_camera.comp")
 # 積分器（レイを飛ばすもの）は、ray query 版（.comp.spv）に加えて ray tracing pipeline 版（.rgen.spv）も作る。
 # ray_query を持たない GPU（GTX 10 系など）では後者と rt_*.spv を使う

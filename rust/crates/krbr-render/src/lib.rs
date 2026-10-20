@@ -1,6 +1,7 @@
 //! Vulkan による描画（C++ 版の `render/` と `io/` に相当）。
 //! シェーダは C++ 版と同じ SPIR-V（`shaders/*.spv`）をそのまま使う。
 
+pub mod denoiser;
 pub mod env_map;
 pub mod gpu_scene;
 pub mod gpu_types;
@@ -12,6 +13,7 @@ pub mod studio_env;
 pub mod tonemapper;
 pub mod vk;
 
+pub use denoiser::{denoiser_available, DenoiseQuality, Denoiser};
 pub use env_map::{build_env_distribution, EnvDistribution};
 pub use gpu_scene::GpuScene;
 pub use image_io::ImageF;

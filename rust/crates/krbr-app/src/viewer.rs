@@ -15,7 +15,7 @@ use krbr_render::image_io::{self, ImageF};
 use krbr_render::tonemapper::{DisplayMode, Tonemapper};
 use krbr_render::vk::{image_barrier, Buffer};
 use krbr_render::studio_env::STUDIO;
-use krbr_render::{build_env_distribution, environment_label, is_builtin, load_environment_map, Context, ContextOptions, EnvDistribution, GpuScene, Progressive};
+use krbr_render::{build_env_distribution, environment_label, DenoiseQuality, Denoiser, is_builtin, load_environment_map, Context, ContextOptions, EnvDistribution, GpuScene, Progressive};
 use krbr_scene::config::apply_mask_color_spec;
 use krbr_scene::scene::{load_material_setup, raycast, raycast_pick, update_mask_material, MaterialAssignment};
 use krbr_scene::{mask_presets, orbit_camera, InstanceOwner, LensModel, Scene, SceneOptions};
@@ -107,6 +107,11 @@ struct ViewState {
     press_moved: f64,
     /// クリック：その点の部品を選ぶ
     part_pick: Option<(f64, f64)>,
+    /// ノイズ除去（OIDN）した画像を表示する。強さは元の画像と混ぜる割合（1 で OIDN の結果そのまま）
+    denoise: bool,
+    denoise_strength: f32,
+    /// D キー／ボタン：ノイズ除去が CPU のとき、手動で 1 回かける
+    denoise_requested: bool,
     last_cursor: (f64, f64),
     ctrl: bool,
     /// 3D 表示の領域（ウィンドウのうちメニューとパネルを除いた所、物理ピクセル）。描画の解像度もこれ
@@ -229,6 +234,9 @@ struct Gpu {
     swap: Swapchain<'static>,
     prog: Progressive<'static>,
     tone: Tonemapper<'static>,
+    /// ノイズ除去（有効にしたときに初めて作る）と、その結果を入力にしたトーンマッピング
+    denoiser: Option<Denoiser<'static>>,
+    tone_denoised: Option<Tonemapper<'static>>,
     egui_renderer: EguiRenderer<egui_ash_renderer::allocator::GpuAllocator>,
     cmd: vk::CommandBuffer,
     acquired: vk::Semaphore,
@@ -277,6 +285,15 @@ struct App {
     material_names: Vec<String>,
     material_error: String,
     test_pick_done: bool,
+    /// ノイズ除去：作ってみたか（失敗したら作り直さない）、累積をやり直した回数、どの累積をいくつのサンプルで除去したか
+    denoiser_tried: bool,
+    denoise_error: String,
+    accum_epoch: u64,
+    prev_samples: u32,
+    denoised_epoch: u64,
+    denoised_samples: u32,
+    last_denoise_ms: f64,
+    last_denoise_at: Instant,
     last_update: String,
     samples_per_frame: u32,
     need_recreate: bool,
@@ -388,7 +405,7 @@ impl App {
         );
         install_fonts(&self.egui_ctx);
         self.egui_state = Some(EguiState::new(self.egui_ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, None));
-        self.gpu = Some(Gpu { ctx, gpu, swap, prog, tone, egui_renderer, cmd, acquired, fence, timestamps, ts_period_ms });
+        self.gpu = Some(Gpu { ctx, gpu, swap, prog, tone, denoiser: None, tone_denoised: None, egui_renderer, cmd, acquired, fence, timestamps, ts_period_ms });
         self.window = Some(window);
         Ok(())
     }
@@ -462,7 +479,29 @@ impl App {
                 st.exposure = 0.0;
             }
         });
-        ui.weak("ノイズ除去（OIDN）は Rust 版では未対応");
+        {
+            let on_cpu = self.gpu.as_ref().and_then(|g| g.denoiser.as_ref()).is_some_and(|d| d.device_name() == "CPU");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut st.denoise, "ノイズ除去 (OIDN)");
+                if let Some(d) = self.gpu.as_ref().and_then(|g| g.denoiser.as_ref()) {
+                    ui.weak(format!("{}, {:.0} ms", d.device_name(), self.last_denoise_ms));
+                    if on_cpu && ui.button("今かける (D)").clicked() {
+                        st.denoise_requested = true;
+                    }
+                } else if self.denoiser_tried && st.denoise {
+                    ui.weak("使用できません");
+                }
+            });
+            if st.denoise {
+                ui.add(egui::Slider::new(&mut st.denoise_strength, 0.0..=1.0).text("強さ")).on_hover_text("元の画像と混ぜる割合（1 で OIDN の結果そのまま。下げると細部やざらつきが少し残る）");
+                if on_cpu {
+                    ui.weak("CPU のため、収束時と D キーのときだけかけます");
+                }
+                if !self.denoise_error.is_empty() {
+                    ui.colored_label(egui::Color32::from_rgb(255, 102, 102), &self.denoise_error);
+                }
+            }
+        }
 
         ui.separator();
         ui.strong("積分器");
@@ -638,6 +677,27 @@ impl App {
             let _ = tx.send(ReloadDone { source, saved, result, saved_at, silk, materials });
         });
         self.reload_job = Some(rx);
+    }
+
+    /// ノイズ除去を用意する（デバイスの準備に時間がかかるので、有効にしたときに初めて行う。失敗したら再び試さない）
+    fn init_denoiser(&mut self) {
+        self.denoiser_tried = true;
+        let g = self.gpu.as_mut().unwrap();
+        g.ctx.wait_idle();
+        let t = g.prog.targets();
+        let made = Denoiser::new(g.ctx, t, DenoiseQuality::Fast).and_then(|d| Tonemapper::with_views(g.ctx, d.output().view, t.albedo.view, t.normal.view, t.width, t.height).map(|tm| (d, tm)));
+        match made {
+            Ok((d, tm)) => {
+                g.tone_denoised = Some(tm);
+                g.denoiser = Some(d);
+                self.denoise_error.clear();
+                self.denoised_epoch = u64::MAX;
+            }
+            Err(e) => {
+                warn!("denoiser: {e}");
+                self.denoise_error = e;
+            }
+        }
     }
 
     /// 画面の点（物理ピクセル）の部品を選ぶ。基板や何も無い所なら選択を外す
@@ -1131,6 +1191,12 @@ impl App {
             if vp.w != t.width || vp.h != t.height {
                 g.prog.resize(vp.w, vp.h)?;
                 g.tone = Tonemapper::new(g.ctx, g.prog.targets())?;
+                // ノイズ除去は新しい大きさで作り直す
+                if g.denoiser.is_some() {
+                    g.tone_denoised = None;
+                    g.denoiser = None;
+                    self.denoiser_tried = false;
+                }
                 self.st.dirty = true;
             }
             self.st.viewport = vp;
@@ -1186,9 +1252,12 @@ impl App {
             }
         }
 
+        if self.st.denoise && !self.denoiser_tried {
+            self.init_denoiser();
+        }
+
         // ---- 描画
         let g = self.gpu.as_mut().unwrap();
-        let dev = &g.ctx.device;
         let loader = g.ctx.swapchain_loader.as_ref().unwrap();
         let (image_index, _) = match unsafe { loader.acquire_next_image(g.swap.handle, u64::MAX, g.acquired, vk::Fence::null()) } {
             Ok(r) => r,
@@ -1209,17 +1278,72 @@ impl App {
             }
         }
 
+        // 累積をやり直したら（サンプル数が減ったら）、前のノイズ除去の結果は使わない
+        if g.prog.samples() < self.prev_samples {
+            self.accum_epoch += 1;
+        }
+        // このフレームでノイズ除去するか（画像の表示のときだけ）。C++ 版と同じ間隔：
+        // GPU：動かしている間は毎フレーム fast、止まったら 150 ms ごとに high、収束時にもう一度。
+        // CPU：数秒かかり画面が止まるので、収束時（最大 spp に達したとき）と D キー／ボタンのときだけ high でかける
+        let on_cpu = g.denoiser.as_ref().is_some_and(|d| d.device_name() == "CPU");
+        let moving = self.last_change_at.elapsed() < Duration::from_millis(300);
+        let samples_after = g.prog.samples() + add;
+        let due = if on_cpu { samples_after >= max_spp || self.st.denoise_requested } else { moving || samples_after >= max_spp || self.last_denoise_at.elapsed() > Duration::from_millis(150) };
+        let beauty = self.st.mode == DisplayMode::Beauty;
+        let want = self.st.denoise && g.denoiser.is_some() && beauty && samples_after > 0 && (self.denoised_epoch != self.accum_epoch || self.denoised_samples != samples_after) && due;
+        self.st.denoise_requested = false;
+        let ctx = g.ctx;
+        let timestamps = g.timestamps;
+        if want {
+            // サンプルの追加と入力の準備を先に流して完了を待ち、OIDN で除去してから表示のコマンドを作る
+            let d = g.denoiser.as_mut().unwrap();
+            d.set_quality(if moving && !on_cpu { DenoiseQuality::Fast } else { DenoiseQuality::High });
+            let (prog, d) = (&mut g.prog, &*d);
+            ctx.submit_and_wait(|dev, c| {
+                unsafe {
+                    dev.cmd_reset_query_pool(c, timestamps, 0, 2);
+                    dev.cmd_write_timestamp2(c, vk::PipelineStageFlags2::ALL_COMMANDS, timestamps, 0);
+                }
+                prog.record(c, add);
+                unsafe { dev.cmd_write_timestamp2(c, vk::PipelineStageFlags2::ALL_COMMANDS, timestamps, 1) };
+                d.record_prepare(c);
+            });
+            match d.execute() {
+                Ok(ms) => {
+                    self.last_denoise_ms = ms;
+                    self.denoised_epoch = self.accum_epoch;
+                    self.denoised_samples = g.prog.samples();
+                }
+                Err(e) => warn!("{e}"),
+            }
+            self.last_denoise_at = Instant::now();
+        }
+        let show_denoised = self.st.denoise && g.denoiser.is_some() && g.tone_denoised.is_some() && beauty && self.denoised_epoch == self.accum_epoch;
+        let dev = &ctx.device;
         let cmd = g.cmd;
         unsafe {
             dev.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).map_err(|e| format!("{e:?}"))?;
             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(|e| format!("{e:?}"))?;
-            dev.cmd_reset_query_pool(cmd, g.timestamps, 0, 2);
-            dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, g.timestamps, 0);
         }
-        g.prog.record(cmd, add);
-        unsafe { dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, g.timestamps, 1) };
-        g.tone.record(cmd, self.st.exposure, self.st.mode, g.prog.xyz_output());
-        let disp = g.tone.output();
+        if !want {
+            unsafe {
+                dev.cmd_reset_query_pool(cmd, timestamps, 0, 2);
+                dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, timestamps, 0);
+            }
+            g.prog.record(cmd, add);
+            unsafe { dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, timestamps, 1) };
+        }
+        self.prev_samples = g.prog.samples();
+        let disp = if show_denoised {
+            // 結果を元の画像と強さで混ぜる（軽いので毎フレーム。強さのスライダーがすぐ効く）
+            g.denoiser.as_ref().unwrap().record_output(cmd, self.st.denoise_strength);
+            let t = g.tone_denoised.as_ref().unwrap();
+            t.record(cmd, self.st.exposure, self.st.mode, g.prog.xyz_output());
+            t.output()
+        } else {
+            g.tone.record(cmd, self.st.exposure, self.st.mode, g.prog.xyz_output());
+            g.tone.output()
+        };
         let swap_img = g.swap.images[image_index as usize];
         let extent = g.swap.extent;
         image_barrier(dev, cmd, disp.image, vk::ImageLayout::GENERAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::BLIT, vk::AccessFlags2::TRANSFER_READ, 1);
@@ -1312,6 +1436,19 @@ impl App {
             match image_io::save_png_tonemapped(&png, &aov.color, self.st.exposure).and_then(|_| image_io::save_exr(&exr, &aov.color)) {
                 Ok(()) => info!("saved {} / {} ({} spp)", png.display(), exr.display(), g.prog.samples()),
                 Err(e) => error!("save failed: {}", e),
+            }
+            // ノイズ除去した画像を表示しているなら、それも書く（表示と同じ強さで混ぜたもの）
+            if let (true, Some(d)) = (show_denoised, g.denoiser.as_ref()) {
+                let mut img = d.read_output();
+                if g.prog.xyz_output() {
+                    krbr_render::integrator::xyz_to_linear_srgb(&mut img);
+                }
+                let png = png.with_file_name(format!("{}_{:03}_denoised.png", self.stem, self.save_index - 1));
+                let exr = png.with_extension("exr");
+                match image_io::save_png_tonemapped(&png, &img, self.st.exposure).and_then(|_| image_io::save_exr(&exr, &img)) {
+                    Ok(()) => info!("saved {} / {} (denoised, strength {:.2})", png.display(), exr.display(), self.st.denoise_strength),
+                    Err(e) => error!("save failed: {}", e),
+                }
             }
         }
 
@@ -1457,6 +1594,7 @@ impl ApplicationHandler for App {
                     KeyCode::Digit1 => st.mode = DisplayMode::Beauty,
                     KeyCode::Digit2 => st.mode = DisplayMode::Albedo,
                     KeyCode::Digit3 => st.mode = DisplayMode::Normal,
+                    KeyCode::KeyD => st.denoise_requested = true,
                     _ => {}
                 }
             }
@@ -1532,6 +1670,9 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         press_at: None,
         press_moved: 0.0,
         part_pick: None,
+        denoise: vo.common.denoise.unwrap_or(false),
+        denoise_strength: vo.common.denoise_strength,
+        denoise_requested: false,
         last_cursor: (0.0, 0.0),
         ctrl: false,
         viewport: Viewport { x: 0, y: 0, w: 1, h: 1 },
@@ -1578,6 +1719,14 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         material_names,
         material_error: String::new(),
         test_pick_done: false,
+        denoiser_tried: false,
+        denoise_error: String::new(),
+        accum_epoch: 0,
+        prev_samples: 0,
+        denoised_epoch: u64::MAX,
+        denoised_samples: 0,
+        last_denoise_ms: 0.0,
+        last_denoise_at: Instant::now(),
         last_update: String::new(),
         samples_per_frame: 1,
         need_recreate: false,
@@ -1604,6 +1753,8 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
             ctx.device.destroy_semaphore(g.acquired, None);
         }
         drop(g.egui_renderer);
+        drop(g.tone_denoised);
+        drop(g.denoiser);
         drop(g.tone);
         drop(g.prog);
         drop(g.swap);

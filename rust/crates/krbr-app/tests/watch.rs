@@ -118,8 +118,8 @@ fn save_updates_the_image_and_rebuilds_only_nearby_tiles() {
     .unwrap();
     for (i, u) in updates.iter().enumerate() {
         println!(
-            "update {}: saved {}, {:.0} ms after save; reload {:.0} ms (parse {:.0}, {} tiles), gpu {:.0} ms, render {:.0} ms, write {:.0} ms; {} changed, {} added, {} removed, {} pending",
-            i + 1, u.saved, u.since_save_ms, u.reload_ms, u.stats.parse_ms, u.stats.tiles_rebuilt, u.gpu_ms, u.render_ms, u.write_ms, u.stats.diff.changed, u.stats.diff.added, u.stats.diff.removed, u.pending_models
+            "update {}: saved {}, {:.0} ms after save; reload {:.0} ms (parse {:.0}, {} tiles), gpu {:.0} ms, render {:.0} ms (denoise {:.0}), write {:.0} ms; {} changed, {} added, {} removed, {} pending",
+            i + 1, u.saved, u.since_save_ms, u.reload_ms, u.stats.parse_ms, u.stats.tiles_rebuilt, u.gpu_ms, u.render_ms, u.denoise_ms, u.write_ms, u.stats.diff.changed, u.stats.diff.added, u.stats.diff.removed, u.pending_models
         );
     }
     assert!(!timed_out, "timed out after {} update(s)", updates.len());
@@ -133,6 +133,10 @@ fn save_updates_the_image_and_rebuilds_only_nearby_tiles() {
     assert!(!u.stats.diff.full);
     assert!(u.stats.tiles_rebuilt > 0 && u.stats.tiles_rebuilt <= 16, "{} tiles", u.stats.tiles_rebuilt);
     assert!(u.since_save_ms < budget, "{:.0} ms after save (budget {budget:.0})", u.since_save_ms);
+    // ノイズ除去が使えるなら、それ込みで間に合っていること（watch は既定でノイズ除去する）
+    if krbr_render::denoiser_available() {
+        assert!(u.denoise_ms > 0.0);
+    }
     // 速さ優先で書いた PNG が読めること
     let img = image::open(&out).unwrap();
     assert_eq!((img.width(), img.height()), (1920, 1080));

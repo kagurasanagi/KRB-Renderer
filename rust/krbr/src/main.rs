@@ -164,6 +164,15 @@ struct RenderArgs {
     /// write template <name>.krbr\board.toml and environment.toml (existing files are kept)
     #[arg(long)]
     init: bool,
+    /// denoise with OIDN (default: on for watch, off for render/view)
+    #[arg(long, overrides_with = "no_denoise")]
+    denoise: bool,
+    /// do not denoise
+    #[arg(long)]
+    no_denoise: bool,
+    /// mix of the denoised and the noisy image (0..1; 1 = OIDN result as is)
+    #[arg(long, default_value_t = 1.0)]
+    denoise_strength: f32,
     /// enable the Vulkan validation layer
     #[arg(long)]
     validate: bool,
@@ -250,6 +259,8 @@ impl RenderArgs {
             no_cache: self.no_cache,
             no_kicad_cli: self.no_kicad_cli,
             init: self.init,
+            denoise: if self.no_denoise { Some(false) } else if self.denoise { Some(true) } else { None },
+            denoise_strength: self.denoise_strength.clamp(0.0, 1.0),
             validate: self.validate,
             spectral: if self.spectral { Some(true) } else { None },
             lens: self.lens.clone(),

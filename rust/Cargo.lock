@@ -1517,6 +1517,7 @@ dependencies = [
  "krbr-geom",
  "krbr-kicad",
  "krbr-scene",
+ "libloading",
 ]
 
 [[package]]

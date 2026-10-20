@@ -4,7 +4,8 @@ use std::time::Instant;
 
 use crate::gpu_scene::GpuScene;
 use crate::image_io::ImageF;
-use crate::integrator::{FrameParams, Progressive};
+use crate::denoiser::{DenoiseQuality, Denoiser};
+use crate::integrator::{xyz_to_linear_srgb, FrameParams, Progressive};
 use crate::vk::Context;
 
 #[derive(Debug, Clone)]
@@ -14,6 +15,8 @@ pub struct RenderSettings {
     pub spp: u32,
     pub integrator: String,
     pub frame: FrameParams,
+    /// ノイズ除去（OIDN）もする：品質と、元の画像と混ぜる強さ（0..1）
+    pub denoise: Option<(DenoiseQuality, f32)>,
 }
 
 pub struct RenderOutput {
@@ -21,6 +24,8 @@ pub struct RenderOutput {
     pub albedo: ImageF,
     pub normal: ImageF,
     pub seconds: f64,
+    /// ノイズ除去した画像（リニア sRGB）。使えなければ None
+    pub denoised: Option<ImageF>,
 }
 
 pub fn render_offscreen(ctx: &Context, scene: &GpuScene<'_>, s: &RenderSettings) -> Result<RenderOutput, String> {
@@ -44,5 +49,29 @@ pub fn render_offscreen(ctx: &Context, scene: &GpuScene<'_>, s: &RenderSettings)
     let seconds = t0.elapsed().as_secs_f64();
     let aov = prog.readback();
     krbr_core::info!("render finished in {:.2} s ({:.1} ms/spp)", seconds, seconds * 1000.0 / s.spp.max(1) as f64);
-    Ok(RenderOutput { color: aov.color, albedo: aov.albedo, normal: aov.normal, seconds })
+    let denoised = s.denoise.and_then(|(q, strength)| match Denoiser::new(ctx, prog.targets(), q) {
+        Ok(d) => {
+            ctx.submit_and_wait(|_, cmd| d.record_prepare(cmd));
+            match d.execute() {
+                Ok(ms) => {
+                    ctx.submit_and_wait(|_, cmd| d.record_output(cmd, strength));
+                    let mut img = d.read_output();
+                    if prog.xyz_output() {
+                        xyz_to_linear_srgb(&mut img);
+                    }
+                    krbr_core::info!("denoised in {:.0} ms ({}, quality {}, strength {:.2})", ms, d.device_name(), q.name(), strength);
+                    Some(img)
+                }
+                Err(e) => {
+                    krbr_core::warn!("{e}; writing the noisy image only");
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            krbr_core::warn!("denoiser not available ({e}); writing the noisy image only");
+            None
+        }
+    });
+    Ok(RenderOutput { color: aov.color, albedo: aov.albedo, normal: aov.normal, seconds, denoised })
 }

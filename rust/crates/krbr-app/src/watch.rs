@@ -8,7 +8,7 @@ use ash::vk;
 use krbr_core::{info, warn, FileWatcher};
 use krbr_render::tonemapper::{DisplayMode, Tonemapper};
 use krbr_render::vk::memory_barrier;
-use krbr_render::{image_io, Context, ContextOptions, FrameParams, GpuScene, Progressive};
+use krbr_render::{image_io, Context, ContextOptions, DenoiseQuality, Denoiser, FrameParams, GpuScene, Progressive};
 
 use crate::kicad_cli::{plot_stroke_silk, SilkPlot};
 use crate::prepare::{frame_params, initial_camera, prepare_scene, PreparedScene, ReloadStats, RenderOptions};
@@ -21,7 +21,7 @@ pub struct WatchOptions {
     pub max_updates: u32,
 }
 
-/// 1 回の更新の内訳（C++ 版 WatchUpdate。ノイズ除去は Rust 版では未対応）
+/// 1 回の更新の内訳（C++ 版 WatchUpdate）
 #[derive(Debug, Clone, Default)]
 pub struct WatchUpdate {
     /// 保存による更新か（false：裏で分割していた 3D モデルが揃った、または線フォントの文字を書き出し直した）
@@ -34,6 +34,8 @@ pub struct WatchUpdate {
     pub gpu_ms: f64,
     pub render_ms: f64,
     pub write_ms: f64,
+    /// ノイズ除去（OIDN）にかかった時間（render_ms の内訳。しなければ 0）
+    pub denoise_ms: f64,
     pub stats: ReloadStats,
     pub pending_models: usize,
 }
@@ -68,8 +70,10 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
     prep.env.rgba = Vec::new();
     // 最初の描画の間の保存も取りこぼさないよう、先に監視を始める
     let mut watcher = FileWatcher::with_defaults(&prep.board.file);
-    let mut r = Renderer { ctx: &ctx, integrator: prep.cfg.integrator.clone(), width: w, height: h, spp, exposure: prep.cfg.exposure_ev, frame };
-    let (render_ms, write_ms) = r.render_and_write(&gpu, &out)?;
+    // ノイズ除去は既定で有効（C++ 版と同じ。--no-denoise で無効）
+    let denoise = common.denoise.unwrap_or(true);
+    let mut r = Renderer { ctx: &ctx, integrator: prep.cfg.integrator.clone(), width: w, height: h, spp, exposure: prep.cfg.exposure_ev, frame, denoise, denoise_strength: common.denoise_strength, denoiser: None };
+    let (render_ms, write_ms, _) = r.render_and_write(&gpu, &out)?;
     info!("watch: wrote {} ({}x{}, {} spp, render {:.0} ms, write {:.0} ms); watching {} for saves", out.display(), w, h, spp, render_ms, write_ms, prep.board.file.display());
     if !on_event(WatchEvent::Ready(&out)) {
         return Ok(());
@@ -144,14 +148,14 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
         prep.scene = scene;
         gpu.rebuild_geometry(&prep.scene, prep.cfg.scene.bump_intensity);
         u.gpu_ms = ms_since(t1);
-        (u.render_ms, u.write_ms) = r.render_and_write(&gpu, &out)?;
+        (u.render_ms, u.write_ms, u.denoise_ms) = r.render_and_write(&gpu, &out)?;
         if saved {
             u.since_save_ms = watcher.saved_at().and_then(|t| t.elapsed().ok()).map(|e| e.as_secs_f64() * 1000.0).unwrap_or(0.0);
             let s = &u.stats;
             let meshing = if u.pending_models > 0 { format!(", {} model(s) meshing in background", u.pending_models) } else { String::new() };
             info!(
-                "watch: updated {:.0} ms after save (reload {:.0} [parse {:.0}, {} tiles], gpu {:.0}, render {:.0}, write {:.0}); {} added, {} changed, {} removed{}",
-                u.since_save_ms, u.reload_ms, s.parse_ms, s.tiles_rebuilt, u.gpu_ms, u.render_ms, u.write_ms, s.diff.added, s.diff.changed, s.diff.removed, meshing
+                "watch: updated {:.0} ms after save (reload {:.0} [parse {:.0}, {} tiles], gpu {:.0}, render {:.0} [denoise {:.0}], write {:.0}); {} added, {} changed, {} removed{}",
+                u.since_save_ms, u.reload_ms, s.parse_ms, s.tiles_rebuilt, u.gpu_ms, u.render_ms, u.denoise_ms, u.write_ms, s.diff.added, s.diff.changed, s.diff.removed, meshing
             );
         } else if silk {
             info!("watch: updated (background silkscreen plot finished)");
@@ -200,11 +204,15 @@ struct Renderer<'a> {
     spp: u32,
     exposure: f32,
     frame: FrameParams,
+    /// ノイズ除去をする・強さ・OIDN（最初の描画で作り、以後は使い回す。作れなければ None のまま）
+    denoise: bool,
+    denoise_strength: f32,
+    denoiser: Option<Denoiser<'a>>,
 }
 
-impl Renderer<'_> {
-    /// 戻り値：(描画と読み戻しの ms, 書き出しの ms)
-    fn render_and_write(&mut self, gpu: &GpuScene<'_>, out: &PathBuf) -> anyhow::Result<(f64, f64)> {
+impl<'a> Renderer<'a> {
+    /// 戻り値：(描画と読み戻しの ms, 書き出しの ms, そのうちノイズ除去の ms)
+    fn render_and_write(&mut self, gpu: &GpuScene<'_>, out: &PathBuf) -> anyhow::Result<(f64, f64, f64)> {
         let t0 = Instant::now();
         // 形状を作り直すと積分器の参照先も変わるので、更新のたびに作る（C++ 版の rebuildIntegrator と同じ）
         let mut prog = Progressive::new(self.ctx, gpu, &self.integrator, self.width, self.height, self.frame.clone()).map_err(|e| anyhow::anyhow!(e))?;
@@ -219,12 +227,45 @@ impl Renderer<'_> {
             self.ctx.submit_and_wait(|_, cmd| prog.record(cmd, n));
             left -= n;
         }
-        let img = tone.output();
+        // ノイズ除去（OIDN のデバイスとバッファは使い回し、累積の画像だけ参照し直す）
+        if self.denoise && self.denoiser.is_none() {
+            self.denoise = false; // 作れなければ以後は試さない
+            match Denoiser::new(self.ctx, prog.targets(), DenoiseQuality::High) {
+                Ok(d) => {
+                    self.denoiser = Some(d);
+                    self.denoise = true;
+                }
+                Err(e) => warn!("watch: denoiser not available ({e}); writing the noisy image"),
+            }
+        }
+        let mut denoise_ms = 0.0;
+        let mut tone_denoised = None;
+        if let Some(d) = &self.denoiser {
+            d.rebind(prog.targets());
+            self.ctx.submit_and_wait(|_, cmd| d.record_prepare(cmd));
+            match d.execute() {
+                Ok(ms) => {
+                    denoise_ms = ms;
+                    let t = prog.targets();
+                    tone_denoised = Some(Tonemapper::with_views(self.ctx, d.output().view, t.albedo.view, t.normal.view, t.width, t.height).map_err(|e| anyhow::anyhow!(e))?);
+                }
+                Err(e) => warn!("watch: {e}"),
+            }
+        }
+        let (tm, strength) = match &tone_denoised {
+            Some(t) => (t, self.denoise_strength),
+            None => (&tone, 0.0),
+        };
+        let img = tm.output();
         let (w, h) = (img.width, img.height);
         let mut rb = self.ctx.create_buffer(w as u64 * h as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST, true, true);
         let (image, rbb, xyz) = (img.image, rb.buffer, prog.xyz_output());
+        let denoiser = self.denoiser.as_ref().filter(|_| tone_denoised.is_some());
         self.ctx.submit_and_wait(|dev, cmd| {
-            tone.record(cmd, self.exposure, DisplayMode::Beauty, xyz);
+            if let Some(d) = denoiser {
+                d.record_output(cmd, strength);
+            }
+            tm.record(cmd, self.exposure, DisplayMode::Beauty, xyz);
             memory_barrier(dev, cmd, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_READ);
             let region = vk::BufferImageCopy::default()
                 .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
@@ -239,6 +280,6 @@ impl Renderer<'_> {
         let render_ms = ms_since(t0);
         let t1 = Instant::now();
         image_io::save_png_rgba8_fast(out, w, h, &px).map_err(|e| anyhow::anyhow!("{}: {e}", out.display()))?;
-        Ok((render_ms, ms_since(t1)))
+        Ok((render_ms, ms_since(t1), denoise_ms))
     }
 }

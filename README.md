@@ -267,6 +267,7 @@ target\release\krbr.exe watch E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK35
 cargo test
 cargo test --release -p krbr-app --test watch -- --ignored --nocapture      # 保存の監視（GPU と KiCad の 3D モデルが要る）
 cargo test --release -p krbr-app --test material -- --ignored --nocapture   # 材質の CLI（KiCad の 3D モデルが要る）
+cargo test --release -p krbr-app --test denoise -- --ignored --nocapture    # ノイズ除去（GPU と OIDN の DLL が要る）
 ```
 
 Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフォルダの `shaders\`、環境変数 `KRBR_SHADER_DIR`、開発中は `<リポジトリ>\build\release\shaders` の順で探します。STEP 変換器 DLL は exe と同じフォルダの `step\krbr_step.dll`、無ければ開発中は `<リポジトリ>\build\release\step\krbr_step.dll` です（どちらも exe のフォルダから上へたどって探すので、`deps\` に置かれるテストの実行ファイルからも見つかります）。ビューアの操作パネルは egui なので見た目は C++ 版（Dear ImGui）と違いますが、項目・操作・キーは同じです。Rust 版ではパネルをウィンドウの右端に上下いっぱいで固定し（幅は境目のドラッグで変更、× で閉じる）、3D 表示はその残りの領域に描きます。上端のメニュー（ファイル／表示／ヘルプ）の「表示」→「設定パネル」か `F1` / `Tab` で再表示できます。
@@ -288,6 +289,12 @@ Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフ�
 
 **ビューアで材質を割り当てる（Rust 版）**：3D 表示の部品を**クリック**すると選び（ドラッグは回転、Ctrl ＋クリックはピント合わせのまま）、輪郭線をオレンジで重ねます（画像には入りません。実レンズのときは投影が違うので出しません）。設定パネルの「選んだ部品」に、部位ごとの材質（材質ライブラリから選べる）と、決まった段階が出ます。書き込む先は「この部品」（`overrides.toml` の部品番号）、「このモデル」（`overrides.toml` の 3D モデル）、「全基板」（`%APPDATA%\krbr\model_map.toml`）から選び、材質を選ぶとすぐ書いて描き直します（`krbr material set` と同じ書き方）。「上書きを消す」で規則どおりに戻せます。3D モデルが見つからない代わりの箱を選んだときは、探したパスと理由を出します。
 
+**ノイズ除去（Rust 版）**：C++ 版（上の「ノイズ除去（OIDN）」）と同じ仕組みです。OIDN の DLL（`OpenImageDenoise.dll` ほか一式）は実行時に読み、exe と同じフォルダ、無ければ開発中は `<リポジトリ>\build\release\` から探します（無ければノイズ除去だけが使えず、ほかはそのまま動きます）。Vulkan と同じ GPU の CUDA デバイスでバッファを共有して動かし（`VK_KHR_external_memory_win32`）、共有できなければ CPU デバイスにします。ビューアは既定で無効（パネルの「ノイズ除去 (OIDN)」、`--denoise`、`D` キー。かける間隔は C++ 版と同じ）、`krbr watch` は既定で有効（`--no-denoise`）、`krbr render --denoise` は `<名前>_denoised.png / .exr` も書き出します。
+
+- **強さ**：OIDN 自体には強さの設定が無いので、ノイズ除去した画像と元の画像を混ぜる割合として調整します（パネルのスライダー、`--denoise-strength`。0〜1、既定 1 で OIDN の結果そのまま。下げると細部やざらつきが少し残る）。混ぜる処理は軽い（`shaders/denoise_blend.comp`）ので、ビューアではスライダーを動かすとすぐ反映されます。
+- ビューアで `S` を押したとき、ノイズ除去した画像を表示していれば `<名前>_NNN_denoised.png / .exr` も書きます（表示と同じ強さ）。
+- この PC（RTX 3080 Ti）では、1920x1080 の high で約 14 ms、960x540 で 5 ms。CPU デバイス（開発用に `KRBR_DENOISE_DEVICE=cpu` で強制できる）では 960x540 で約 0.2 秒です。4 spp の画像をノイズ除去すると、1024 spp の参照との差の平均が約 70% 減ります（RGB・分光とも）。
+
 **exe のアイコンへのドラッグ＆ドロップ**：`krbr.exe`（またはそのショートカット）に `.kicad_pcb` をドロップすると、ビューアで開きます。このとき（エクスプローラーからの起動）は作業フォルダを基板のフォルダにするので、`S` で保存した画像は `<基板のフォルダ>\out\` に入ります。エラーで終わるときは、コンソールが閉じる前に Enter を待ちます。
 
 | 段階 | 内容 | 状況 |
@@ -295,8 +302,8 @@ Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフ�
 | 1 | S 式パーサ、基板の構造（`krbr-kicad`）、3D モデルのパス解決、`info` | 済（C++ 版と同じ結果：250 部品・234 モデル解決） |
 | 2 | STEP → メッシュの変換器を C++ の薄い DLL（`stepkrbr_step.dll`）に切り出し、Rust はキャッシュと DLL だけを読む（`krbr-model`、`krbr models`） | 済（C++ 版と同じキャッシュを共有：38 モデル・21 万三角形） |
 | 3 | 基板メッシュ、凹凸タイル、層の多角形、距離場（`krbr-geom`：Clipper2・earcut の crate、`krbr geom`） | 済（外形・穴の数は C++ 版と一致。凹凸は 168 万三角形、C++ 版 150 万：Clipper2 の丸め継ぎ目の分割数の違い） |
-| 4 | 描画（`krbr-scene`：材質・割り当て・分光・設定、`krbr-render`：ash でデバイス・BLAS/TLAS・カーネル（ray query / RT パイプライン）・累積・読み戻し・PNG/EXR）。`krbr render` | 済（同じシェーダ・同じカメラで C++ 版と同じ画像。kicad-cli の線フォントのシルクも済。`--init` も済。未移植：ノイズ除去、層テクスチャ方式） |
-| 5 | ビューア（winit + egui、`krbr-app`）、監視、ノイズ除去（OIDN）、材質 CLI | ビューアは済（`krbr <pcb> --hdr ...` でウィンドウ。パネル・マウス操作・キー・保存・テストモードは C++ 版と同じ。保存の監視と差分更新・`krbr watch`・kicad-cli のシルクも済。`material list / show / set`・`mask list`・`probe` も済（表示は C++ 版と同じ。設定ファイルは互いに読める）。未：ノイズ除去） |
+| 4 | 描画（`krbr-scene`：材質・割り当て・分光・設定、`krbr-render`：ash でデバイス・BLAS/TLAS・カーネル（ray query / RT パイプライン）・累積・読み戻し・PNG/EXR）。`krbr render` | 済（同じシェーダ・同じカメラで C++ 版と同じ画像。kicad-cli の線フォントのシルクも済。`--init` も済。ノイズ除去（`--denoise`）も済。未移植：層テクスチャ方式） |
+| 5 | ビューア（winit + egui、`krbr-app`）、監視、ノイズ除去（OIDN）、材質 CLI | ビューアは済（`krbr <pcb> --hdr ...` でウィンドウ。パネル・マウス操作・キー・保存・テストモードは C++ 版と同じ。保存の監視と差分更新・`krbr watch`・kicad-cli のシルクも済。`material list / show / set`・`mask list`・`probe` も済（表示は C++ 版と同じ。設定ファイルは互いに読める）。ノイズ除去（OIDN）も済） |
 
 ## テスト
 

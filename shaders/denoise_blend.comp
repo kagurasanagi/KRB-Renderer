@@ -1,0 +1,25 @@
+#version 460
+// ノイズ除去（OIDN）の結果を、トーンマッピングに渡す画像へ写す。strength で元の画像と混ぜる（1 で OIDN の結果そのまま）
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D accumColor;
+layout(set = 0, binding = 1, std430) readonly buffer DenoisedBuf { vec4 denoisedBuf[]; };
+layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D outImage;
+
+layout(push_constant) uniform Push {
+    uint width;
+    uint height;
+    float strength;
+} pc;
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= pc.width || p.y >= pc.height) return;
+    ivec2 ip = ivec2(p);
+    vec4 c = imageLoad(accumColor, ip);
+    float inv = c.a > 0.0 ? 1.0 / c.a : 0.0;
+    vec3 noisy = max(c.rgb * inv, vec3(0.0));
+    vec3 d = denoisedBuf[p.y * pc.width + p.x].rgb;
+    // A はトーンマッピングで割る数（1）
+    imageStore(outImage, ip, vec4(mix(noisy, d, clamp(pc.strength, 0.0, 1.0)), 1.0));
+}

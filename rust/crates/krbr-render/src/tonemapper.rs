@@ -41,8 +41,13 @@ pub struct Tonemapper<'a> {
 impl<'a> Tonemapper<'a> {
     /// 出力（RGBA8、GENERAL レイアウト）を作る。targets が変わったら作り直す
     pub fn new(ctx: &'a Context, targets: &RenderTargets) -> Result<Self, String> {
+        Self::with_views(ctx, targets.color.view, targets.albedo.view, targets.normal.view, targets.width, targets.height)
+    }
+
+    /// 色の画像を差し替えて作る（ノイズ除去の結果を表示するとき。A が割る数になっている画像）
+    pub fn with_views(ctx: &'a Context, color: vk::ImageView, albedo: vk::ImageView, normal: vk::ImageView, width: u32, height: u32) -> Result<Self, String> {
         let dev = &ctx.device;
-        let out = ctx.create_image_2d(targets.width, targets.height, 1, vk::Format::R8G8B8A8_UNORM, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC);
+        let out = ctx.create_image_2d(width, height, 1, vk::Format::R8G8B8A8_UNORM, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC);
         let img = out.image;
         ctx.submit_and_wait(|dev, cmd| {
             image_barrier(dev, cmd, img, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, 1);
@@ -53,7 +58,7 @@ impl<'a> Tonemapper<'a> {
         let pool = unsafe { dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes), None) }.map_err(|e| format!("{e:?}"))?;
         let layouts = [set_layout];
         let set = unsafe { dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts)) }.map_err(|e| format!("{e:?}"))?[0];
-        let infos: Vec<vk::DescriptorImageInfo> = [targets.color.view, targets.albedo.view, targets.normal.view, out.view].iter().map(|v| vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: *v, image_layout: vk::ImageLayout::GENERAL }).collect();
+        let infos: Vec<vk::DescriptorImageInfo> = [color, albedo, normal, out.view].iter().map(|v| vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: *v, image_layout: vk::ImageLayout::GENERAL }).collect();
         let writes: Vec<vk::WriteDescriptorSet> = (0..4).map(|i| vk::WriteDescriptorSet::default().dst_set(set).dst_binding(i as u32).descriptor_type(vk::DescriptorType::STORAGE_IMAGE).image_info(std::slice::from_ref(&infos[i]))).collect();
         unsafe { dev.update_descriptor_sets(&writes, &[]) };
         let pcr = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::COMPUTE, offset: 0, size: std::mem::size_of::<TonemapPush>() as u32 }];
@@ -66,7 +71,7 @@ impl<'a> Tonemapper<'a> {
         let r = unsafe { dev.create_compute_pipelines(vk::PipelineCache::null(), &[vk::ComputePipelineCreateInfo::default().stage(stage).layout(layout)], None) };
         unsafe { dev.destroy_shader_module(sm, None) };
         let pipeline = r.map_err(|(_, e)| format!("vkCreateComputePipelines(tonemap): {e:?}"))?[0];
-        Ok(Self { ctx, width: targets.width, height: targets.height, out, set_layout, pool, set, layout, pipeline })
+        Ok(Self { ctx, width, height, out, set_layout, pool, set, layout, pipeline })
     }
 
     /// xyz_input: 累積が CIE XYZ（分光モード）なら true

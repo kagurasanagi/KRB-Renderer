@@ -9,7 +9,7 @@ use krbr_geom::tiles::ReliefTileCache;
 use krbr_kicad::{diff_boards, load_board, Board, BoardDiff, ModelResolver};
 use krbr_model::{MeshParams, ModelLibrary};
 use krbr_render::studio_env::STUDIO;
-use krbr_render::{build_env_distribution, image_io, is_builtin, load_environment_map, render_offscreen, Context, ContextOptions, FrameParams, GpuScene, RenderSettings};
+use krbr_render::{build_env_distribution, image_io, DenoiseQuality, is_builtin, load_environment_map, render_offscreen, Context, ContextOptions, FrameParams, GpuScene, RenderSettings};
 use krbr_scene::config::{apply_mask_color_spec, load_project_config, write_default_configs, ProjectConfig};
 use krbr_scene::scene::{build_scene, load_material_setup, MaterialSetup, SceneContext};
 use krbr_scene::{frame_camera, orbit_camera, Camera, CameraParams, LensModel, MaterialResolver, Scene, SceneOptions};
@@ -51,6 +51,10 @@ pub struct RenderOptions {
     pub no_kicad_cli: bool,
     /// <名前>.krbr\board.toml と environment.toml のひな形を書く（あるものは上書きしない）
     pub init: bool,
+    /// ノイズ除去（OIDN）。None ならコマンドの既定（render・view は無効、watch は有効）
+    pub denoise: Option<bool>,
+    /// ノイズ除去した画像と元の画像を混ぜる強さ（0..1、1 で OIDN の結果そのまま）
+    pub denoise_strength: f32,
 }
 
 pub struct PreparedScene {
@@ -353,7 +357,8 @@ pub fn cmd_render(o: &RenderOptions) -> anyhow::Result<()> {
         let mut gpu = GpuScene::new(&ctx);
         gpu.build(&prep.scene, &prep.env, &prep.dist, cfg.scene.bump_intensity);
         prep.env.rgba = Vec::new();
-        let rs = RenderSettings { width: cfg.width, height: cfg.height, spp: cfg.spp, integrator: cfg.integrator.clone(), frame: frame_params(cfg, cam, o.seed) };
+        let denoise = o.denoise.unwrap_or(false).then_some((DenoiseQuality::High, o.denoise_strength));
+        let rs = RenderSettings { width: cfg.width, height: cfg.height, spp: cfg.spp, integrator: cfg.integrator.clone(), frame: frame_params(cfg, cam, o.seed), denoise };
         render_offscreen(&ctx, &gpu, &rs).map_err(|e| anyhow::anyhow!("render failed: {e}"))?
     };
 
@@ -373,6 +378,12 @@ pub fn cmd_render(o: &RenderOptions) -> anyhow::Result<()> {
     report(image_io::save_exr(&alb, &result.albedo), &alb);
     let nrm = out_dir.join(format!("{stem}_normal.exr"));
     report(image_io::save_exr(&nrm, &result.normal), &nrm);
+    if let Some(d) = &result.denoised {
+        let png = out_dir.join(format!("{stem}_denoised.png"));
+        report(image_io::save_png_tonemapped(&png, d, cfg.exposure_ev), &png);
+        let exr = out_dir.join(format!("{stem}_denoised.exr"));
+        report(image_io::save_exr(&exr, d), &exr);
+    }
     write_missing_report(&prep.scene, &out_dir);
     if failures > 0 {
         anyhow::bail!("{failures} file(s) could not be written");

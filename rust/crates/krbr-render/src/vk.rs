@@ -173,6 +173,8 @@ pub struct Context {
     pub surface: vk::SurfaceKHR,
     pub surface_loader: Option<khr::surface::Instance>,
     pub swapchain_loader: Option<khr::swapchain::Device>,
+    /// VK_KHR_external_memory_win32（ノイズ除去 OIDN とバッファを共有する）。使えなければ None
+    pub external_memory_win32: Option<khr::external_memory_win32::Device>,
     debug: Option<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
 }
 
@@ -260,6 +262,10 @@ impl Context {
         if info.atomic_float_add {
             dev_exts.push(ash::ext::shader_atomic_float::NAME.as_ptr());
         }
+        let external_memory = cfg!(windows) && has_ext(&exts, khr::external_memory_win32::NAME);
+        if external_memory {
+            dev_exts.push(khr::external_memory_win32::NAME.as_ptr());
+        }
         let prio_ext = if opts.low_queue_priority {
             if has_ext(&exts, khr::global_priority::NAME) {
                 Some(khr::global_priority::NAME)
@@ -342,6 +348,7 @@ impl Context {
         let as_device = khr::acceleration_structure::Device::new(&instance, &device);
         let rt_device = use_rt_pipeline.then(|| khr::ray_tracing_pipeline::Device::new(&instance, &device));
         let swapchain_loader = surface_loader.as_ref().map(|_| khr::swapchain::Device::new(&instance, &device));
+        let external_memory_win32 = external_memory.then(|| khr::external_memory_win32::Device::new(&instance, &device));
 
         krbr_core::info!(
             "GPU: {} (Vulkan {}.{}.{}), queue family {}{}{}, {}",
@@ -354,7 +361,7 @@ impl Context {
             if low_prio { ", low global priority" } else { "" },
             if use_rt_pipeline { "ray tracing pipeline (no ray_query)" } else { "ray query" }
         );
-        Ok(Self { entry, instance, physical, device, queue, queue_family, allocator: Arc::new(Mutex::new(allocator)), pool, fence, info, as_props, rt_props, as_device, rt_device, use_rt_pipeline, surface, surface_loader, swapchain_loader, debug })
+        Ok(Self { entry, instance, physical, device, queue, queue_family, allocator: Arc::new(Mutex::new(allocator)), pool, fence, info, as_props, rt_props, as_device, rt_device, use_rt_pipeline, surface, surface_loader, swapchain_loader, external_memory_win32, debug })
     }
 
     /// レイを飛ばすシェーダの段階（バリア用）
