@@ -310,7 +310,10 @@ struct App {
     need_recreate: bool,
     frames: u32,
     save_index: u32,
-    last_title: Instant,
+    /// 今の累積の計測：サンプルを描いたフレームの時間の合計（一時停止・完了の間は増えない）、GPU がサンプルを描いた時間の合計、そのサンプル数
+    accum_wall: Duration,
+    accum_gpu_ms: f64,
+    accum_measured: u32,
     last_change_at: Instant,
     last_frame_ms: f64,
     last_gpu_ms: f64,
@@ -341,6 +344,19 @@ fn viewport_px(r: egui::Rect, ppp: f32, w: u32, h: u32) -> Viewport {
 }
 
 const TARGET_FRAME_MS: f64 = 10.0; // 60fps（16.7 ms）に収まるよう、表示処理の分を残す
+
+/// 経過時間の表示：1 分未満は「12.3 秒」、それ以上は「m:ss」「h:mm:ss」
+fn format_duration(secs: f64) -> String {
+    if secs < 60.0 {
+        return format!("{secs:.1} 秒");
+    }
+    let t = secs.round() as u64;
+    if t < 3600 {
+        format!("{}:{:02}", t / 60, t % 60)
+    } else {
+        format!("{}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60)
+    }
+}
 
 /// 最大のサンプル数は 2 の累乗にそろえる（それ以上で最も近い 2 の累乗に切り上げる。16 .. 65536）
 fn pow2_spp(spp: u32) -> u32 {
@@ -520,23 +536,6 @@ impl App {
     }
 
     fn panel(&mut self, ui: &mut egui::Ui) {
-        let (samples, max_spp) = (self.gpu.as_ref().unwrap().prog.samples(), self.st.max_spp);
-        ui.label(format!("{} / {} spp   {:.1} ms/frame (GPU {:.1} ms)", samples, max_spp, self.last_frame_ms, self.last_gpu_ms));
-        ui.add(egui::ProgressBar::new((samples as f32 / max_spp.max(1) as f32).min(1.0)));
-        if self.reload_job.is_some() {
-            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), "基板を読み直し中...");
-        }
-        if self.silk_job.is_some() {
-            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), "線フォントの文字を書き出し中（kicad-cli）...");
-        }
-        if self.prep.scene.pending_models > 0 {
-            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), format!("3D モデルを分割中: {}（それまでは箱で表示）", self.prep.scene.pending_models));
-        }
-        if !self.last_update.is_empty() {
-            ui.weak(&self.last_update);
-        }
-
-        ui.separator();
         self.selection_panel(ui);
 
         let st = &mut self.st;
@@ -1131,7 +1130,6 @@ impl App {
     /// メニューの下のボタン列（レンダリングの一時停止）
     fn tool_bar(&mut self, root: &mut egui::Ui) {
         let st = &mut self.st;
-        let samples = self.gpu.as_ref().map(|g| g.prog.samples()).unwrap_or(0);
         egui::Panel::top("toolbar").show(root, |ui| {
             ui.horizontal(|ui| {
                 let label = if st.paused { "▶ 再開" } else { "■ 一時停止" };
@@ -1139,8 +1137,72 @@ impl App {
                 if ui.add(egui::Button::new(label).selected(st.paused)).on_hover_text(tip).clicked() {
                     st.paused = !st.paused;
                 }
+            });
+        });
+    }
+
+    /// 画面の下端のステータスバー：状態、spp と進み具合、経過時間、1 サンプルあたりの平均、残りの予想、描画の条件。
+    /// 読み直しなどの知らせがあれば 2 行目に出す
+    fn status_bar(&mut self, root: &mut egui::Ui) {
+        let Some(g) = self.gpu.as_ref() else { return };
+        let st = &self.st;
+        let (samples, max_spp) = (g.prog.samples(), st.max_spp);
+        let done = samples >= max_spp;
+        let yellow = egui::Color32::from_rgb(255, 204, 77);
+        let measured = self.accum_measured.max(1) as f64;
+        let wall_per = self.accum_wall.as_secs_f64() / measured;
+        let info = &g.ctx.info;
+        let method = if g.ctx.use_rt_pipeline { "ray tracing pipeline" } else { "ray query" };
+        let mut notes: Vec<(String, bool)> = Vec::new();
+        if self.reload_job.is_some() {
+            notes.push(("基板を読み直し中...".into(), true));
+        }
+        if self.silk_job.is_some() {
+            notes.push(("線フォントの文字を書き出し中（kicad-cli）...".into(), true));
+        }
+        if self.prep.scene.pending_models > 0 {
+            notes.push((format!("3D モデルを分割中: {}（それまでは箱で表示）", self.prep.scene.pending_models), true));
+        }
+        if !self.last_update.is_empty() {
+            notes.push((self.last_update.clone(), false));
+        }
+        egui::Panel::bottom("status").show(root, |ui| {
+            ui.horizontal(|ui| {
                 if st.paused {
-                    ui.colored_label(egui::Color32::from_rgb(255, 204, 77), format!("一時停止中（{} spp）", samples));
+                    ui.colored_label(yellow, "一時停止中");
+                } else if done {
+                    ui.colored_label(egui::Color32::from_rgb(120, 200, 120), "完了");
+                } else {
+                    ui.label("レンダリング中");
+                }
+                ui.add(egui::ProgressBar::new((samples as f32 / max_spp.max(1) as f32).min(1.0)).desired_width(140.0).text(format!("{samples} / {max_spp} spp")));
+                ui.separator();
+                ui.label(format!("経過 {}", format_duration(self.accum_wall.as_secs_f64())))
+                    .on_hover_text("今の累積を始めてからレンダリングにかかった時間（一時停止の間と完了後は数えない。視点などを変えると 0 から）");
+                if self.accum_measured > 0 {
+                    ui.label(format!("平均 {:.1} ms/spp（GPU {:.1} ms）", wall_per * 1000.0, self.accum_gpu_ms / measured))
+                        .on_hover_text("1 サンプルあたりの時間：経過時間 ÷ サンプル数（括弧内は GPU がサンプルを描いた時間だけ）");
+                    if !done && !st.paused {
+                        ui.label(format!("残り 約 {}", format_duration(wall_per * (max_spp - samples) as f64)));
+                    }
+                }
+            });
+            // 2 行目：描画の条件と、読み直しなどの知らせ（幅が足りなければ折り返す）
+            ui.horizontal_wrapped(|ui| {
+                ui.weak(format!("{}・{}", g.prog.integrator_name().to_uppercase(), if st.spectral { "分光" } else { "RGB" }));
+                ui.separator();
+                ui.weak(format!("{}×{}", st.viewport.w, st.viewport.h));
+                ui.separator();
+                ui.weak(format!("EV {:+.2}", st.exposure));
+                ui.separator();
+                ui.weak(format!("{}（{}）", info.name, method));
+                for (text, busy) in &notes {
+                    ui.separator();
+                    if *busy {
+                        ui.colored_label(yellow, text);
+                    } else {
+                        ui.weak(text);
+                    }
                 }
             });
         });
@@ -1228,6 +1290,7 @@ impl App {
     }
 
     fn frame(&mut self) -> Result<(), String> {
+        let frame_t0 = Instant::now();
         let Some(window) = &self.window else { return Ok(()) };
         let size = window.inner_size();
         let (fbw, fbh) = (size.width, size.height);
@@ -1246,6 +1309,7 @@ impl App {
         let full = egui_ctx.run_ui(raw, |root| {
             self.menu_bar(root);
             self.tool_bar(root);
+            self.status_bar(root);
             if self.st.show_panel {
                 self.side_panel(root);
             }
@@ -1463,6 +1527,12 @@ impl App {
         if g.prog.samples() < self.prev_samples {
             self.accum_epoch += 1;
         }
+        if g.prog.samples() == 0 {
+            // 累積をやり直した：経過時間と平均も 0 から
+            self.accum_wall = Duration::ZERO;
+            self.accum_gpu_ms = 0.0;
+            self.accum_measured = 0;
+        }
         // このフレームでノイズ除去するか（画像の表示のときだけ）。C++ 版と同じ間隔：
         // GPU：動かしている間は毎フレーム fast、止まったら 150 ms ごとに high、収束時にもう一度。
         // CPU：数秒かかり画面が止まるので、収束時（最大 spp に達したとき）と D キー／ボタンのときだけ high でかける
@@ -1601,11 +1671,9 @@ impl App {
         if add > 0 {
             let per_sample = self.last_gpu_ms / add as f64;
             self.samples_per_frame = (TARGET_FRAME_MS / per_sample.max(0.05)).clamp(1.0, 64.0) as u32;
-        }
-        if self.last_title.elapsed().as_secs_f64() > 0.3 {
-            let paused = if self.st.paused { " (一時停止)" } else { "" };
-            self.window.as_ref().unwrap().set_title(&format!("{} - {} / {} spp{} - {:.1} ms/frame (GPU {:.1} ms) - EV {:+.2}", self.base_title, g.prog.samples(), max_spp, paused, self.last_frame_ms, self.last_gpu_ms, self.st.exposure));
-            self.last_title = Instant::now();
+            self.accum_wall += frame_t0.elapsed();
+            self.accum_gpu_ms += self.last_gpu_ms;
+            self.accum_measured += add;
         }
 
         if self.st.save_requested {
@@ -1636,6 +1704,7 @@ impl App {
 
         if last_test_frame {
             info!("test: {} frames, {} spp, last frame {:.1} ms (GPU {:.1} ms, {} spp/frame), swapchain {}x{} format {:?}, environment {}", self.frames, g.prog.samples(), self.last_frame_ms, self.last_gpu_ms, self.samples_per_frame, extent.width, extent.height, g.swap.format, self.env_path);
+            info!("test: rendering {:.2} s for {} spp, average {:.1} ms/spp (GPU {:.1} ms/spp)", self.accum_wall.as_secs_f64(), self.accum_measured, self.accum_wall.as_secs_f64() * 1000.0 / self.accum_measured.max(1) as f64, self.accum_gpu_ms / self.accum_measured.max(1) as f64);
             if let Some(p) = &self.vo.screenshot {
                 let ok = if let Some(mut b) = shot.take() {
                     let mut px = b.mapped_ref().unwrap().to_vec();
@@ -1911,7 +1980,9 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         need_recreate: false,
         frames: 0,
         save_index: 0,
-        last_title: Instant::now(),
+        accum_wall: Duration::ZERO,
+        accum_gpu_ms: 0.0,
+        accum_measured: 0,
         last_change_at: Instant::now(),
         last_frame_ms: 0.0,
         last_gpu_ms: 0.0,
