@@ -311,9 +311,14 @@ Shade surfaceAt(Hit hit, inout vec3 ns, inout Rng rng) {
     return s;
 }
 
-vec4 clampRadiance(vec4 c) {
-    float m = F.envParams.z;
-    if (m <= 0.0) return c;
+// 上限と比べる前に除く、推定のための倍率：カメラの重み（実レンズは絞りで遮られた光線の分を通り抜けた光線で補うので、
+// 絞るほど大きい）。カメラの光線を作ったところで設定する
+float gClampScale = 1.0;
+
+// 間接光の上限（ホタル対策）。terminated：代表波長以外を打ち切って代表波長を 4 倍にした寄与
+vec4 clampRadiance(vec4 c, bool terminated) {
+    if (F.envParams.z <= 0.0) return c;
+    float m = F.envParams.z * gClampScale * (terminated ? 4.0 : 1.0);
     float mx = max(max(c.x, c.y), max(c.z, c.w));
     return mx > m ? c * (m / mx) : c;
 }

@@ -49,7 +49,7 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
             } else if (st.prevPdf > 0.0) {  // prevPdf = 0 は基材の中など（中から抜けた光は捨てる）
                 float w = powerHeuristic(st.prevPdf, envLightPdfW(st.dir));
                 vec4 c = st.beta * Le * w;
-                L += depth >= 2u ? clampRadiance(c) : c;  // 間接光だけを抑える（ホタル対策）
+                L += depth >= 2u ? clampRadiance(c, st.terminated) : c;  // 間接光だけを抑える（ホタル対策）
             }
             break;
         }
@@ -69,7 +69,7 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
                 float cosL = dot(hit.ng, wo);
                 float lightPdfW = emitterPdfA(hm.emission.rgb) * hit.t * hit.t / max(cosL, 1e-6);
                 float w = st.prevPdf > 0.0 ? powerHeuristic(st.prevPdf, lightPdfW) : 1.0;
-                L += clampRadiance(st.beta * Le * w);
+                L += clampRadiance(st.beta * Le * w, st.terminated);
             }
         }
 
@@ -119,7 +119,7 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
                     float c = dot(ls.wi, nOut);
                     if (c > 0.0 && !(ls.isEnv ? occluded(pOut, ls.wi) : occludedDist(pOut, ls.wi, ls.dist * (1.0 - 1e-4)))) {
                         float w = powerHeuristic(ls.directPdfW, c * INV_PI);
-                        L += clampRadiance(st.beta * INV_PI * c * ls.Le * (w / ls.directPdfW));
+                        L += clampRadiance(st.beta * INV_PI * c * ls.Le * (w / ls.directPdfW), st.terminated);
                     }
                 }
             }
@@ -164,7 +164,7 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
         // 光源の直接サンプリング（NEE）。透過の方向は、物体自身にさえぎられるので試さない
         {
             vec4 c = directLightPt(s, p, ng, ns, t, b, v, st.beta, rng);
-            L += depth >= 1u ? clampRadiance(c) : c;
+            L += depth >= 1u ? clampRadiance(c, st.terminated) : c;
         }
 
         // BSDF サンプリング

@@ -102,7 +102,8 @@ vec4 connectVertices(LightVertex lv, SubPath cam, Shade cs, CamVertex cv, VcmCon
     vec3 dd = p1 - p0;
     float dl = length(dd);
     if (occludedDist(p0, dd / dl, dl)) return vec4(0.0);
-    return maskTerminated(cam.throughput * w * G * fc * fl * lv.throughput, cam.terminated || lv.links.w != 0u);
+    bool terminated = cam.terminated || lv.links.w != 0u;
+    return clampRadiance(maskTerminated(cam.throughput * w * G * fc * fl * lv.throughput, terminated), terminated);
 }
 
 // 近くの光源側の頂点とまとめる（merging）。カメラ側の throughput と正規化の係数もかける
@@ -138,10 +139,12 @@ vec4 mergeVertices(SubPath cam, Shade cs, CamVertex cv, VcmConst vc) {
             float wLight = lv.mis.x * vc.vcWeight + lv.mis.z * Mis(camDirPdfW);
             float wCamera = cam.dVCM * vc.vcWeight + cam.dVM * Mis(camRevPdfW);
             float w = 1.0 / (wLight + 1.0 + wCamera);
-            acc += maskTerminated(cam.throughput * w * f * lv.throughput, cam.terminated || lv.links.w != 0u);
+            // 上限は、打ち切りの有無が頂点ごとに違うので、まとめた頂点ごとにかける
+            bool terminated = cam.terminated || lv.links.w != 0u;
+            acc += clampRadiance(maskTerminated(cam.throughput * w * f * lv.throughput, terminated) * vc.vmNorm, terminated);
         }
     }
-    return acc * vc.vmNorm;
+    return acc;
 }
 
 void main() {
@@ -171,6 +174,7 @@ void main() {
     cam.dVM = 0.0;
     cam.terminated = cameraIsChromatic();
     cam.finiteLight = false;
+    gClampScale = cr.weight;
     cam.mediumSigma = vec4(0.0);
 
     vec4 L = vec4(0.0);
@@ -188,7 +192,7 @@ void main() {
                 float emissionPdfW = directPdfA / (PI * sceneRadius() * sceneRadius());
                 float wCamera = Mis(directPdfA) * cam.dVCM + Mis(emissionPdfW) * cam.dVC;
                 vec4 c = maskTerminated(cam.throughput * Le / (1.0 + wCamera), cam.terminated);
-                L += cam.pathLength >= 3u ? clampRadiance(c) : c;
+                L += cam.pathLength >= 3u ? clampRadiance(c, cam.terminated) : c;
             }
             break;
         }
@@ -219,7 +223,7 @@ void main() {
                 float emissionPdfW = directPdfA * max(dot(hit.ng, wo), 0.0) * INV_PI;
                 float wCamera = Mis(directPdfA) * cam.dVCM + Mis(emissionPdfW) * cam.dVC;
                 vec4 c = maskTerminated(cam.throughput * Le / (1.0 + wCamera), cam.terminated);
-                L += cam.pathLength >= 3u ? clampRadiance(c) : c;
+                L += cam.pathLength >= 3u ? clampRadiance(c, cam.terminated) : c;
             }
         }
         if (cam.pathLength == 1u) {
@@ -263,18 +267,18 @@ void main() {
             // s = 1：光源への直接サンプリング
             if (cam.pathLength + 1u <= maxPathLength()) {
                 vec4 c = maskTerminated(cam.throughput * directIllumination(cam, s, cv, vc, rng), cam.terminated);
-                L += cam.pathLength + 1u >= 3u ? clampRadiance(c) : c;
+                L += cam.pathLength + 1u >= 3u ? clampRadiance(c, cam.terminated) : c;
             }
             // s > 1：同じ番号の光源側の経路の頂点へつなぐ
             for (uint idx = pathHead[pathIdx]; idx != NO_VERTEX;) {
                 LightVertex lv = lightVerts[idx];
                 idx = lv.links.x;
                 if (lv.links.z + 1u + cam.pathLength > maxPathLength()) continue;
-                L += clampRadiance(connectVertices(lv, cam, s, cv, vc));
+                L += connectVertices(lv, cam, s, cv, vc);
             }
             // merging（VCM）
             if (useMerging()) {
-                L += clampRadiance(mergeVertices(cam, s, cv, vc));
+                L += mergeVertices(cam, s, cv, vc);
             }
         }
 

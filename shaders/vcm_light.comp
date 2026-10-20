@@ -44,8 +44,10 @@ void connectToCamera(SubPath sp, Shade s, vec3 pos, vec3 ng, vec3 ns, vec3 wo, V
     float wLight = Mis(cameraPdfA / lightPathCount()) * (vc.vmWeight + sp.dVCM + sp.dVC * Mis(revPdfW));
     float misWeight = 1.0 / (wLight + 1.0);
     vec4 c = misWeight * sp.throughput * f * (imageToSurface / lightPathCount()) * cc.weight;
-    c = maskTerminated(c, sp.terminated || cameraIsChromatic());
-    if (sp.pathLength + 1u >= 3u) c = clampRadiance(c);
+    bool terminated = sp.terminated || cameraIsChromatic();
+    c = maskTerminated(c, terminated);
+    gClampScale = cc.weight;
+    if (sp.pathLength + 1u >= 3u) c = clampRadiance(c, terminated);
     if (c.x + c.y + c.z + c.w <= 0.0) return;
     vec3 p0 = offsetRay(pos, ng);
     vec3 d = cc.lensPos - p0;

@@ -37,6 +37,7 @@ void main() {
     st.mediumSigma = vec4(0.0);
     st.terminated = cameraIsChromatic();  // 色収差：波長で光線が変わるので代表波長だけを追う
     if (st.terminated) st.beta = vec4(4.0 * st.beta.x, 0.0, 0.0, 0.0);
+    gClampScale = cr.weight;
     vec3 albedo = vec3(0.0), normal = vec3(0.0);
     vec4 L = cr.weight > 0.0 ? ptTrace(st, 0u, rng, albedo, normal) : vec4(0.0);
 
