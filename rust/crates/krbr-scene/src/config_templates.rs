@@ -13,11 +13,10 @@ mask_scatter = 0.3           # レジストの顔料自身が光を散らす割�
 # silk_color = [0.93, 0.93, 0.90]   # 省略時は白。レジストのプリセットが黄・白なら黒
 fr4_color = [0.62, 0.58, 0.42]
 clip_silk_by_mask = true     # レジストの開口部ではシルクを印刷しない
-texture_px_per_mm = 50       # 層テクスチャの解像度（50 = 20 µm/px）
+texture_px_per_mm = 50       # 銅・レジストの縁からの距離場の解像度（50 = 20 µm/px）
 include_dnp = true
 
 [relief]                     # 銅箔・レジスト・シルクの厚みを形状として作る（段差）
-enabled = true
 # copper_um = 35             # 省略時は stackup の銅の厚み
 mask_on_copper_um = 12
 mask_on_substrate_um = 25    # 銅の間を埋めるので、銅の上より厚い

@@ -16,31 +16,28 @@ if (-not $OutDir) { $OutDir = Join-Path $repo "dist" }
 $version = (Select-String -Path (Join-Path $repo "rust\Cargo.toml") -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
 $name = "KRB-Renderer-$version-win64"
 $dst = Join-Path $OutDir $name
-$cppOut = Join-Path $repo "build\release"
+$stepOut = Join-Path $repo "build\release\step"  # STEP 変換器 DLL（scripts\build.cmd、CMake）
+$oidnBin = Join-Path $repo "third_party\oidn\bin"  # scripts\get_oidn.ps1 が置く公式のバイナリ
 $rustExe = Join-Path $repo "rust\target\release\krbr.exe"
 $rustShaders = Join-Path $repo "rust\target\release\shaders"  # cargo build（krbr-render の build.rs）が glslc で作る
 
-# Visual Studio（cmake、Visual C++ ランタイムの再頒布用ファイル）
+# Visual Studio（Visual C++ ランタイムの再頒布用ファイル）
 $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath 2>$null
 if (-not $vs) { $vs = (Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio\*\*" -Directory | Where-Object { Test-Path "$($_.FullName)\VC\Redist\MSVC" } | Select-Object -First 1).FullName }
 if (-not $vs) { throw "Visual Studio が見つかりません（Visual C++ ランタイムを入れるのに使う）" }
 
 if (-not $NoBuild) {
-    Write-Host "== C++ 版のビルド（STEP 変換器 DLL）"
-    Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
-    Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=x64" | Out-Null
-    Push-Location $repo
-    cmake --build --preset release
-    if ($LASTEXITCODE -ne 0) { throw "cmake --build に失敗" }
-    Pop-Location
+    Write-Host "== STEP 変換器 DLL のビルド（CMake）"
+    & cmd /c (Join-Path $PSScriptRoot "build.cmd")
+    if ($LASTEXITCODE -ne 0) { throw "scripts\build.cmd に失敗" }
     Write-Host "== Rust 版のビルド（シェーダも作る）"
     Push-Location (Join-Path $repo "rust")
     cargo build --release
     if ($LASTEXITCODE -ne 0) { throw "cargo build に失敗" }
     Pop-Location
 }
-foreach ($p in @($rustExe, "$rustShaders\pathtrace.comp.spv", "$cppOut\step\krbr_step.dll")) {
-    if (-not (Test-Path $p)) { throw "見つかりません: $p（-NoBuild を外してビルドしてください）" }
+foreach ($p in @($rustExe, "$rustShaders\pathtrace.comp.spv", "$stepOut\krbr_step.dll", "$oidnBin\OpenImageDenoise.dll")) {
+    if (-not (Test-Path $p)) { throw "見つかりません: $p（-NoBuild を外してビルドしてください。OIDN は scripts\get_oidn.ps1）" }
 }
 
 Write-Host "== $dst にまとめる"
@@ -48,9 +45,9 @@ if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
 New-Item -ItemType Directory -Force "$dst\shaders", "$dst\dll\step", "$dst\dll\oidn", "$dst\dll\vcruntime", "$dst\kicad_plugin\krbr_preview", "$dst\licenses" | Out-Null
 Copy-Item $rustExe $dst
 Copy-Item "$rustShaders\*.spv" "$dst\shaders"
-Copy-Item "$cppOut\step\krbr_step.dll", "$cppOut\step\TK*.dll" "$dst\dll\step"
+Copy-Item "$stepOut\krbr_step.dll", "$stepOut\TK*.dll" "$dst\dll\step"
 # ノイズ除去（OIDN）。HIP・SYCL のデバイスは使わないので入れない
-Copy-Item "$cppOut\OpenImageDenoise.dll", "$cppOut\OpenImageDenoise_core.dll", "$cppOut\OpenImageDenoise_device_cpu.dll", "$cppOut\OpenImageDenoise_device_cuda.dll", "$cppOut\tbb12.dll" "$dst\dll\oidn"
+Copy-Item "$oidnBin\OpenImageDenoise.dll", "$oidnBin\OpenImageDenoise_core.dll", "$oidnBin\OpenImageDenoise_device_cpu.dll", "$oidnBin\OpenImageDenoise_device_cuda.dll", "$oidnBin\tbb12.dll" "$dst\dll\oidn"
 # Visual C++ ランタイム（アプリと一緒に置いてよい再頒布用ファイル。STEP 変換器・OpenCASCADE・OIDN が使う）
 $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory | Sort-Object FullName | Select-Object -Last 1
 foreach ($f in @("msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll")) {

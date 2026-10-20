@@ -75,15 +75,18 @@ unsafe impl Send for Oidn {}
 unsafe impl Sync for Oidn {}
 
 fn load_oidn() -> Result<Oidn, String> {
-    // 配布用の一式の dll\oidn、exe と同じフォルダ、開発中は C++ 版のビルド出力（<repo>/build/release。OIDN の DLL 一式がある）
+    // 配布用の一式の dll\oidn、exe と同じフォルダ、開発中は scripts\get_oidn.ps1 が置く公式のバイナリ（<repo>/third_party/oidn/bin）
     let name = "OpenImageDenoise.dll";
     let mut path = krbr_core::platform::dll_dir("oidn").join(name);
     if !path.exists() {
         path = krbr_core::platform::exe_dir().join(name);
     }
     if !path.exists() {
-        if let Some(dev) = krbr_core::platform::dev_build_dir("", name) {
-            path = dev.join(name);
+        // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR は完全なパスが要るので、.. を含めずに組み立てる
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(3).unwrap_or(std::path::Path::new("."));
+        let dev = repo.join("third_party").join("oidn").join("bin").join(name);
+        if dev.exists() {
+            path = dev;
         }
     }
     if !path.exists() {

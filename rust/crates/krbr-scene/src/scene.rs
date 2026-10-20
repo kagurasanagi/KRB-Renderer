@@ -154,8 +154,6 @@ pub struct SceneOptions {
     pub placeholder_color: Vec3,
     pub include_dnp: bool,
     pub layer_art: LayerArtOptions,
-    /// 銅・レジスト・シルクの厚みを形状として作る
-    pub relief: bool,
     pub relief_copper_from_stackup: bool,
     pub relief_params: ReliefParams,
     /// 表面の凹凸（バンプ）の強さの倍率。0 で無効（GPU へ送るときに掛ける）
@@ -178,7 +176,6 @@ impl Default for SceneOptions {
             placeholder_color: Vec3::new(0.92, 0.96, 1.0),
             include_dnp: true,
             layer_art: LayerArtOptions::default(),
-            relief: true,
             relief_copper_from_stackup: true,
             relief_params: ReliefParams::default(),
             bump_intensity: 0.25,
@@ -553,11 +550,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
     if opts.relief_copper_from_stackup && board.stackup.copper_thickness > 0.0 {
         rp.copper = board.stackup.copper_thickness;
     }
-    let bo = if opts.relief {
-        BoardBuildOptions { core_half: rp.core_half(board.stackup.thickness), caps: false }
-    } else {
-        BoardBuildOptions::default()
-    };
+    let bo = BoardBuildOptions { core_half: rp.core_half(board.stackup.thickness), caps: false };
     s.board = build_board_geometry(board, &bo);
     s.mask.on_copper = rp.mask_on_copper as f32;
     s.mask.on_substrate = rp.mask_on_substrate as f32;
@@ -573,7 +566,8 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
         s.instances.push(Instance { mesh: 0, xform: Mat4::IDENTITY, material_base: 0, owner: InstanceOwner::Board });
         add_instance_bounds(&mut s, 0, &Mat4::IDENTITY);
     }
-    if opts.relief {
+    // 銅・レジスト・シルクの厚みの形状（タイルごと）と、縁からの距離場
+    {
         let mut local = ReliefTileCache::default();
         let cache: &mut ReliefTileCache = match ctx.relief_cache {
             Some(c) => c,
@@ -608,8 +602,6 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
             .collect();
         let _ = ReliefMat::Fr4; // 材質の番号は rmap で写した
         let _ = BoardMat::Top;
-    } else {
-        krbr_core::warn!("relief = false (layer textures) is not supported in the Rust port yet; rendering the bare board");
     }
 
     // 代替表示の箱：縁を面取りした透明な水晶（石英：nd 1.544、アッベ数 70）

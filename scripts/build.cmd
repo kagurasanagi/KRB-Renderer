@@ -1,8 +1,10 @@
 @echo off
-rem Load the MSVC environment and run configure + build at low priority.
+rem Build the STEP converter DLL (build\release\step\krbr_step.dll, OpenCASCADE) with CMake.
+rem krbr.exe itself is built with cargo: cd rust && cargo build --release
+rem Loads the MSVC environment and runs configure + build at low priority.
 rem   build.cmd            : incremental build (configures on first run)
 rem   build.cmd --clean    : delete build\release, then configure + build
-rem   other arguments are passed to "cmake --build" (e.g. --target krbr_tests)
+rem   other arguments are passed to "cmake --build"
 rem (ASCII only: cmd.exe reads this file in the system code page)
 setlocal enabledelayedexpansion
 rem vcvars overwrites VCPKG_ROOT with the VS-bundled vcpkg, so save and restore it

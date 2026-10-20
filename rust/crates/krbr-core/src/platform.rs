@@ -44,7 +44,7 @@ pub fn exe_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// 開発中の同梱物の場所：実行ファイルのフォルダから上へたどり、C++ 版のビルド出力 `<リポジトリ>\build\release\<rel>` に
+/// 開発中の同梱物の場所：実行ファイルのフォルダから上へたどり、STEP 変換器 DLL の CMake のビルド出力 `<リポジトリ>\build\release\<rel>` に
 /// probe があればそのフォルダ（rust\target\release\krbr.exe からも、deps\ に置かれるテストの実行ファイルからも見つかる）
 pub fn dev_build_dir(rel: &str, probe: &str) -> Option<PathBuf> {
     exe_dir().ancestors().take(6).map(|a| a.join("build").join("release").join(rel)).find(|d| d.join(probe).exists())

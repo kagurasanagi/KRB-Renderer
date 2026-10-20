@@ -2,14 +2,13 @@
 //! Vulkan の GPU と KiCad の 3D モデルが要るので、明示したときだけ走らせる：
 //!   cargo test --release -p krbr-app --test watch -- --ignored --nocapture
 
-use std::path::{Path, PathBuf};
+mod common;
+
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use krbr_app::{run_watch, RenderOptions, WatchEvent, WatchOptions, WatchUpdate};
 
-fn repo_board() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../kicad/mini_dsp_radio.kicad_pcb")
-}
 
 /// 保存をまねる（KiCad と同じく、ファイル全体を書き直す）。start 以降で最初の from を to に替える
 fn save_with_replace(pcb: &Path, from: &str, to: &str, start: usize) {
@@ -17,6 +16,16 @@ fn save_with_replace(pcb: &Path, from: &str, to: &str, start: usize) {
     let pos = start + text[start..].find(from).unwrap_or_else(|| panic!("'{from}' not found"));
     text.replace_range(pos..pos + from.len(), to);
     std::fs::write(pcb, text).unwrap();
+}
+
+/// 書き換える線フォントの文字：シルクにある、render_cache の無い基板の文字（gr_text）の最初のもの。(元の "(gr_text \"…\"", 書き換えたもの)
+fn find_stroke_silk_text(pcb: &Path) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(pcb).unwrap();
+    let root = krbr_kicad::sexpr::parse(&text).ok()?;
+    let t = root.items.iter().find(|n| n.is_list && n.tag() == "gr_text" && !n.has("render_cache") && n.child_str("layer").is_some_and(|l| l.ends_with(".SilkS")) && !n.str(1).is_empty())?;
+    let from = format!("(gr_text {:?}", t.str(1));
+    // 同じ文字の gr_text が複数あるときは、最初のものだけを替える（save_with_replace）
+    text.contains(&from).then(|| (from.clone(), format!("(gr_text {:?}", format!("{}~", t.str(1)))))
 }
 
 /// 動かす部品：KiCad 標準の 0603 コンデンサを使う最初の部品。(部品の S 式の位置, "(at x y" の元, x を 1.5 mm ずらしたもの)
@@ -64,7 +73,7 @@ fn save_updates_the_image_and_rebuilds_only_nearby_tiles() {
     std::env::set_var("KRBR_CACHE_DIR", ws.join("cache"));
     std::env::set_var("KRBR_CONFIG_DIR", ws.join("config"));
     let pcb = ws.join("proj").join("board.kicad_pcb");
-    std::fs::copy(repo_board(), &pcb).unwrap();
+    std::fs::copy(common::test_board(), &pcb).unwrap();
     let out = ws.join("out").join("watch.png");
     let o = WatchOptions {
         common: RenderOptions { pcb: pcb.clone(), hdr: "builtin:studio".into(), out: out.clone(), spp: Some(32), width: Some(1920), height: Some(1080), zoom: 1.0, ..Default::default() },
@@ -72,8 +81,12 @@ fn save_updates_the_image_and_rebuilds_only_nearby_tiles() {
     };
     let (fp, at_from, at_to) = find_target(&pcb);
     let model_to = unused_capacitor_model(&pcb);
-    // 線フォントの文字（kicad-cli で描く）の書き換えは、kicad-cli があるときだけ確かめる
-    let with_cli = krbr_app::kicad_cli::find_kicad_cli("").is_some();
+    // 線フォントの文字（kicad-cli で描く）の書き換えは、kicad-cli があり、基板に線フォントのシルクの文字があるときだけ確かめる
+    let stroke_text = find_stroke_silk_text(&pcb);
+    let with_cli = krbr_app::kicad_cli::find_kicad_cli("").is_some() && stroke_text.is_some();
+    if stroke_text.is_none() {
+        println!("no stroke-font silk text (gr_text) on the board: skipping the kicad-cli steps");
+    }
     let total = if with_cli { 6 } else { 4 };
 
     // 1. 部品を動かす  2. 中身を変えずに保存する  3. 3D モデルを未分割のものに替える（箱で仮表示）  4. その分割の完了
@@ -90,7 +103,10 @@ fn save_updates_the_image_and_rebuilds_only_nearby_tiles() {
                 std::fs::write(&pcb, text + "\n").unwrap();
             }
             2 => save_with_replace(&pcb, "Capacitor_SMD.3dshapes/C_0603_1608Metric.step", &format!("Capacitor_SMD.3dshapes/{model_to}.step"), fp),
-            _ => save_with_replace(&pcb, "\"LEADS ->\"", "\"LEADS <-\"", 0),
+            _ => {
+                let (from, to) = stroke_text.as_ref().unwrap();
+                save_with_replace(&pcb, from, to, 0)
+            }
         }
     };
     run_watch(&o, Duration::from_millis(200), |e| match e {

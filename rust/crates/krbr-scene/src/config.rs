@@ -233,7 +233,10 @@ pub fn load_project_config(pcb: &Path) -> ProjectConfig {
         boolean(&t, &["board", "clip_silk_by_mask"], &mut o.layer_art.clip_silk_by_mask);
         num_f64(&t, &["board", "texture_px_per_mm"], &mut o.layer_art.px_per_mm);
         boolean(&t, &["board", "include_dnp"], &mut o.include_dnp);
-        boolean(&t, &["relief", "enabled"], &mut o.relief);
+        // 層テクスチャ方式（enabled = false）は廃止した。凹凸は常に形状として作る
+        if matches!(get(&t, &["relief", "enabled"]), Some(Value::Boolean(false))) {
+            krbr_core::warn!("board.toml [relief] enabled = false is no longer supported (the layer texture mode was removed); the relief is always built as geometry");
+        }
         if let Some(v) = get(&t, &["relief", "copper_um"]).and_then(as_f64) {
             o.relief_params.copper = v / 1000.0;
             o.relief_copper_from_stackup = false;

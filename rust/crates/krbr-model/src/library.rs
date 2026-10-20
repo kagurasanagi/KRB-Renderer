@@ -57,7 +57,7 @@ unsafe impl Sync for StepDll {}
 fn step_dll() -> Result<&'static StepDll, &'static str> {
     static DLL: OnceLock<Result<StepDll, String>> = OnceLock::new();
     DLL.get_or_init(|| {
-        // 配布用の一式の dll\step、exe と同じフォルダの step\（C++ 版と同じ置き方）、開発中は C++ 版のビルド出力（<repo>/build/release/step）
+        // 配布用の一式の dll\step、exe と同じフォルダの step\、開発中は scripts\build.cmd（CMake）の出力（<repo>/build/release/step）
         let mut path = krbr_core::platform::dll_dir("step").join("krbr_step.dll");
         if !path.exists() {
             path = krbr_core::platform::exe_dir().join("step").join("krbr_step.dll");

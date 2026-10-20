@@ -2,15 +2,13 @@
 //! 全体設定・部品番号・部位ごとの指定がどう効くかを見る。KiCad の 3D モデルが要るので、明示したときだけ走らせる：
 //!   cargo test --release -p krbr-app --test material -- --ignored --nocapture
 
+mod common;
+
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 
 use krbr_app::material_cmd::{clear_material, compute_assignments, set_material, MaterialSetOptions};
 use krbr_scene::scene::MaterialAssignment;
 
-fn repo_board() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../kicad/mini_dsp_radio.kicad_pcb")
-}
 
 /// 試す部品：KiCad 標準の色（kicad:metal_grey_pins）を持つ IC（U…）のうち、部位が 2 つ以上あるもの。(部品番号, モデルのパス)
 fn pick_subject(rows: &[MaterialAssignment]) -> Option<(String, String)> {
@@ -43,7 +41,7 @@ fn global_model_material_is_shared_across_projects_and_reference_override_wins()
     let (pcb_a, pcb_b) = (ws.join("projA").join("board.kicad_pcb"), ws.join("projB").join("board.kicad_pcb"));
     for p in [&pcb_a, &pcb_b] {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::copy(repo_board(), p).unwrap();
+        std::fs::copy(common::test_board(), p).unwrap();
     }
     std::fs::write(config.join("materials").join("test.toml"), "[material.test_red]\nbase_color = [0.8, 0.02, 0.02]\n[material.test_blue]\nbase_color = [0.02, 0.02, 0.8]\n").unwrap();
 

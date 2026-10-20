@@ -1,8 +1,8 @@
 //! ノイズ除去（OIDN）。少ないサンプルの画像をノイズ除去すると、多いサンプルの参照画像に近づくこと。
-//! Vulkan の GPU と OIDN の DLL（<repo>\build\release または exe の横）が要るので、明示したときだけ走らせる：
+//! Vulkan の GPU と OIDN の DLL（<repo>\third_party\oidn\bin または exe の横）が要るので、明示したときだけ走らせる：
 //!   cargo test --release -p krbr-app --test denoise -- --ignored --nocapture
 
-use std::path::Path;
+mod common;
 
 use krbr_app::prepare::{frame_params, initial_camera, prepare_scene, RenderOptions};
 use krbr_render::image_io::ImageF;
@@ -27,10 +27,12 @@ fn denoising_a_4spp_image_approaches_the_reference() {
     let ws = std::env::temp_dir().join(format!("krbr_rust_denoise_{}", std::process::id()));
     std::env::set_var("KRBR_CONFIG_DIR", ws.join("config")); // 環境マップの記憶を書き込まない
     assert!(krbr_render::denoiser_available(), "OIDN DLLs not found");
-    let pcb = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../kicad/mini_dsp_radio.kicad_pcb");
+    let pcb = common::test_board();
+    // 既定の基板では部品の多いところ（95, 95）を寄って見る。別の基板では自動の構図の中央
+    let look_at = if common::custom_board() { Vec::new() } else { vec![95.0, 95.0] };
     let ctx = Context::new(&ContextOptions { low_queue_priority: true, ..Default::default() }).unwrap();
     for spectral in [false, true] {
-        let o = RenderOptions { pcb: pcb.clone(), hdr: "builtin:studio".into(), width: Some(480), height: Some(270), look_at: vec![95.0, 95.0], zoom: 2.0, spectral: Some(spectral), ..Default::default() };
+        let o = RenderOptions { pcb: pcb.clone(), hdr: "builtin:studio".into(), width: Some(480), height: Some(270), look_at: look_at.clone(), zoom: 2.0, spectral: Some(spectral), ..Default::default() };
         let prep = prepare_scene(&o).unwrap();
         let cam = initial_camera(&prep, &o, 480, 270);
         let mut gpu = GpuScene::new(&ctx);
@@ -44,7 +46,9 @@ fn denoising_a_4spp_image_approaches_the_reference() {
         let denoised = noisy.denoised.as_ref().expect("denoiser did not run");
         let (e_noisy, e_denoised) = (mean_abs_diff(&noisy.color, &reference), mean_abs_diff(denoised, &reference));
         println!("{}: 4 spp {e_noisy:.4}, denoised {e_denoised:.4}", if spectral { "spectral" } else { "RGB" });
-        assert!(e_denoised < 0.4 * e_noisy, "{e_denoised} vs {e_noisy}");
+        // 既定の基板（部品の多いところを寄って見る）では 40% 未満。別の基板の全体の構図は細かい模様が多く、減り方が小さい（kachkojir で 40.2%）
+        let limit = if common::custom_board() { 0.5 } else { 0.4 };
+        assert!(e_denoised < limit * e_noisy, "{e_denoised} vs {e_noisy}");
 
         if !spectral {
             // 強さ 0 は元の画像そのもの、0.5 はその間
@@ -59,7 +63,7 @@ fn denoising_a_4spp_image_approaches_the_reference() {
             std::env::remove_var("KRBR_DENOISE_DEVICE");
             let e_cpu = mean_abs_diff(cpu.denoised.as_ref().unwrap(), &reference);
             println!("CPU device: denoised {e_cpu:.4}");
-            assert!(e_cpu < 0.4 * e_noisy, "{e_cpu}");
+            assert!(e_cpu < limit * e_noisy, "{e_cpu}");
         }
     }
     let _ = std::fs::remove_dir_all(&ws);

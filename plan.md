@@ -13,13 +13,10 @@
 - 積分器の一致テスト：パストレーサー、BDPT、VCM が、同じシーンで同じ値に収束することを確認する（参照画像との差（RMSE）が閾値以下であることを自動テストにする）
 - 分光モードとRGBモードの比較：分散なしのシーンで、両者の結果が許容誤差内で一致することを確認する
 
-## 次の作業（最優先）：C++ 版の廃止
-Rust 版が C++ 版の機能（層テクスチャ方式を除く）をすべて持つので、C++ 版の本体を外し、シェーダの変更を 1 つのホストだけで済むようにする。
-段階ごとに設計案を出して承認を得てから進める。
-1. （済）GPU の検証テスト（白い炉、積分器の一致、プリズムの分散、カメラ、分光の色の保存）を Rust に移植し、C++ 版と同じ値で通ることを確かめる（削除より先に行う）。rust/crates/krbr-render/tests/。cargo test --release -p krbr-render -- --ignored --nocapture
-2. （済）シェーダのビルド（GLSL → SPIR-V、ray query 版と ray tracing pipeline 版）を、CMake から Rust の build.rs（glslc を呼ぶ）に移し、cargo build だけでそろうようにする。rust/crates/krbr-render/build.rs が rust/target/<profile>/shaders に作る（CMake 側の生成は段階 3 で消す）
-3. 削除の直前にタグ（cpp-final など）を付けてから、C++ の本体（src/ の step_dll 以外）・tests/・不要な依存（GLFW、ImGui など）を消す。CMake と vcpkg は STEP 変換器 DLL（OpenCASCADE は C++ のライブラリなので C++ のまま残す）だけの構成にする。README を整理する
-- 層テクスチャ方式（[relief] enabled = false）は Rust 版に無いので、機能ごと廃止する（凹凸を形状にする方式が上位互換）
+## C++ 版の廃止（済、2026-10-20）
+C++ 版の本体はタグ cpp-final（GitHub にも push 済み）。GPU の検証テストは rust/crates/krbr-render/tests/ に移し（C++ 版と同じ値）、シェーダは krbr-render の build.rs が作る。
+C++ は STEP 変換器 DLL（step_dll/、CMake・vcpkg は OpenCASCADE と glm だけ）。層テクスチャ方式（[relief] enabled = false）は廃止した。
+- 残り：C++ 版はプロセス全体を BELOW_NORMAL にしていた（--normal-priority で解除）が、Rust 版にはまだ無い（kicad-cli の子プロセスだけ低優先度）
 
 ## 配布と KiCad 連携
 - 配布の形を決める：ポータブル版の zip（scripts\make_dist.ps1）に加えて、インストーラ、または KiCad のプラグインマネージャ（PCM）のパッケージを作るか

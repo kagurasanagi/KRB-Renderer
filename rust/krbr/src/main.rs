@@ -9,7 +9,7 @@ use krbr_core::{info, log};
 use krbr_kicad::{load_board, ModelResolver};
 
 #[derive(Parser)]
-#[command(name = "krbr", about = "KRB-Renderer: KiCad 連携 物理ベース レンダラー (Rust port)")]
+#[command(name = "krbr", about = "KRB-Renderer: KiCad 連携 物理ベース レンダラー")]
 struct Cli {
     /// debug ログも出す
     #[arg(short, long, global = true)]
