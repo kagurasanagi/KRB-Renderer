@@ -17,8 +17,8 @@ use krbr_render::vk::{image_barrier, Buffer};
 use krbr_render::studio_env::STUDIO;
 use krbr_render::{build_env_distribution, environment_label, is_builtin, load_environment_map, Context, ContextOptions, EnvDistribution, GpuScene, Progressive};
 use krbr_scene::config::apply_mask_color_spec;
-use krbr_scene::scene::{raycast, update_mask_material};
-use krbr_scene::{mask_presets, orbit_camera, LensModel, Scene, SceneOptions};
+use krbr_scene::scene::{load_material_setup, raycast, raycast_pick, update_mask_material, MaterialAssignment};
+use krbr_scene::{mask_presets, orbit_camera, InstanceOwner, LensModel, Scene, SceneOptions};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -27,6 +27,8 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::kicad_cli::{plot_stroke_silk, SilkPlot};
+use crate::material_cmd::{clear_material, set_material, MaterialSetOptions};
+use crate::selection::{Outline, Selected};
 use crate::prepare::{ReloadStats, SceneSource};
 use crate::remember;
 use crate::prepare::{frame_params, initial_camera, prepare_scene, PreparedScene, RenderOptions};
@@ -47,6 +49,10 @@ pub struct ViewOptions {
     pub watch: bool,
     /// 開発用：テスト中に一度だけ基板を読み直す（保存の代わり）
     pub test_reload: bool,
+    /// 開発用：テスト中にこの画素（3D 表示の中の位置）をクリックしたことにする
+    pub test_pick: Option<(f64, f64)>,
+    /// 開発用：test_pick で選んだ部品の全部位に、この材質を割り当てる（この部品だけ）
+    pub test_assign: String,
 }
 
 /// 基板の読み直し（裏のスレッド）の結果
@@ -60,6 +66,8 @@ struct ReloadDone {
     saved_at: Option<SystemTime>,
     /// kicad-cli で書き出し直したシルクを反映した
     silk: bool,
+    /// 材質の設定を読み直した
+    materials: bool,
 }
 
 /// 入力・操作パネルで変わる表示の状態
@@ -94,6 +102,11 @@ struct ViewState {
     panning: bool,
     /// Ctrl + クリック：その点にピントを合わせる
     focus_pick: Option<(f64, f64)>,
+    /// 左ボタンを押した位置と、そこから動いた量（ほとんど動かさずに離したらクリック）
+    press_at: Option<(f64, f64)>,
+    press_moved: f64,
+    /// クリック：その点の部品を選ぶ
+    part_pick: Option<(f64, f64)>,
     last_cursor: (f64, f64),
     ctrl: bool,
     /// 3D 表示の領域（ウィンドウのうちメニューとパネルを除いた所、物理ピクセル）。描画の解像度もこれ
@@ -254,6 +267,16 @@ struct App {
     silk_rerun: bool,
     /// 新しいシルクを受け取った（凹凸タイルを全部作り直す）
     silk_dirty: bool,
+    /// クリックで選んだ部品と、その輪郭線
+    selected: Option<Selected>,
+    outline: Option<Outline>,
+    /// 材質の割り当てを書き換えた（材質の設定を読み直して組み直す）
+    materials_dirty_files: bool,
+    /// 選んだ部品の材質を書き込む先：0 この部品だけ、1 このモデル（このプロジェクト）、2 このモデル（全体設定）
+    assign_scope: usize,
+    material_names: Vec<String>,
+    material_error: String,
+    test_pick_done: bool,
     last_update: String,
     samples_per_frame: u32,
     need_recreate: bool,
@@ -371,10 +394,9 @@ impl App {
     }
 
     fn panel(&mut self, ui: &mut egui::Ui) {
-        let g = self.gpu.as_ref().unwrap();
-        let st = &mut self.st;
-        ui.label(format!("{} / {} spp   {:.1} ms/frame (GPU {:.1} ms)", g.prog.samples(), st.max_spp, self.last_frame_ms, self.last_gpu_ms));
-        ui.add(egui::ProgressBar::new((g.prog.samples() as f32 / st.max_spp.max(1) as f32).min(1.0)));
+        let (samples, max_spp) = (self.gpu.as_ref().unwrap().prog.samples(), self.st.max_spp);
+        ui.label(format!("{} / {} spp   {:.1} ms/frame (GPU {:.1} ms)", samples, max_spp, self.last_frame_ms, self.last_gpu_ms));
+        ui.add(egui::ProgressBar::new((samples as f32 / max_spp.max(1) as f32).min(1.0)));
         if self.reload_job.is_some() {
             ui.colored_label(egui::Color32::from_rgb(255, 204, 77), "基板を読み直し中...");
         }
@@ -388,6 +410,10 @@ impl App {
             ui.weak(&self.last_update);
         }
 
+        ui.separator();
+        self.selection_panel(ui);
+
+        let st = &mut self.st;
         ui.separator();
         ui.strong("環境マップ");
         let mut chosen: Option<String> = None;
@@ -566,7 +592,7 @@ impl App {
             }
         });
         ui.separator();
-        ui.weak("左ドラッグ: 回転  右ドラッグ: 移動  ホイール: 拡大");
+        ui.weak("左ドラッグ: 回転  右ドラッグ: 移動  ホイール: 拡大  クリック: 部品を選ぶ");
         ui.weak("F1 / Tab: このパネルの表示切り替え");
         if let Some(p) = chosen {
             self.start_env_load(p);
@@ -589,11 +615,13 @@ impl App {
         }
         let models_done = src.library.completed();
         let silk = self.silk_dirty;
-        if !saved && !silk && models_done == self.models_seen {
+        let materials = self.materials_dirty_files;
+        if !saved && !silk && !materials && models_done == self.models_seen {
             return;
         }
         self.models_seen = models_done;
         self.silk_dirty = false;
+        self.materials_dirty_files = false;
         let mut source = self.prep.source.take().unwrap();
         let old = self.prep.board.clone();
         let options = self.prep.cfg.scene.clone();
@@ -603,10 +631,198 @@ impl App {
             if silk {
                 source.tiles.invalidate_all(); // シルクが変わったので、どのタイルも作り直す
             }
+            if materials {
+                source.materials = load_material_setup(&old.file); // 材質の割り当て（overrides.toml / model_map.toml）を書き換えた
+            }
             let result = if saved { source.reload(&old, &options).map(|(b, s, st)| (Some(b), s, st)) } else { Ok((None, source.build(&old, &options, true), ReloadStats::default())) };
-            let _ = tx.send(ReloadDone { source, saved, result, saved_at, silk });
+            let _ = tx.send(ReloadDone { source, saved, result, saved_at, silk, materials });
         });
         self.reload_job = Some(rx);
+    }
+
+    /// 画面の点（物理ピクセル）の部品を選ぶ。基板や何も無い所なら選択を外す
+    fn pick_part(&mut self, p: (f64, f64)) {
+        let vp = self.st.viewport;
+        let (ww, wh) = (vp.w as f64, vp.h as f64);
+        let (px, py) = (p.0 - vp.x as f64, p.1 - vp.y as f64);
+        let c = orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, (ww / wh) as f32);
+        let (nx, ny) = ((2.0 * px / ww - 1.0) as f32, (2.0 * py / wh - 1.0) as f32);
+        let dir = (c.forward + nx * c.tan_half_fov_y * c.aspect * c.right - ny * c.tan_half_fov_y * c.up).normalize();
+        let hit = raycast_pick(&self.prep.scene, c.position, dir);
+        self.selected = hit.and_then(|h| Selected::from_instance(&self.prep.scene, &self.prep.board, h.instance));
+        self.material_error.clear();
+        self.refresh_outline();
+        match &self.selected {
+            Some(s) => info!("selected {}{}", s.reference, if s.model.is_none() { " (placeholder)" } else { "" }),
+            None => info!("selection cleared"),
+        }
+    }
+
+    /// 選んだ部品の輪郭を作り直す（選んだとき・シーンを組み直したとき）
+    fn refresh_outline(&mut self) {
+        let inst = self.selected.as_ref().and_then(|s| s.find_instance(&self.prep.scene, &self.prep.board));
+        self.outline = inst.map(|i| Outline::new(&self.prep.scene, i));
+    }
+
+    /// 選んだ部品の輪郭線を 3D 表示の上に重ねる（画像には入らない）。実レンズは投影が違うので描かない
+    fn draw_outline(&self, root: &mut egui::Ui, central: egui::Rect) {
+        let Some(o) = &self.outline else { return };
+        if self.prep.cfg.lens.model == LensModel::Realistic || !central.is_positive() {
+            return;
+        }
+        let vp = self.st.viewport;
+        let ppp = root.ctx().pixels_per_point();
+        let c = orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, vp.w as f32 / vp.h.max(1) as f32);
+        let painter = root.painter().with_clip_rect(central);
+        let to_pt = |q: [f32; 2]| egui::pos2((q[0] + vp.x as f32) / ppp, (q[1] + vp.y as f32) / ppp);
+        let segs = o.segments(&c, vp.w as f32, vp.h as f32);
+        for (a, b) in &segs {
+            painter.line_segment([to_pt(*a), to_pt(*b)], egui::Stroke::new(3.0, egui::Color32::from_black_alpha(160)));
+        }
+        for (a, b) in &segs {
+            painter.line_segment([to_pt(*a), to_pt(*b)], egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 170, 40)));
+        }
+    }
+
+    /// 選んだ部品の部位（空なら全部位）に材質を書き込む。clear なら上書きを消す
+    fn assign_material(&mut self, part: &str, material: &str, clear: bool) {
+        let Some(sel) = self.selected.clone() else { return };
+        let scope = if sel.model.is_none() { 0 } else { self.assign_scope };
+        let model_spec = sel.model.and_then(|mi| self.prep.board.footprints.iter().find(|f| f.reference == sel.reference).and_then(|f| f.models.get(mi)).map(|m| m.path.clone()));
+        let o = MaterialSetOptions {
+            pcb: self.prep.board.file.clone(),
+            reference: if scope == 0 { sel.reference.clone() } else { String::new() },
+            model: if scope == 0 { String::new() } else { model_spec.unwrap_or_default() },
+            part: part.to_string(),
+            material: material.to_string(),
+            global: scope == 2,
+        };
+        let r = if clear { clear_material(&o).map(|f| f.map(|f| (f, "上書きを消した".to_string()))) } else { set_material(&o).map(|f| Some((f, format!("{} にした", material)))) };
+        match r {
+            Ok(Some((file, what))) => {
+                let target = if part.is_empty() { format!("{} の全部位", sel.reference) } else { format!("{} の {}", sel.reference, part) };
+                self.last_update = format!("{target}を{what}（{}）", file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default());
+                info!("material: {} {} -> {} ({})", sel.reference, if part.is_empty() { "*" } else { part }, if clear { "(cleared)" } else { material }, file.display());
+                self.material_error.clear();
+                self.materials_dirty_files = true;
+            }
+            Ok(None) => self.material_error = "消す上書きが無い（規則どおりになっている）".into(),
+            Err(e) => {
+                warn!("material: {e}");
+                self.material_error = e;
+            }
+        }
+    }
+
+    /// 選んだ部品の欄：部位ごとの材質と、決まった段階。材質を選ぶと設定ファイルに書いて描き直す
+    fn selection_panel(&mut self, ui: &mut egui::Ui) {
+        ui.strong("選んだ部品");
+        let Some(sel) = self.selected.clone() else {
+            ui.weak("部品をクリックすると、材質を変えられる");
+            return;
+        };
+        let fp = self.prep.board.footprints.iter().find(|f| f.reference == sel.reference);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(&sel.reference).strong().color(egui::Color32::from_rgb(255, 170, 40)));
+            ui.weak(fp.map(|f| f.lib_id.as_str()).unwrap_or(""));
+            if ui.small_button("選択を外す").clicked() {
+                self.selected = None;
+                self.outline = None;
+            }
+        });
+        if self.selected.is_none() {
+            return;
+        }
+        if self.prep.cfg.lens.model == LensModel::Realistic {
+            ui.weak("実レンズでは輪郭線を表示しない");
+        }
+        let Some(mi) = sel.model else {
+            // 代わりの箱：3D モデルが無い理由
+            let missing: Vec<_> = self.prep.scene.missing.iter().filter(|m| m.reference == sel.reference).collect();
+            if missing.is_empty() {
+                ui.colored_label(egui::Color32::from_rgb(255, 204, 77), "3D モデルを分割中（終わるまで箱で表示）");
+            } else {
+                ui.colored_label(egui::Color32::from_rgb(255, 204, 77), "3D モデルが無いので、代わりの箱で表示している（材質は変えられない）");
+                for m in missing {
+                    ui.weak(format!("{}\n→ {}（{}）", m.spec, m.resolved, m.reason));
+                }
+                ui.weak("見つける場所は board.toml の [paths] model_search_dirs で足せる");
+            }
+            return;
+        };
+        let model_file = fp.and_then(|f| f.models.get(mi)).map(|m| std::path::Path::new(&m.path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()).unwrap_or_default();
+        ui.weak(&model_file);
+        // このインスタンスの部位の行
+        let rows: Vec<MaterialAssignment> = sel
+            .find_instance(&self.prep.scene, &self.prep.board)
+            .and_then(|i| match self.prep.scene.instances[i].owner {
+                InstanceOwner::Model { assignments, .. } => {
+                    let a = &self.prep.scene.assignments;
+                    let start = assignments as usize;
+                    let spec = &a.get(start)?.model_spec;
+                    Some(a[start..].iter().take_while(|r| r.reference == sel.reference && &r.model_spec == spec).cloned().collect())
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut self.assign_scope, 0, "この部品").on_hover_text("この基板のこの部品だけ（<名前>.krbr\\overrides.toml の部品番号）");
+            ui.radio_value(&mut self.assign_scope, 1, "このモデル").on_hover_text("この基板で同じ 3D モデルを使う部品すべて（overrides.toml のモデル）");
+            ui.radio_value(&mut self.assign_scope, 2, "全基板").on_hover_text("同じ 3D モデルを使うすべての基板（%APPDATA%\\krbr\\model_map.toml）");
+        });
+        // 書き込む先より優先される上書きがあると、書いても見た目は変わらない
+        let shadowed_by_ref = self.assign_scope >= 1 && rows.iter().any(|r| r.source.starts_with("ref "));
+        let shadowed_by_project = self.assign_scope == 2 && rows.iter().any(|r| r.source == "model (project)");
+        if shadowed_by_ref {
+            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), "この部品には部品番号の上書きがあり、そちらが優先される（「この部品」で上書きを消すと反映される）");
+        } else if shadowed_by_project {
+            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), "このプロジェクトにモデルの設定があり、そちらが優先される（「このモデル」で上書きを消すと反映される）");
+        }
+        let mut action: Option<(String, String, bool)> = None;
+        let names = self.material_names.clone();
+        let combo = |ui: &mut egui::Ui, id: String, current: &str, label: &str| -> Option<String> {
+            let mut chosen = None;
+            egui::ComboBox::from_id_salt(id).width(120.0).selected_text(label).show_ui(ui, |ui| {
+                for n in &names {
+                    if ui.selectable_label(n == current, n).clicked() {
+                        chosen = Some(n.clone());
+                    }
+                }
+            });
+            chosen
+        };
+        egui::Grid::new("parts").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+            for (i, r) in rows.iter().enumerate() {
+                let key = r.part_keys.split(' ').next().unwrap_or("").to_string();
+                ui.label(if key.is_empty() { "（全体）".to_string() } else { key.clone() }).on_hover_text(format!("{}\n決まった段階: {}", r.part_keys, r.source));
+                if let Some(m) = combo(ui, format!("part{i}"), &r.material, &r.material) {
+                    action = Some((key.clone(), m, false));
+                }
+                ui.end_row();
+            }
+            ui.label("全部位");
+            if let Some(m) = combo(ui, "all".into(), "", "まとめて選ぶ") {
+                action = Some((String::new(), m, false));
+            }
+            ui.end_row();
+        });
+        // 決まった段階（部位ごとに違えば、部位の名前にカーソルを乗せると出る）
+        let mut sources: Vec<&str> = rows.iter().map(|r| r.source.as_str()).collect();
+        sources.dedup();
+        if let [one] = sources.as_slice() {
+            ui.weak(format!("決まった段階: {one}"));
+        } else if !sources.is_empty() {
+            ui.weak("決まった段階は部位ごとに違う（部位の名前にカーソルを乗せると出る）");
+        }
+        if ui.button("上書きを消す（規則どおりに戻す）").on_hover_text("選んだ書き込み先の、この部品（モデル）の設定を消す").clicked() {
+            action = Some((String::new(), String::new(), true));
+        }
+        if !self.material_error.is_empty() {
+            ui.colored_label(egui::Color32::from_rgb(255, 102, 102), &self.material_error);
+        }
+        if let Some((part, m, clear)) = action {
+            self.assign_material(&part, &m, clear);
+        }
     }
 
     /// 線フォントの文字が変わったので、kicad-cli で裏で書き出し直す（書き出し中なら、終わった後にもう一度）
@@ -676,6 +892,7 @@ impl App {
                 // 読み直しの間に変えたレジストの色も反映する
                 update_mask_material(&mut scene, &self.prep.board, &self.prep.cfg.scene);
                 self.prep.scene = scene;
+                self.refresh_outline();
                 let t0 = Instant::now();
                 let g = self.gpu.as_mut().unwrap();
                 g.gpu.rebuild_geometry(&self.prep.scene, self.st.bump_intensity);
@@ -690,6 +907,8 @@ impl App {
                     self.last_update = format!("読み直し：変更 {}・追加 {}・削除 {}{}、タイル {} 枚（解析 {:.0} ms、組み立て {:.0} ms、GPU {:.0} ms{}）", df.changed, df.added, df.removed, full, stats.tiles_rebuilt, stats.parse_ms, stats.build_ms, gpu_ms, since);
                     let meshing = if pending > 0 { format!(", {pending} model(s) still meshing") } else { String::new() };
                     info!("reload: {} changed, {} added, {} removed{}, {} tile(s) rebuilt; parse {:.0} ms, build {:.0} ms, GPU {:.0} ms{}", df.changed, df.added, df.removed, if df.full { " (full)" } else { "" }, stats.tiles_rebuilt, stats.parse_ms, stats.build_ms, gpu_ms, meshing);
+                } else if d.materials {
+                    info!("material assignment updated; scene rebuilt");
                 } else if d.silk {
                     self.last_update = "線フォントの文字（kicad-cli）を反映した".into();
                     info!("stroke-font silkscreen updated; scene rebuilt");
@@ -758,6 +977,7 @@ impl App {
                 });
                 ui.menu_button("ヘルプ", |ui| {
                     ui.label("左ドラッグ: 回転");
+                    ui.label("クリック: 部品を選ぶ（設定パネルで材質を変えられる）");
                     ui.label("右 / 中ドラッグ: 移動");
                     ui.label("ホイール: 拡大・縮小");
                     ui.label("Ctrl + クリック: その点にピントを合わせる");
@@ -812,6 +1032,7 @@ impl App {
                 self.side_panel(root);
             }
             central = root.available_rect_before_wrap();
+            self.draw_outline(root, central);
         });
         if self.st.quit_requested {
             self.done = true;
@@ -914,6 +1135,18 @@ impl App {
             }
             self.st.viewport = vp;
         }
+        if self.vo.test_pick.is_some() && !self.test_pick_done && self.frames >= 5 {
+            self.test_pick_done = true;
+            let (x, y) = self.vo.test_pick.unwrap();
+            self.st.part_pick = Some((x + self.st.viewport.x as f64, y + self.st.viewport.y as f64));
+        }
+        if let Some(p) = self.st.part_pick.take() {
+            self.pick_part(p);
+            if self.vo.test_pick.is_some() && !self.vo.test_assign.is_empty() {
+                let m = self.vo.test_assign.clone();
+                self.assign_material("", &m, false);
+            }
+        }
         if let Some((px, py)) = self.st.focus_pick.take() {
             let vp = self.st.viewport;
             let (ww, wh) = (vp.w as f64, vp.h as f64);
@@ -967,7 +1200,7 @@ impl App {
         };
         let max_spp = self.st.max_spp;
         let add = if g.prog.samples() >= max_spp { 0 } else { self.samples_per_frame.min(max_spp - g.prog.samples()) };
-        let last_test_frame = self.vo.test_frames > 0 && self.frames + 1 >= self.vo.test_frames && self.env_job.is_none() && self.reload_job.is_none() && (!self.vo.test_reload || self.test_reload_applied);
+        let last_test_frame = self.vo.test_frames > 0 && self.frames + 1 >= self.vo.test_frames && self.env_job.is_none() && self.reload_job.is_none() && (!self.vo.test_reload || self.test_reload_applied) && (self.vo.test_pick.is_none() || self.test_pick_done) && !self.materials_dirty_files;
 
         // egui のテクスチャ
         for (id, deltas) in &full.textures_delta.set {
@@ -1159,7 +1392,15 @@ impl ApplicationHandler for App {
                     return;
                 }
                 match button {
-                    MouseButton::Left => self.st.rotating = down,
+                    MouseButton::Left => {
+                        self.st.rotating = down;
+                        if down {
+                            self.st.press_at = Some(self.st.last_cursor);
+                            self.st.press_moved = 0.0;
+                        } else if self.st.press_at.take().is_some() && self.st.press_moved < 4.0 {
+                            self.st.part_pick = Some(self.st.last_cursor);
+                        }
+                    }
                     MouseButton::Right | MouseButton::Middle => self.st.panning = down,
                     _ => {}
                 }
@@ -1167,6 +1408,9 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let (dx, dy) = (position.x - self.st.last_cursor.0, position.y - self.st.last_cursor.1);
                 self.st.last_cursor = (position.x, position.y);
+                if self.st.press_at.is_some() {
+                    self.st.press_moved += dx.abs() + dy.abs();
+                }
                 if self.st.rotating {
                     self.st.azimuth -= dx * 0.3;
                     self.st.elevation = (self.st.elevation + dy * 0.3).clamp(-89.0, 89.0);
@@ -1285,6 +1529,9 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         rotating: false,
         panning: false,
         focus_pick: None,
+        press_at: None,
+        press_moved: 0.0,
+        part_pick: None,
         last_cursor: (0.0, 0.0),
         ctrl: false,
         viewport: Viewport { x: 0, y: 0, w: 1, h: 1 },
@@ -1300,6 +1547,7 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         info!("watching {} for saves", prep.board.file.display());
     }
     let models_seen = prep.source.as_ref().map(|s| s.library.completed()).unwrap_or(0);
+    let material_names = prep.source.as_ref().map(|s| s.materials.library.names()).unwrap_or_default();
     let mut app = App {
         base_title: format!("krbr - {}", prep.board.project_name),
         scene_as_configured: cfg.scene.clone(),
@@ -1323,6 +1571,13 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         silk_job: None,
         silk_rerun: false,
         silk_dirty: false,
+        selected: None,
+        outline: None,
+        materials_dirty_files: false,
+        assign_scope: 0,
+        material_names,
+        material_error: String::new(),
+        test_pick_done: false,
         last_update: String::new(),
         samples_per_frame: 1,
         need_recreate: false,

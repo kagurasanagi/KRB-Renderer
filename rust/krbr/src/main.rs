@@ -208,6 +208,12 @@ struct ViewArgs {
     /// development: reload the board once during the test
     #[arg(long)]
     test_reload: bool,
+    /// development: click this pixel of the 3D view (x y) during the test to select a part
+    #[arg(long, num_args = 2)]
+    test_pick: Vec<f64>,
+    /// development: assign this material to all parts of the part selected by --test-pick (this part only)
+    #[arg(long, default_value = "")]
+    test_assign: String,
 }
 
 #[derive(Args, Debug)]
@@ -461,6 +467,8 @@ fn main() {
                 test_orbit_deg: args.test_orbit,
                 watch: !args.no_watch,
                 test_reload: args.test_reload,
+                test_pick: (args.test_pick.len() == 2).then(|| (args.test_pick[0], args.test_pick[1])),
+                test_assign: args.test_assign.clone(),
             };
             krbr_app::run_viewer(vo).map(|rc| {
                 if rc != 0 {

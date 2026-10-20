@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use krbr_app::material_cmd::{compute_assignments, set_material, MaterialSetOptions};
+use krbr_app::material_cmd::{clear_material, compute_assignments, set_material, MaterialSetOptions};
 use krbr_scene::scene::MaterialAssignment;
 
 fn repo_board() -> PathBuf {
@@ -79,6 +79,28 @@ fn global_model_material_is_shared_across_projects_and_reference_override_wins()
     let red = b.iter().filter(|(k, m)| !k.contains("kicad:metal_grey_pins") && *m == "test_red").count();
     assert_eq!(gold, 1, "{b:?}");
     assert_eq!(gold + red, b.len(), "{b:?}");
+
+    // 全部位の指定は、同じ書き込み先の部位ごとの指定も消す（端子だけ金のまま残らない）
+    let whole_b = MaterialSetOptions { pcb: pcb_b.clone(), reference: reference.clone(), material: "test_blue".into(), ..Default::default() };
+    set_material(&whole_b).unwrap();
+    let (b, _) = parts_of(&compute_assignments(&pcb_b).unwrap(), &reference);
+    assert!(b.values().all(|m| m == "test_blue"), "{b:?}");
+    set_material(&pins).unwrap(); // 端子だけの指定に戻して、以下を続ける
+    assert!(clear_material(&MaterialSetOptions { part: String::new(), ..pins.clone() }).unwrap().is_some());
+    set_material(&pins).unwrap();
+
+    // 上書きを消す：B の端子だけ → 全体設定の test_red に戻る。A の部品番号 → 全体設定に戻る。全体設定 → 規則に戻る
+    assert!(clear_material(&pins).unwrap().is_some());
+    let (b, source) = parts_of(&compute_assignments(&pcb_b).unwrap(), &reference);
+    assert!(b.values().all(|m| m == "test_red"), "{b:?}");
+    assert_eq!(source, "model (global)");
+    assert!(clear_material(&pins).unwrap().is_none()); // もう消すものが無い（ファイルに触らない）
+    assert!(clear_material(&by_ref).unwrap().is_some());
+    let (_, source) = parts_of(&compute_assignments(&pcb_a).unwrap(), &reference);
+    assert_eq!(source, "model (global)");
+    assert!(clear_material(&global).unwrap().is_some());
+    let (_, source) = parts_of(&compute_assignments(&pcb_a).unwrap(), &reference);
+    assert!(source.starts_with("rule "), "{source}");
 
     // 存在しない材質名、--ref と --model の両方・どちらも無し、--global に --ref はエラー
     assert!(set_material(&MaterialSetOptions { material: "no_such_material".into(), ..by_ref.clone() }).unwrap_err().contains("not in the material library"));

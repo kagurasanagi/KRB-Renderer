@@ -29,6 +29,20 @@ pub struct Instance {
     pub xform: Mat4,
     /// 材質の番号 = material_base + 三角形の tri_material（基板などは 0）
     pub material_base: u32,
+    /// 何のインスタンスか（ビューアで部品を選ぶのに使う）
+    pub owner: InstanceOwner,
+}
+
+/// インスタンスの持ち主
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstanceOwner {
+    /// 基板の本体・凹凸のタイル
+    Board,
+    /// 部品の 3D モデル：footprint は Board::footprints の番号、model はその models の番号、
+    /// assignments は Scene::assignments のうちこのインスタンスの部位の行の始まり（部位の番号 = 三角形の tri_material）
+    Model { footprint: u32, model: u32, assignments: u32 },
+    /// 3D モデルが無い（または裏で分割中の）部品の代わりの箱
+    Placeholder { footprint: u32 },
 }
 
 /// 部品の部位ごとの材質の割り当て（krbr material show 用）
@@ -556,7 +570,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
             *m = remap[(*m as usize).min(3)];
         }
         s.meshes.push(bm);
-        s.instances.push(Instance { mesh: 0, xform: Mat4::IDENTITY, material_base: 0 });
+        s.instances.push(Instance { mesh: 0, xform: Mat4::IDENTITY, material_base: 0, owner: InstanceOwner::Board });
         add_instance_bounds(&mut s, 0, &Mat4::IDENTITY);
     }
     if opts.relief {
@@ -579,7 +593,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
                 }
                 let id = s.meshes.len() as u32;
                 s.meshes.push(SceneMesh { name: format!("relief_{}_{}", if side == 0 { "front" } else { "back" }, t), mesh });
-                s.instances.push(Instance { mesh: id, xform: Mat4::IDENTITY, material_base: 0 });
+                s.instances.push(Instance { mesh: id, xform: Mat4::IDENTITY, material_base: 0, owner: InstanceOwner::Board });
             }
         }
         s.sdf_grid = cache.sdf_grid;
@@ -622,7 +636,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
             continue;
         }
         let (mut wanted, mut placed) = (0, 0);
-        for m in &fp.models {
+        for (mi, m) in fp.models.iter().enumerate() {
             if m.hidden || m.opacity <= 0.0 {
                 continue;
             }
@@ -665,6 +679,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
             let model_file = res.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
             let mut resolved = Vec::new();
             let mut set_key = String::new();
+            let first_assignment = s.assignments.len() as u32;
             let nparts = model.parts.len().max(1);
             for pi in 0..nparts {
                 let part = model.parts.get(pi);
@@ -697,7 +712,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
                 }
             };
             let xf = (to_world * kicad_model_matrix(fp, m, s.board.thickness)).as_mat4();
-            s.instances.push(Instance { mesh: mesh_id, xform: xf, material_base });
+            s.instances.push(Instance { mesh: mesh_id, xform: xf, material_base, owner: InstanceOwner::Model { footprint: fi as u32, model: mi as u32, assignments: first_assignment } });
             add_instance_bounds(&mut s, mesh_id, &xf);
             placed += 1;
             s.model_instances += 1;
@@ -712,7 +727,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
             let box_mesh = s.meshes.len() as u32;
             s.meshes.push(SceneMesh { name: format!("placeholder_{}", fp.reference), mesh: beveled_box(half, bevel, ph_mat) });
             let xf = placeholder_matrix(fp, lo, hi, height, s.board.thickness, s.board.center);
-            s.instances.push(Instance { mesh: box_mesh, xform: xf, material_base: 0 });
+            s.instances.push(Instance { mesh: box_mesh, xform: xf, material_base: 0, owner: InstanceOwner::Placeholder { footprint: fi as u32 } });
             add_instance_bounds(&mut s, box_mesh, &xf);
             s.placeholders += 1;
         }
@@ -756,15 +771,31 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
 }
 
 /// シーン中の三角形との最初の交点までの距離（Ctrl + クリックでピントを合わせる用）。Möller–Trumbore
+/// 光線が最初に当たったもの
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pick {
+    /// 距離（mm）
+    pub t: f32,
+    /// Scene::instances の番号
+    pub instance: usize,
+    /// 当たった三角形の tri_material（部品のモデルなら部位の番号）
+    pub part: u32,
+}
+
+/// 光線と全三角形の交差（CPU。ピント合わせ・部品の選択の 1 回ごとに使う程度の速さ）
 pub fn raycast(s: &Scene, origin: Vec3, dir: Vec3) -> Option<f32> {
-    let mut best = 1e30f32;
-    for i in &s.instances {
+    raycast_pick(s, origin, dir).map(|p| p.t)
+}
+
+pub fn raycast_pick(s: &Scene, origin: Vec3, dir: Vec3) -> Option<Pick> {
+    let mut best: Option<Pick> = None;
+    for (ii, i) in s.instances.iter().enumerate() {
         // オブジェクト座標で交差を求める（t は変換しても同じ値になる）
         let inv = i.xform.inverse();
         let o = inv.transform_point3(origin);
         let d = inv.transform_vector3(dir);
         let m = &s.meshes[i.mesh as usize].mesh;
-        for t in m.indices.chunks_exact(3) {
+        for (ti, t) in m.indices.chunks_exact(3).enumerate() {
             let (a, b, c) = (m.positions[t[0] as usize], m.positions[t[1] as usize], m.positions[t[2] as usize]);
             let (e1, e2) = (b - a, c - a);
             let p = d.cross(e2);
@@ -784,12 +815,12 @@ pub fn raycast(s: &Scene, origin: Vec3, dir: Vec3) -> Option<f32> {
                 continue;
             }
             let tt = e2.dot(q) * inv_det;
-            if tt > 1e-4 && tt < best {
-                best = tt;
+            if tt > 1e-4 && best.is_none_or(|b| tt < b.t) {
+                best = Some(Pick { t: tt, instance: ii, part: m.tri_material.get(ti).copied().unwrap_or(0) });
             }
         }
     }
-    (best < 1e30).then_some(best)
+    best
 }
 
 /// 読み込んだ設定ファイルなど、シーンを作るのに要るもの一式（C++ 版の PreparedScene の一部）
@@ -841,6 +872,28 @@ pub fn load_material_setup(pcb: &std::path::Path) -> MaterialSetup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pick_returns_the_nearest_instance_and_its_part() {
+        // 部位 0 と 1 の箱を 2 つ、z 方向に並べる（手前 z = 10、奥 z = 0）
+        let mut s = Scene::default();
+        let mut mesh = beveled_box(Vec3::splat(1.0), 0.1, 0);
+        let n = mesh.tri_material.len();
+        for (i, m) in mesh.tri_material.iter_mut().enumerate() {
+            *m = if i < n / 2 { 0 } else { 1 };
+        }
+        s.meshes.push(SceneMesh { name: "box".into(), mesh });
+        let owner = |fp| InstanceOwner::Model { footprint: fp, model: 0, assignments: 0 };
+        s.instances.push(Instance { mesh: 0, xform: Mat4::IDENTITY, material_base: 0, owner: owner(0) });
+        s.instances.push(Instance { mesh: 0, xform: Mat4::from_translation(Vec3::new(0.0, 0.0, 10.0)), material_base: 0, owner: owner(1) });
+        let p = raycast_pick(&s, Vec3::new(0.0, 0.0, 50.0), Vec3::NEG_Z).unwrap();
+        assert_eq!(p.instance, 1);
+        assert!((p.t - 39.0).abs() < 1e-3, "{}", p.t);
+        assert!(p.part <= 1);
+        assert_eq!(raycast(&s, Vec3::new(0.0, 0.0, 50.0), Vec3::NEG_Z), Some(p.t));
+        // 外れる光線
+        assert!(raycast_pick(&s, Vec3::new(5.0, 0.0, 50.0), Vec3::NEG_Z).is_none());
+    }
 
     #[test]
     fn placeholder_height_grows_with_area_up_to_5mm() {

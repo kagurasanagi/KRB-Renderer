@@ -21,4 +21,4 @@ pub use mask_presets::{find_mask_preset, mask_presets, MaskPreset};
 pub use material::{linear_to_srgb, srgb_to_linear, BumpPattern, Material, MaterialKind};
 pub use material_library::MaterialLibrary;
 pub use model_map::{GlobalModelMap, MaterialQuery, MaterialResolver, ProjectOverrides, ResolvedMaterial};
-pub use scene::{build_scene, update_mask_material, Instance, Scene, SceneContext, SceneMesh, SceneOptions};
+pub use scene::{build_scene, raycast_pick, update_mask_material, Instance, InstanceOwner, Pick, Scene, SceneContext, SceneMesh, SceneOptions};

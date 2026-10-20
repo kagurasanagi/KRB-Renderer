@@ -64,12 +64,12 @@ fn find_models(board: &Board, resolver: &ModelResolver, query: &str) -> Vec<Mode
     out
 }
 
+/// 部位（空か "*" なら全部位）に材質を割り当てる。全部位のときは、同じ書き込み先の部位ごとの指定も消す
+/// （残すと、そちらが優先されて「全部位」にならない。C++ 版は部位ごとの指定を残す）
 fn assign(a: &mut PartAssignment, part: &str, material: &str) {
     if part.is_empty() || part == "*" {
         a.material = material.to_string();
-        if part == "*" {
-            a.parts.remove("*");
-        }
+        a.parts.clear();
     } else {
         a.parts.insert(part.to_string(), material.to_string());
     }
@@ -127,6 +127,63 @@ pub fn set_material(o: &MaterialSetOptions) -> Result<PathBuf, String> {
         ms.project.save(&ms.project_file)?;
         Ok(ms.project_file)
     }
+}
+
+/// 上書きを消す（part が空か "*" なら全部位）。何か消えたら true
+fn clear_assign(a: &mut PartAssignment, part: &str) -> bool {
+    if part.is_empty() || part == "*" {
+        let had = !a.is_empty();
+        *a = PartAssignment::default();
+        had
+    } else {
+        a.parts.remove(part).is_some()
+    }
+}
+
+/// set_material で書いた割り当てを消して、規則どおりに戻す（o.material は使わない）。
+/// 戻り値は書き直したファイル（消すものが無ければ None で、ファイルに触らない）
+pub fn clear_material(o: &MaterialSetOptions) -> Result<Option<PathBuf>, String> {
+    if o.reference.is_empty() == o.model.is_empty() {
+        return Err("specify exactly one of --ref or --model".into());
+    }
+    if o.global && o.model.is_empty() {
+        return Err("--global can only be used with --model (per-reference overrides belong to the project)".into());
+    }
+    let board = load_board_or_report(&o.pcb).ok_or("cannot load board")?;
+    let mut ms = load_material_setup(&board.file);
+    if !o.reference.is_empty() {
+        check_readable(&ms.project_file, ProjectOverrides::load)?;
+        let Some(a) = ms.project.refs.get_mut(&o.reference) else { return Ok(None) };
+        if !clear_assign(a, &o.part) {
+            return Ok(None);
+        }
+        if a.is_empty() {
+            ms.project.refs.remove(&o.reference);
+        }
+        ms.project.save(&ms.project_file)?;
+        return Ok(Some(ms.project_file));
+    }
+    let cfg = load_project_config(&board.file);
+    let resolver = ModelResolver::new(&board.project_dir, &cfg.path_vars, &cfg.model_search_dirs);
+    let models = find_models(&board, &resolver, &o.model);
+    let [m] = models.as_slice() else { return Err(format!("'{}' does not match exactly one 3D model on this board", o.model)) };
+    let (entries, file) = if o.global {
+        check_readable(&ms.global_file, GlobalModelMap::load)?;
+        (&mut ms.global.models, ms.global_file.clone())
+    } else {
+        check_readable(&ms.project_file, ProjectOverrides::load)?;
+        (&mut ms.project.models, ms.project_file.clone())
+    };
+    let mut changed = false;
+    for e in entries.iter_mut().filter(|e| e.matches(&m.spec, &m.hash)) {
+        changed |= clear_assign(&mut e.assign, &o.part);
+    }
+    if !changed {
+        return Ok(None);
+    }
+    entries.retain(|e| !e.assign.is_empty());
+    if o.global { ms.global.save(&file)? } else { ms.project.save(&file)? }
+    Ok(Some(file))
 }
 
 /// 部品・部位ごとの材質と、どの段階で決まったか（3D モデルを読む。キャッシュが無ければ分割するので時間がかかる）
