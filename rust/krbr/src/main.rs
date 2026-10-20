@@ -14,6 +14,9 @@ struct Cli {
     /// debug ログも出す
     #[arg(short, long, global = true)]
     verbose: bool,
+    /// ウィンドウを持たないコマンド（render / watch / geom / models）も、通常の CPU の優先度で動かす（既定は低優先度）
+    #[arg(long, global = true)]
+    normal_priority: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -491,6 +494,12 @@ fn main() {
     if cli.verbose {
         log::set_level(log::Level::Debug);
     }
+    // ウィンドウを持たない重いコマンドは、プロセス全体を低優先度にする。ビューアはウィンドウのスレッドを通常のままにして、
+    // 裏の処理のスレッドだけを下げる（krbr_core::platform::lower_thread_priority）
+    if !cli.normal_priority && matches!(cli.command, Command::Render(_) | Command::Watch(_) | Command::Geom { .. } | Command::Models { .. }) {
+        krbr_core::platform::lower_process_priority();
+    }
+    krbr_core::debug!("process priority: {}", if krbr_core::platform::process_priority_is_low() { "below normal" } else { "normal" });
     let result = match &cli.command {
         Command::Info { pcb, models } => cmd_info(pcb, *models),
         Command::Render(args) => krbr_app::cmd_render(&args.to_options("out/board.png")),

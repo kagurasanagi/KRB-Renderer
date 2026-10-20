@@ -310,6 +310,7 @@ fn load_now(shared: &Shared, p: &Path, cache_file: Option<&Path>, file_hash: &st
 }
 
 fn worker_loop(shared: Arc<Shared>) {
+    krbr_core::platform::lower_thread_priority(); // 裏での分割は低優先度
     loop {
         let job = {
             let mut st = shared.state.lock().unwrap();

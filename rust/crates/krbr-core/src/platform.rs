@@ -74,3 +74,78 @@ pub fn add_dll_search_dirs() {
         }
     }
 }
+
+#[cfg(windows)]
+mod priority {
+    use std::ffi::c_void;
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn GetCurrentThread() -> *mut c_void;
+        pub fn SetThreadPriority(thread: *mut c_void, priority: i32) -> i32;
+        pub fn GetThreadPriority(thread: *mut c_void) -> i32;
+        pub fn GetCurrentProcess() -> *mut c_void;
+        pub fn SetPriorityClass(process: *mut c_void, class: u32) -> i32;
+        pub fn GetPriorityClass(process: *mut c_void) -> u32;
+    }
+    pub const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
+    pub const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x4000;
+}
+
+/// 今のスレッドの CPU の優先度を下げる（BELOW_NORMAL）。裏の重い処理（読み直し・タイルの作り直し・モデルの分割など）の先頭で呼ぶ。
+/// ビューアのウィンドウのスレッドは通常のままなので、ほかのアプリが CPU を使っていても操作への反応は遅れない
+pub fn lower_thread_priority() {
+    #[cfg(windows)]
+    // 安全性：GetCurrentThread は今のスレッドの疑似ハンドル（閉じなくてよい）
+    unsafe {
+        priority::SetThreadPriority(priority::GetCurrentThread(), priority::THREAD_PRIORITY_BELOW_NORMAL);
+    }
+}
+
+/// 今のスレッドが lower_thread_priority で下げた優先度か（テスト用）
+pub fn thread_priority_is_low() -> bool {
+    #[cfg(windows)]
+    // 安全性：同上
+    unsafe {
+        priority::GetThreadPriority(priority::GetCurrentThread()) <= priority::THREAD_PRIORITY_BELOW_NORMAL
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+/// プロセス全体の CPU の優先度を下げる（BELOW_NORMAL_PRIORITY_CLASS）。ウィンドウを持たないコマンド（render / watch など）で使う
+pub fn lower_process_priority() {
+    #[cfg(windows)]
+    // 安全性：GetCurrentProcess は今のプロセスの疑似ハンドル
+    unsafe {
+        priority::SetPriorityClass(priority::GetCurrentProcess(), priority::BELOW_NORMAL_PRIORITY_CLASS);
+    }
+}
+
+/// プロセスが BELOW_NORMAL か（テスト・ログ用）
+pub fn process_priority_is_low() -> bool {
+    #[cfg(windows)]
+    // 安全性：同上
+    unsafe {
+        priority::GetPriorityClass(priority::GetCurrentProcess()) == priority::BELOW_NORMAL_PRIORITY_CLASS
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_thread_priority_is_lowered_without_touching_the_caller() {
+        let caller_low = thread_priority_is_low();
+        let worker_low = std::thread::spawn(|| {
+            lower_thread_priority();
+            thread_priority_is_low()
+        })
+        .join()
+        .unwrap();
+        assert!(worker_low || !cfg!(windows));
+        assert_eq!(thread_priority_is_low(), caller_low); // 呼んだ側のスレッドはそのまま
+    }
+}

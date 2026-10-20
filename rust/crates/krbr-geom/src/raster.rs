@@ -323,6 +323,7 @@ pub fn rasterize_coverage(paths: &Paths, g: &Grid) -> Vec<f32> {
             let r0 = t * band;
             let r1 = r0 + chunk.len() / width;
             s.spawn(move || {
+                krbr_core::platform::lower_thread_priority();
                 // 帯の中の行は chunk の先頭から並ぶので、行番号を引き直す
                 let mut local = vec![0.0f32; chunk.len()];
                 raster_band_offset(edges, width, r0, r1, &mut local);

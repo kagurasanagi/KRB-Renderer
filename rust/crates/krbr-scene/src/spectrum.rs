@@ -293,7 +293,10 @@ pub fn build_rgb2spec_table() -> Rgb2SpecTable {
     let n = (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2) / 2).clamp(1, 12);
     std::thread::scope(|s| {
         for _ in 0..n {
-            s.spawn(&worker);
+            s.spawn(|| {
+                krbr_core::platform::lower_thread_priority();
+                worker()
+            });
         }
     });
     Rgb2SpecTable { scale, data: data.into_inner().unwrap() }

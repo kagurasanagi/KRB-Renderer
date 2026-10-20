@@ -232,7 +232,11 @@ pub fn build_relief_tiles(cache: &mut ReliefTileCache, board: &Board, geo: &Boar
     let nthreads = (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2) / 2).clamp(1, 12).min(todo.len().max(1));
     std::thread::scope(|s| {
         for _ in 0..nthreads {
-            s.spawn(&worker);
+            // 作業用のスレッドは低優先度（ビューアのウィンドウのスレッドより後回しにする）
+            s.spawn(|| {
+                krbr_core::platform::lower_thread_priority();
+                worker()
+            });
         }
     });
     let results = results.into_inner().unwrap();

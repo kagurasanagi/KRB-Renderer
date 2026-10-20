@@ -359,6 +359,7 @@ impl App {
         let (tx, rx) = mpsc::channel();
         let p = path.clone();
         std::thread::spawn(move || {
+            krbr_core::platform::lower_thread_priority();
             let _ = tx.send(load_environment(p));
         });
         self.env_job = Some((path, rx));
@@ -674,6 +675,7 @@ impl App {
         let saved_at = if saved { self.watcher.as_ref().and_then(|w| w.saved_at()) } else { None };
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
+            krbr_core::platform::lower_thread_priority(); // 読み直しは低優先度（ウィンドウのスレッドは通常のまま）
             if silk {
                 source.tiles.invalidate_all(); // シルクが変わったので、どのタイルも作り直す
             }

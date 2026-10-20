@@ -144,7 +144,7 @@ STEP 変換器 DLL と OIDN が無くても krbr.exe は動きます（STEP の�
 | `krbr geom <pcb>` / `krbr models <pcb>` | 開発用：基板の形状と凹凸タイル（GPU を使わない）／全 3D モデルの読み込みの統計 |
 | `krbr diff <a> <b>` | 開発用：2 枚の画像（PNG / EXR）の差の平均と最大 |
 
-`render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--integrator pt|bdpt|vcm`, `--seed`, `--spectral`（色の計算）, `--mask-color <プリセット名 または r,g,b>`（レジストの色。下記）, `--lens pinhole|thin|realistic`, `--f-number`, `--focal-length`, `--focus-distance`, `--blades`, `--denoise` / `--no-denoise` / `--denoise-strength`, `--init`, `--no-cache`, `--no-kicad-cli`, `--validate`, `-v`。
+`render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--integrator pt|bdpt|vcm`, `--seed`, `--spectral`（色の計算）, `--mask-color <プリセット名 または r,g,b>`（レジストの色。下記）, `--lens pinhole|thin|realistic`, `--f-number`, `--focal-length`, `--focus-distance`, `--blades`, `--denoise` / `--no-denoise` / `--denoise-strength`, `--init`, `--no-cache`, `--no-kicad-cli`, `--validate`, `--normal-priority`, `-v`。
 
 ## GPU の要件と、GTX 1060 での状況
 
@@ -188,7 +188,7 @@ STEP の読み込み・三角形分割だけが OpenCASCADE（C++ のライブ�
 
 - `render` / `probe` / `info` では、ウィンドウ・サーフェス・スワップチェーンを作りません。画像を自動で開くこともしません。
 - `view` は収束したら（`--spp` に達したら）描画を止めて入力を待つので、表示したままでも GPU をほとんど使いません。
-- kicad-cli は BELOW_NORMAL 優先度で、コンソールを出さずに起動します。krbr.exe 自身の優先度は変えません（重い処理を流すときは `start /belownormal` などで起動してください）。
+- CPU の優先度：ウィンドウを持たないコマンド（`render` / `watch` / `geom` / `models`）は、プロセス全体を BELOW_NORMAL で動かします（`--normal-priority` で通常に戻す）。ビューアはプロセスとウィンドウのスレッド（入力・パネル・GPU への投入）を通常のままにし、裏の処理（読み直し・凹凸タイルの作り直し・3D モデルの分割・環境マップの読み込み）のスレッドだけを BELOW_NORMAL にします。ほかのアプリが CPU を使っていても、一時停止などの操作への反応は遅れません。kicad-cli は BELOW_NORMAL で、コンソールを出さずに起動します。
 - GPU は、`render` では**グラフィックスを持たない計算専用キュー**を使います。`view` では、画面へ表示できるキューを使います。どちらも `VK_KHR_global_priority` が使えれば **LOW** で作ります。
 - 1 サンプルずつ投入して完了を待つので、GPU を長時間占有しません。既定のサンプル数は 64 です。
 - `.kicad_pcb`、KiCad のライブラリ・設定は読み取りのみです。

@@ -16,8 +16,6 @@
 ## C++ 版の廃止（済、2026-10-20）
 C++ 版の本体はタグ cpp-final（GitHub にも push 済み）。GPU の検証テストは rust/crates/krbr-render/tests/ に移し（C++ 版と同じ値）、シェーダは krbr-render の build.rs が作る。
 C++ は STEP 変換器 DLL（step_dll/、CMake・vcpkg は OpenCASCADE と glm だけ）。層テクスチャ方式（[relief] enabled = false）は廃止した。
-- 残り：C++ 版はプロセス全体を BELOW_NORMAL にしていた（--normal-priority で解除）が、Rust 版にはまだ無い（kicad-cli の子プロセスだけ低優先度）
-
 ## 配布と KiCad 連携
 - 配布の形を決める：ポータブル版の zip（scripts\make_dist.ps1）に加えて、インストーラ、または KiCad のプラグインマネージャ（PCM）のパッケージを作るか
 - GitHub Releases への公開（公開の前に確認を取る）
