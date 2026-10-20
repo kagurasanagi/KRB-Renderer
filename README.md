@@ -1,5 +1,7 @@
 # KRB-Renderer — KiCad 連携 物理ベース レンダラー
 
+![ビューアの画面（BDPT・分光、白いレジスト、512 spp）](docs/images/viewer.png)
+
 **KRB-Renderer**（KiCad 連携 物理ベース レンダラー）は、KiCad の `.kicad_pcb` を読み込み、HDR 環境光で照らした基板を、Vulkan のレイトレーシング（`VK_KHR_ray_query`）を使った GPU パストレーサーで描画するツールです。
 
 コマンド名・設定フォルダ名・環境変数の接頭辞は、短い **`krbr`** のままです（`krbr.exe`、`<プロジェクト名>.krbr/`、`%APPDATA%\krbr\`、`KRBR_CONFIG_DIR` など）。リポジトリ名だけが KRB-Renderer です。
