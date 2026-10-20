@@ -64,7 +64,7 @@ krbr render E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --h
 
 - Vulkan のデバイスと同じ GPU（UUID で選ぶ）の CUDA デバイスで動かし、Vulkan のバッファを外部メモリ（Win32 ハンドル）として OIDN と共有します。CPU を経由する転送はありません。共有できない環境では CPU デバイスに切り替えます。
 - 累積画像をサンプル数で割って入力を作るシェーダ（`denoise_prep.comp`）→ OIDN → 結果を画像へ写し、表示用のトーンマッピングにつなぎます。
-- ビューア：既定で有効（パネルで切り替え）。カメラを動かしている間は品質 fast で毎フレーム、止まったら high で 150 ms ごと、収束時にもう一度。1080p の high で約 20 ms、720p の fast で約 4 ms（RTX 3080 Ti）。
+- ビューア：既定で無効（`--denoise` かパネルの「ノイズ除去 (OIDN)」で有効にする。OIDN の準備は有効にしたときに初めて行う）。カメラを動かしている間は品質 fast で毎フレーム、止まったら high で 150 ms ごと、収束時にもう一度。1080p の high で約 20 ms、720p の fast で約 4 ms（RTX 3080 Ti）。
   - ノイズ除去が **CPU** になるとき（CUDA が使えない GPU。GTX 1060 など）は 1 回に数秒かかり画面が止まるので、ビューアは**収束時（最大 spp に達したとき）と、`D` キー／パネルの「今かける」のときだけ**かけます（常に品質 high）。それ以外は蓄積中のノイズのある画像をそのまま表示します。
 - `krbr watch`：既定で有効（high）。`krbr render --denoise` で `<名前>_denoised.png / .exr` も書き出します。`--no-denoise` で無効にできます。
 

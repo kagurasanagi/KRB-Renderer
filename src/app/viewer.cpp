@@ -133,7 +133,7 @@ struct ViewState {
     bool denoiseRequested = false;  // D キー／ボタン：ノイズ除去が CPU のとき、手動で 1 回かける
     bool resetRequested = false;
     bool autoExposureRequested = false;
-    bool denoise = true;  // ノイズ除去した画像を表示する
+    bool denoise = false;  // ノイズ除去した画像を表示する（既定は無効。--denoise かパネルで有効にする）
     bool spectral = false;  // 分光モード（代表波長方式）
     bool integratorChanged = false;
 
@@ -446,16 +446,18 @@ int cmdView(const ViewOptions& vo) {
         // ノイズ除去：操作中は品質 fast で毎フレーム、止まったら high で間隔をあけて
         render::Denoiser denoiser;
         render::Tonemapper toneDenoised;
-        st.denoise = o.denoise.value_or(true);
+        st.denoise = o.denoise.value_or(false);
+        // OIDN の初期化（デバイスの準備に時間がかかるので、有効にしたときに初めて行う。失敗したら再び試さない）
+        bool denoiserTried = false;
         auto initDenoiser = [&] {
-            if (!st.denoise && !denoiser.ready() && !o.denoise.value_or(true)) return;
+            denoiserTried = true;
             if (denoiser.init(ctx, prog.targets(), render::DenoiseQuality::Fast)) {
                 render::RenderTargets t = prog.targets();
                 t.color = denoiser.output();
                 toneDenoised.init(ctx, t);
             }
         };
-        initDenoiser();
+        if (st.denoise) initDenoiser();
         // ノイズ除去が CPU（CUDA が使えない GPU）なら、収束時と手動のときだけかける（毎フレームの更新で確認）
         bool denoiseOnCpu = false;
         uint64_t accumEpoch = 0, denoisedEpoch = UINT64_MAX;  // 累積をやり直すたびに増やす
@@ -553,6 +555,11 @@ int cmdView(const ViewOptions& vo) {
         const std::string stem = platform::pathToUtf8(outPng.stem());
 
         while (!glfwWindowShouldClose(window)) {
+            if (st.denoise && !denoiserTried) {
+                vkDeviceWaitIdle(dev);
+                initDenoiser();
+                st.dirty = true;
+            }
             denoiseOnCpu = denoiser.ready() && denoiser.deviceName() == "CPU";
             const bool idle = prog.samples() >= static_cast<uint32_t>(st.maxSpp) && !st.dirty && !envJob.valid() &&
                               !reloadJob.valid();
@@ -647,7 +654,7 @@ int cmdView(const ViewOptions& vo) {
                 ImGui::SameLine();
                 if (ImGui::Button("0")) st.exposure = 0.0f;
 
-                if (denoiser.ready() || st.denoise) {
+                if (render::Denoiser::compiledIn()) {
                     ImGui::Checkbox("ノイズ除去 (OIDN)", &st.denoise);
                     if (denoiser.ready()) {
                         ImGui::SameLine();
@@ -658,7 +665,7 @@ int cmdView(const ViewOptions& vo) {
                             if (ImGui::Button("今かける (D)")) st.denoiseRequested = true;
                             ImGui::TextDisabled("CPU のため、収束時と D キーのときだけかけます");
                         }
-                    } else {
+                    } else if (denoiserTried) {
                         ImGui::SameLine();
                         ImGui::TextDisabled("使用できません");
                     }

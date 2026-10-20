@@ -22,7 +22,7 @@ struct RenderOptions {
     bool validate = false;
     bool normalPriority = false;
     bool debugLayers = false;
-    std::optional<bool> denoise;  // ノイズ除去（render は既定で無効、view / watch は既定で有効）
+    std::optional<bool> denoise;  // ノイズ除去（watch は既定で有効、view / render は既定で無効）
     std::optional<bool> spectral;  // 分光モード（既定は設定ファイル、無ければ RGB）
     std::string lens;              // pinhole / thin / realistic（空なら設定ファイル）
     std::string maskColor;         // レジストの色：プリセット名か r,g,b（空なら設定ファイル／stackup）
