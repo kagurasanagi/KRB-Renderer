@@ -225,6 +225,8 @@ mod tests {
         let (nf, nc, nd) = (m.ior_at(486.1), m.ior_at(656.3), m.ior_at(587.6));
         assert!((nd - 1.491).abs() < 1e-4);
         assert!(((nd - 1.0) / (nf - nc) - 57.0).abs() < 0.05);
+        let no_dispersion = Material { transmission_dispersion_scale: 0.0, ..m.clone() };
+        assert_eq!(no_dispersion.ior_at(400.0), 1.491);
         let plain = Material::default();
         assert_eq!(plain.ior_at(400.0), 1.5);
     }

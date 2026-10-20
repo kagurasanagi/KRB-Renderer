@@ -472,4 +472,24 @@ mod tests {
         assert!(enc[0] < 128 && enc[15] > 128);
         assert!((decode_sdf_mm(enc[12]) - 4.5 / 50.0).abs() < 0.003);
     }
+
+    #[test]
+    fn sdf_of_a_single_pixel_and_clamping() {
+        // 中心 (32,32) の 1 画素だけが内側：外側の距離は中心からの距離 − 0.5
+        let n = 64usize;
+        let mut dot = vec![0u8; n * n];
+        dot[32 * n + 32] = 1;
+        let sd = signed_distance_px(&dot, n, n);
+        assert!((sd[32 * n + 32 + 7] - 6.5).abs() < 1e-4);
+        assert!((sd[(32 + 3) * n + 32 + 4] - 4.5).abs() < 1e-4); // 3-4-5
+        // 範囲（0.3 mm）より遠い所は上限に張り付く
+        let (w, h) = (200usize, 4usize);
+        let cov: Vec<f32> = (0..w * h).map(|i| if i % w < 100 { 1.0 } else { 0.0 }).collect();
+        let enc = encode_sdf(&cov, w, h, 50.0);
+        let range = SDF_RANGE_MM as f32;
+        assert!((decode_sdf_mm(enc[w + 105]) - 0.11).abs() < 0.11 * 0.05);
+        assert!((decode_sdf_mm(enc[w + 94]) + 0.11).abs() < 0.11 * 0.05);
+        assert!((decode_sdf_mm(enc[w + 190]) - range).abs() < range * 0.01);
+        assert!((decode_sdf_mm(enc[w + 2]) + range).abs() < range * 0.01);
+    }
 }

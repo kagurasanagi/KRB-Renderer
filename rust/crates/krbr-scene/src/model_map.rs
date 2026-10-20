@@ -588,6 +588,72 @@ mod tests {
         assert!((r.resolve(&q(&body)).material.base_color.x - 0.0189).abs() < 0.002);
     }
 
+    // ref > プロジェクトのモデル > 全体のモデル > 規則 > 既定 の順に、段階を 1 つずつ足して確かめる
+    #[test]
+    fn resolution_order_full_chain() {
+        let mut lib = MaterialLibrary::builtin();
+        lib.load_text("[material.a]
+[material.b]
+[material.c]
+[material.d]
+", "test").unwrap();
+        let pins = ModelPart { name: String::new(), srgb: Vec3::new(0.824, 0.820, 0.781), alpha: 1.0, has_color: true };
+        let q = MaterialQuery { reference: "U3", model_spec: "${KICAD10_3DMODEL_DIR}/X.step", model_hash: "abcd", model_file: "X.step", part: Some(&pins) };
+        let mut project = ProjectOverrides::default();
+        let mut global = GlobalModelMap::default();
+        let resolve = |p: &ProjectOverrides, g: &GlobalModelMap| {
+            let r = MaterialResolver::new(&lib, p, g).resolve(&q);
+            (r.name, r.source)
+        };
+
+        // 組み込みの規則（kicad:metal_grey_pins）。先頭の 3 つは電解コンデンサのモデル用
+        assert_eq!(resolve(&project, &global), ("metal_tin".into(), "rule 4 (builtin)".into()));
+        global.rules.push(MaterialRule { part: "kicad:*".into(), material: "d".into(), ..Default::default() });
+        assert_eq!(resolve(&project, &global).0, "d");
+        global.upsert("${KICAD10_3DMODEL_DIR}/X.step", "").assign.material = "c".into();
+        assert_eq!(resolve(&project, &global), ("c".into(), "model (global)".into()));
+        project.upsert("", "abcd").assign.material = "b".into(); // ハッシュだけで照合
+        assert_eq!(resolve(&project, &global), ("b".into(), "model (project)".into()));
+        project.refs.entry("U3".into()).or_default().material = "a".into();
+        assert_eq!(resolve(&project, &global), ("a".into(), "ref U3 (project)".into()));
+
+        // 部位ごとの指定は、その部位にだけ効く
+        project.refs.insert("U3".into(), PartAssignment::default());
+        project.refs.get_mut("U3").unwrap().parts.insert("#ffffff".into(), "a".into());
+        assert_eq!(resolve(&project, &global).0, "b");
+        project.refs.get_mut("U3").unwrap().parts.insert("kicad:metal_grey_pins".into(), "a".into());
+        assert_eq!(resolve(&project, &global).0, "a");
+        // 材質ライブラリにない名前は飛ばして次の段階へ
+        project.refs.get_mut("U3").unwrap().parts.insert("kicad:metal_grey_pins".into(), "does_not_exist".into());
+        assert_eq!(resolve(&project, &global).0, "b");
+    }
+
+    #[test]
+    fn model_entries_match_by_unexpanded_path_or_content_hash() {
+        let e = ModelEntry { path: "${KIPRJMOD}/a.step".into(), hash: "1234".into(), ..Default::default() };
+        assert!(e.matches("${KIPRJMOD}/a.step", ""));
+        assert!(e.matches("C:/elsewhere/renamed.step", "1234"));
+        assert!(!e.matches("C:/elsewhere/renamed.step", "9999"));
+    }
+
+    #[test]
+    fn global_model_map_round_trip() {
+        let dir = std::env::temp_dir().join(format!("krbr_rust_globalmap_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut g = GlobalModelMap::default();
+        g.upsert("a.step", "").assign.parts.insert("*".into(), "ceramic".into());
+        g.rules.push(MaterialRule { model: "*LED*".into(), val_min: Some(0.5), material: "glossy_plastic".into(), ..Default::default() });
+        let p = dir.join("model_map.toml");
+        g.save(&p).unwrap();
+        let h = GlobalModelMap::load(&p).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(h.rules.len(), 1);
+        assert_eq!(h.rules[0].model, "*LED*");
+        assert_eq!(h.rules[0].val_min, Some(0.5));
+        assert_eq!(h.rules[0].material, "glossy_plastic");
+        assert_eq!(h.models[0].assign.parts["*"], "ceramic");
+    }
+
     #[test]
     fn overrides_round_trip() {
         let dir = std::env::temp_dir().join("krbr_rust_modelmap_test");

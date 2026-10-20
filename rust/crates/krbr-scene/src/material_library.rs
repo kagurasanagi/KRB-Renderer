@@ -223,12 +223,14 @@ mod tests {
     fn builtin_and_overlay() {
         let mut lib = MaterialLibrary::builtin();
         assert!(lib.find("metal_tin").unwrap().base_metalness == 1.0);
+        let bump = lib.find("plastic").unwrap().bump_strength;
         assert!(lib.find("plastic").unwrap().base_color_from_model);
         assert!(!lib.find("epoxy_black").unwrap().base_color_from_model);
         lib.load_text("[material.plastic]\nspecular_roughness = 0.9\n[material.mine]\nbase_color = [1, 0, 0]\n", "test").unwrap();
         let p = lib.find("plastic").unwrap();
         assert_eq!(p.specular_roughness, 0.9);
         assert!(p.base_color_from_model); // 書いた項目だけ上書き
+        assert_eq!(p.bump_strength, bump);
         assert_eq!(lib.source_of("mine"), "test");
         assert_eq!(lib.find("mine").unwrap().base_color.x, 1.0);
     }

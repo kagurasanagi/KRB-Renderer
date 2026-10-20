@@ -361,4 +361,46 @@ mod tests {
         let c = t.lookup(Vec3::splat(0.5));
         assert!((sigmoid_poly(c, 400.0) - 0.5).abs() < 1e-6 && (sigmoid_poly(c, 700.0) - 0.5).abs() < 1e-6);
     }
+
+    #[test]
+    fn matching_functions_and_e_white() {
+        // ȳ の山は 555 nm 付近でほぼ 1
+        assert!((cmf(555.0).y - 1.0).abs() < 0.01);
+        let w = white_e();
+        assert!((w.x - 1.0).abs() < 0.02 && (w.z - 1.0).abs() < 0.02, "{w}");
+    }
+
+    // RGB → スペクトル → XYZ → RGB の往復（変換表は C++ 版と共有のキャッシュを使う。無ければ作る）
+    #[test]
+    fn rgb2spec_table_round_trip() {
+        let t = rgb2spec_table();
+        let colors = [
+            [0.8, 0.2, 0.1], [0.1, 0.5, 0.9], [0.5, 0.5, 0.5], [0.02, 0.02, 0.02], [1.0, 1.0, 1.0], [0.9, 0.9, 0.1], [0.05, 0.3, 0.08],
+            [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.33, 0.07, 0.61], [1.0, 0.98, 0.98], [0.97, 1.0, 0.99], [0.75, 0.62, 0.4],
+        ];
+        let mut worst = 0.0f32;
+        for c in colors {
+            let c = Vec3::from(c);
+            let coef = t.lookup(c);
+            let (lo, hi) = (std::cell::Cell::new(1.0f32), std::cell::Cell::new(0.0f32));
+            let xyz = integrate_xyz(|l| {
+                let v = sigmoid_poly(coef, l);
+                lo.set(lo.get().min(v));
+                hi.set(hi.get().max(v));
+                v
+            });
+            let (lo, hi) = (lo.get(), hi.get());
+            let back = xyz_to_linear_srgb() * xyz;
+            let err = (back - c).length();
+            worst = worst.max(err);
+            assert!(err < 0.02, "rgb {c} -> {back}");
+            assert!(lo >= 0.0 && hi <= 1.0, "rgb {c}: reflectance {lo}..{hi}"); // 反射率として物理的に正しい
+        }
+        println!("rgb -> spectrum round trip: worst error {worst:.4}");
+        // 上限のない値（環境光）も、倍率をかけて戻る
+        let bright = Vec3::new(3.0, 1.5, 0.5);
+        let u = t.unbounded(bright);
+        let back = xyz_to_linear_srgb() * integrate_xyz(|l| u.w * sigmoid_poly(u.truncate(), l));
+        assert!((back - bright).length() < 0.05, "{back}");
+    }
 }
