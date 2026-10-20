@@ -157,7 +157,13 @@ pub fn graphic_to_paths(g: &Graphic) -> Paths {
                 return out;
             }
             if g.filled && g.pts.len() >= 3 {
-                append(&mut out, unite(&to_path(&g.pts).into(), FillRule::NonZero));
+                let fill = unite(&to_path(&g.pts).into(), FillRule::NonZero);
+                if g.cutouts.is_empty() {
+                    append(&mut out, fill);
+                } else {
+                    let holes: Paths = g.cutouts.iter().map(|c| to_path(c)).collect::<Vec<_>>().into();
+                    append(&mut out, subtract(&fill, &unite(&holes, FillRule::NonZero)));
+                }
             }
             if g.width > 0.0 {
                 append(&mut out, stroke_polyline(&g.pts, g.width, true));
@@ -390,6 +396,14 @@ pub fn nest_rings(paths: &Paths) -> Vec<Ring> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn knockout_fill_subtracts_the_glyphs() {
+        let sq = |lo: Vec2, hi: Vec2| vec![lo, Vec2::new(hi.x, lo.y), hi, Vec2::new(lo.x, hi.y)];
+        let g = Graphic { kind: GrKind::Poly, filled: true, pts: sq(Vec2::ZERO, Vec2::new(4.0, 2.0)), cutouts: vec![sq(Vec2::new(1.0, 0.5), Vec2::new(2.0, 1.5))], ..Default::default() };
+        let area: f64 = graphic_to_paths(&g).iter().map(signed_area).sum::<f64>().abs();
+        assert!((area - 7.0).abs() < 1e-6, "{area}");
+    }
 
     #[test]
     fn disc_and_boolean_ops() {

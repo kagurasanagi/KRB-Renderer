@@ -150,7 +150,7 @@ fn read_graphic(n: &Node, kind: &str, xf: &Xform, fp: Option<usize>) -> Option<G
         "rect" => {
             g.kind = GrKind::Poly;
             let (a, b) = (xy(n.child("start")), xy(n.child("end")));
-            g.pts = vec![xf.apply(a), xf.apply(Vec2::new(b.x, a.y)), xf.apply(b), xf.apply(Vec2::new(a.x, b.y))];
+            g.pts = rounded_rect_pts(a.min(b), a.max(b), n.child_num("radius").unwrap_or(0.0)).into_iter().map(|p| xf.apply(p)).collect();
         }
         "poly" => {
             g.kind = GrKind::Poly;
@@ -168,8 +168,43 @@ fn read_graphic(n: &Node, kind: &str, xf: &Xform, fp: Option<usize>) -> Option<G
     Some(g)
 }
 
-/// 文字（property / fp_text / gr_text）。render_cache があれば多角形として取り込む
-fn read_text(n: &Node, fp: Option<usize>, board: &mut Board) {
+/// 角の丸い四角形（lo-hi、角の半径 r）の頂点。r = 0 なら 4 点
+fn rounded_rect_pts(lo: Vec2, hi: Vec2, r: f64) -> Vec<Vec2> {
+    let r = r.min(0.5 * (hi.x - lo.x)).min(0.5 * (hi.y - lo.y));
+    if r <= 0.0 {
+        return vec![lo, Vec2::new(hi.x, lo.y), hi, Vec2::new(lo.x, hi.y)];
+    }
+    // 弦と円弧の差が 1 µm 以下になる分割数（1/4 周あたり）
+    const TOL: f64 = 0.001;
+    let step = 2.0 * (1.0 - TOL / r).max(-1.0).acos();
+    let n = ((std::f64::consts::FRAC_PI_2 / step).ceil() as usize).clamp(2, 64);
+    // 角の中心と、その角の円弧の始まりの角度（y 下向きの座標で時計回りに一周）
+    let corners = [(Vec2::new(hi.x - r, lo.y + r), -90.0f64), (Vec2::new(hi.x - r, hi.y - r), 0.0), (Vec2::new(lo.x + r, hi.y - r), 90.0), (Vec2::new(lo.x + r, lo.y + r), 180.0)];
+    let mut pts = Vec::with_capacity(4 * (n + 1));
+    for (c, a0) in corners {
+        for i in 0..=n {
+            let a = (a0 + 90.0 * i as f64 / n as f64).to_radians();
+            pts.push(c + Vec2::new(a.cos(), a.sin()) * r);
+        }
+    }
+    pts
+}
+
+/// knockout の文字の、字を囲む四角形（文字の向きにそろえ、KiCad と同じ余白 max(線幅 / 2, 高さ / 9) を足す）
+fn knockout_box(glyphs: &[Vec<Vec2>], angle_deg: f64, margin: f64) -> Vec<Vec2> {
+    let (mut lo, mut hi) = (Vec2::splat(f64::MAX), Vec2::splat(f64::MIN));
+    for p in glyphs.iter().flatten() {
+        let q = rotate_point(*p, -angle_deg);
+        lo = lo.min(q);
+        hi = hi.max(q);
+    }
+    let (lo, hi) = (lo - Vec2::splat(margin), hi + Vec2::splat(margin));
+    [lo, Vec2::new(hi.x, lo.y), hi, Vec2::new(lo.x, hi.y)].into_iter().map(|p| rotate_point(p, angle_deg)).collect()
+}
+
+/// 文字（property / fp_text / gr_text）。render_cache があれば多角形として取り込む。
+/// parent_angle は部品の向き（部品の文字の角度は、部品に対する角度で保存されている）
+fn read_text(n: &Node, fp: Option<usize>, parent_angle: f64, board: &mut Board) {
     if is_hidden(n) {
         return;
     }
@@ -178,19 +213,19 @@ fn read_text(n: &Node, fp: Option<usize>, board: &mut Board) {
         return;
     }
     if let Some(cache) = n.child("render_cache") {
-        for poly in cache.children("polygon") {
-            let pts = read_pts(poly.child("pts")); // render_cache は基板座標
-            if pts.len() >= 3 {
-                board.graphics.push(Graphic {
-                    kind: GrKind::Poly,
-                    layer: layer.to_string(),
-                    filled: true,
-                    footprint: fp,
-                    from_text: true,
-                    pts,
-                    ..Default::default()
-                });
-            }
+        // render_cache は基板座標。穴（e の中など）は切れ目でつないだ 1 本の輪郭になっている
+        let glyphs: Vec<Vec<Vec2>> = cache.children("polygon").map(|poly| read_pts(poly.child("pts"))).filter(|pts| pts.len() >= 3).collect();
+        let knockout = n.child("layer").is_some_and(|l| l.has_atom("knockout"));
+        let text_graphic = |pts: Vec<Vec2>, cutouts: Vec<Vec<Vec2>>| Graphic { kind: GrKind::Poly, layer: layer.to_string(), filled: true, footprint: fp, from_text: true, pts, cutouts, ..Default::default() };
+        if knockout && !glyphs.is_empty() {
+            let font = n.child("effects").and_then(|e| e.child("font"));
+            let height = font.and_then(|f| f.child("size")).map(|s| s.num(1)).unwrap_or(1.0); // (size 高さ 幅)
+            let thickness = font.and_then(|f| f.child_num("thickness")).unwrap_or(height * 0.15);
+            let angle = n.child("at").map(|a| a.num_or(3, 0.0)).unwrap_or(0.0) + parent_angle;
+            let hull = knockout_box(&glyphs, angle, (0.5 * thickness).max(height / 9.0));
+            board.graphics.push(text_graphic(hull, glyphs));
+        } else {
+            board.graphics.extend(glyphs.into_iter().map(|pts| text_graphic(pts, Vec::new())));
         }
         return;
     }
@@ -356,7 +391,7 @@ fn read_footprint(n: &Node, board: &mut Board) {
                     "Value" => fp.value = it.str(2).to_string(),
                     _ => {}
                 }
-                read_text(it, idx, board);
+                read_text(it, idx, fp.angle_deg, board);
             }
             "fp_text" => {
                 if it.str(1) == "reference" && fp.reference.is_empty() {
@@ -365,7 +400,7 @@ fn read_footprint(n: &Node, board: &mut Board) {
                 if it.str(1) == "value" && fp.value.is_empty() {
                     fp.value = it.str(2).to_string();
                 }
-                read_text(it, idx, board);
+                read_text(it, idx, fp.angle_deg, board);
             }
             "pad" => read_pad(it, &xf, idx, board),
             "model" => fp.models.push(read_model(it)),
@@ -579,7 +614,7 @@ pub fn load_board(file: &Path) -> Result<Board, LoadError> {
                 }
                 read_zone_fills(it, &mut board);
             }
-            "gr_text" => read_text(it, None, &mut board),
+            "gr_text" => read_text(it, None, 0.0, &mut board),
             _ => {
                 if let Some(kind) = tag.strip_prefix("gr_") {
                     if let Some(g) = read_graphic(it, kind, &ident, None) {
@@ -703,5 +738,35 @@ mod tests {
         assert_eq!((d.added, d.removed, d.changed), (0, 0, 1));
         assert!(d.holes_changed && !d.full);
         assert_eq!(d.dirty.len(), 2); // 新旧の範囲
+    }
+
+    #[test]
+    fn rounded_rect_and_knockout_text() {
+        let text = r#"(kicad_pcb (version 20260206) (generator "pcbnew")
+  (gr_rect (start 2 1) (end 0 0) (radius 0.25) (stroke (width 0.1) (type solid)) (fill yes) (layer "F.Mask") (uuid "r1"))
+  (gr_rect (start 0 0) (end 2 1) (stroke (width 0.1) (type solid)) (fill no) (layer "F.Mask") (uuid "r2"))
+  (gr_text "I" (at 10 10 90) (layer "F.Mask" knockout) (uuid "t1")
+    (effects (font (face "Roboto") (size 0.9 0.9) (thickness 0.2)))
+    (render_cache "I" 0 (polygon (pts (xy 10 10) (xy 10.2 10) (xy 10.2 11) (xy 10 11)))))
+  (gr_text "I" (at 10 10 0) (layer "F.Mask") (uuid "t2")
+    (effects (font (face "Roboto") (size 0.9 0.9) (thickness 0.2)))
+    (render_cache "I" 0 (polygon (pts (xy 10 10) (xy 10.2 10) (xy 10.2 11) (xy 10 11)))))
+)"#;
+        let b = load_text("rounded.kicad_pcb", text);
+        assert_eq!(b.graphics.len(), 4);
+        // 角の丸い四角形：外形は start/end の範囲のまま、角は半径 0.25 で削れる（角の点 (0,0) からの距離 (√2 − 1)·r）
+        let r = &b.graphics[0];
+        assert!(r.pts.len() > 8);
+        let (lo, hi) = r.pts.iter().fold((Vec2::splat(9.0), Vec2::splat(-9.0)), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+        assert!((lo - Vec2::ZERO).length() < 1e-9 && (hi - Vec2::new(2.0, 1.0)).length() < 1e-9);
+        let nearest = r.pts.iter().map(|p| p.length()).fold(f64::MAX, f64::min);
+        assert!((nearest - (2f64.sqrt() - 1.0) * 0.25).abs() < 0.005, "{nearest}"); // 頂点が 45° ちょうどに来るとは限らない
+        assert_eq!(b.graphics[1].pts.len(), 4); // 半径なしは 4 点のまま
+        // knockout：字を囲む四角形（余白 max(0.2 / 2, 0.9 / 9) = 0.1）から字を抜く。90° 回した文字でも、字の向きの四角形
+        let k = &b.graphics[2];
+        assert_eq!(k.cutouts.len(), 1);
+        let (lo, hi) = k.pts.iter().fold((Vec2::splat(99.0), Vec2::splat(-99.0)), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+        assert!((lo - Vec2::new(9.9, 9.9)).length() < 1e-9 && (hi - Vec2::new(10.3, 11.1)).length() < 1e-9, "{lo} {hi}");
+        assert!(b.graphics[3].cutouts.is_empty() && b.graphics[3].pts.len() == 4);
     }
 }

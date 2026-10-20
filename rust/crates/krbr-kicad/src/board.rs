@@ -93,6 +93,8 @@ pub struct Graphic {
     pub footprint: Option<usize>,
     /// 文字（render_cache）由来
     pub from_text: bool,
+    /// Poly の塗りから抜く多角形（knockout の文字：文字を囲む四角形から字の形を抜く）
+    pub cutouts: Vec<Vec<Vec2>>,
 }
 
 impl Default for Graphic {
@@ -108,6 +110,7 @@ impl Default for Graphic {
             pts: Vec::new(),
             footprint: None,
             from_text: false,
+            cutouts: Vec::new(),
         }
     }
 }
