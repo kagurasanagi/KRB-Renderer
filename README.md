@@ -261,12 +261,23 @@ bump_scale = 0.1
 cd rust
 cargo build --release
 target\release\krbr.exe info E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --models
-target\release\krbr.exe E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --hdr E:\desktop\hdr\brown_photostudio_02_4k.exr   # ビューア
+target\release\krbr.exe E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb   # ビューア（--hdr は省略可）
 target\release\krbr.exe render E:\program\kachkojir_RK3506G2\kicad\kachkojir_RK3506G2.kicad_pcb --hdr E:\desktop\hdr\brown_photostudio_02_4k.exr --out out\rs.png
 cargo test
 ```
 
-Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフォルダの `shaders\`、環境変数 `KRBR_SHADER_DIR`、開発中は `<リポジトリ>\build\release\shaders` の順で探します。STEP 変換器 DLL は exe と同じフォルダの `step\krbr_step.dll` です（`build\release\step\` をコピーしておく）。ビューアの操作パネルは egui なので見た目は C++ 版（Dear ImGui）と違いますが、項目・操作・キーは同じです。
+Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフォルダの `shaders\`、環境変数 `KRBR_SHADER_DIR`、開発中は `<リポジトリ>\build\release\shaders` の順で探します。STEP 変換器 DLL は exe と同じフォルダの `step\krbr_step.dll` です（`build\release\step\` をコピーしておく）。ビューアの操作パネルは egui なので見た目は C++ 版（Dear ImGui）と違いますが、項目・操作・キーは同じです。Rust 版ではパネルをウィンドウの右端に上下いっぱいで固定し（幅は境目のドラッグで変更、× で閉じる）、3D 表示はその残りの領域に描きます。上端のメニュー（ファイル／表示／ヘルプ）の「表示」→「設定パネル」か `F1` / `Tab` で再表示できます。
+
+**環境マップ（Rust 版）**：`--hdr` は省略できます。次の順で決めます。
+
+1. `--hdr`（`render` / `view` とも）
+2. その基板で最後に使ったもの（`--hdr` で指定したもの、ビューアで選んだもの）
+3. `<名前>.krbr\environment.toml` の `[environment] hdr`
+4. 内蔵の **スタジオ**（`builtin:studio`）：灰色の撮影ブースに大きなソフトボックスを置いた環境を、その場で生成します（ファイル不要）。`--hdr builtin:studio` や `hdr = "builtin:studio"` でも指定できます
+
+最後に使ったものは `%APPDATA%\krbr\state.toml` に、基板ごとと最近使った一覧として覚えます。プロジェクトのファイルは書き換えません。覚えた後に environment.toml の `hdr` を書き換えたときは、そちらを使います。覚えたファイルが無くなっていたら 3・4 に戻ります。environment.toml で指定したファイルが読めないときは、内蔵のスタジオで代えて続けます（`--hdr` で指定したものが読めないときはエラー）。ビューアの「環境マップ」の一覧には、内蔵のスタジオ、最近使ったもの、今のものと同じフォルダの `.hdr` / `.exr` が出ます。「開く...」でファイルを選ぶか、`.hdr` / `.exr` をウィンドウへドラッグ＆ドロップしても切り替えられます。
+
+**exe のアイコンへのドラッグ＆ドロップ**：`krbr.exe`（またはそのショートカット）に `.kicad_pcb` をドロップすると、ビューアで開きます。このとき（エクスプローラーからの起動）は作業フォルダを基板のフォルダにするので、`S` で保存した画像は `<基板のフォルダ>\out\` に入ります。エラーで終わるときは、コンソールが閉じる前に Enter を待ちます。
 
 | 段階 | 内容 | 状況 |
 |---|---|---|
@@ -274,7 +285,7 @@ Rust 版の実行ファイルは、シェーダ（SPIR-V）を exe と同じフ�
 | 2 | STEP → メッシュの変換器を C++ の薄い DLL（`stepkrbr_step.dll`）に切り出し、Rust はキャッシュと DLL だけを読む（`krbr-model`、`krbr models`） | 済（C++ 版と同じキャッシュを共有：38 モデル・21 万三角形） |
 | 3 | 基板メッシュ、凹凸タイル、層の多角形、距離場（`krbr-geom`：Clipper2・earcut の crate、`krbr geom`） | 済（外形・穴の数は C++ 版と一致。凹凸は 168 万三角形、C++ 版 150 万：Clipper2 の丸め継ぎ目の分割数の違い） |
 | 4 | 描画（`krbr-scene`：材質・割り当て・分光・設定、`krbr-render`：ash でデバイス・BLAS/TLAS・カーネル（ray query / RT パイプライン）・累積・読み戻し・PNG/EXR）。`krbr render` | 済（同じシェーダ・同じカメラで C++ 版と同じ画像。未移植：kicad-cli の線フォントのシルク、ノイズ除去、層テクスチャ方式、`--init`） |
-| 5 | ビューア（winit + egui、`krbr-app`）、監視、ノイズ除去（OIDN）、材質 CLI | ビューアは済（`krbr <pcb> --hdr ...` でウィンドウ。パネル・マウス操作・キー・保存・テストモードは C++ 版と同じ。未：保存の監視と差分更新、ノイズ除去、環境マップの「開く...」ダイアログ、`material` / `mask list` / `--init`、kicad-cli のシルク） |
+| 5 | ビューア（winit + egui、`krbr-app`）、監視、ノイズ除去（OIDN）、材質 CLI | ビューアは済（`krbr <pcb> --hdr ...` でウィンドウ。パネル・マウス操作・キー・保存・テストモードは C++ 版と同じ。未：保存の監視と差分更新、ノイズ除去、`material` / `mask list` / `--init`、kicad-cli のシルク） |
 
 ## テスト
 

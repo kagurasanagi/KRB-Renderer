@@ -251,7 +251,8 @@ pub fn load_project_config(pcb: &Path) -> ProjectConfig {
     if let Some(t) = parse_file(&env_toml) {
         c.loaded_files.push(env_toml);
         if let Some(Value::String(h)) = get(&t, &["environment", "hdr"]) {
-            c.hdr = resolve_rel(&dir, h).to_string_lossy().into_owned();
+            // "builtin:studio" などの内蔵の環境マップはパスではない
+            c.hdr = if h.starts_with("builtin:") { h.clone() } else { resolve_rel(&dir, h).to_string_lossy().into_owned() };
         }
         num(&t, &["environment", "intensity"], &mut c.env_intensity);
         num(&t, &["environment", "rotation_deg"], &mut c.env_rotation_deg);

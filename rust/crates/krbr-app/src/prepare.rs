@@ -2,12 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
-use krbr_core::{info, warn};
+use krbr_core::{debug, info, warn};
 use krbr_kicad::{load_board, Board, ModelResolver};
 use krbr_model::{MeshParams, ModelLibrary};
-use krbr_render::{build_env_distribution, image_io, render_offscreen, Context, ContextOptions, FrameParams, GpuScene, RenderSettings};
+use krbr_render::studio_env::STUDIO;
+use krbr_render::{build_env_distribution, image_io, is_builtin, load_environment_map, render_offscreen, Context, ContextOptions, FrameParams, GpuScene, RenderSettings};
 use krbr_scene::config::{apply_mask_color_spec, load_project_config, ProjectConfig};
 use krbr_scene::scene::{build_scene, load_material_setup, SceneContext};
+use crate::remember;
 use krbr_scene::{frame_camera, orbit_camera, Camera, CameraParams, LensModel, MaterialResolver, Scene};
 
 #[derive(Debug, Clone, Default)]
@@ -48,6 +50,8 @@ pub struct PreparedScene {
     pub scene: Scene,
     pub env: image_io::ImageF,
     pub dist: krbr_render::EnvDistribution,
+    /// environment.toml の hdr（空なら指定なし）。選んだ環境マップを覚えるときに一緒に残す
+    pub config_hdr: String,
 }
 
 pub fn load_board_or_report(pcb: &Path) -> Option<Board> {
@@ -133,12 +137,23 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
     if !o.integrator.is_empty() {
         cfg.integrator = o.integrator.clone();
     }
-    if !o.hdr.is_empty() {
+    // 環境マップ：--hdr、この基板で最後に使ったもの、environment.toml、内蔵のスタジオ、の順
+    let config_hdr = cfg.hdr.clone();
+    let from_cli = !o.hdr.is_empty();
+    if from_cli {
         cfg.hdr = o.hdr.clone();
+    } else if let Some(r) = remember::remembered_hdr(&board.file) {
+        if r.config_hdr != config_hdr {
+            info!("environment.toml changed since the last run; using its environment map");
+        } else if is_builtin(&r.hdr) || Path::new(&r.hdr).is_file() {
+            info!("environment: last used for this board");
+            cfg.hdr = r.hdr;
+        } else {
+            warn!("last used environment map {} no longer exists", r.hdr);
+        }
     }
     if cfg.hdr.is_empty() {
-        krbr_core::error!("no environment map: pass --hdr <file.hdr|file.exr> or set [environment] hdr in environment.toml");
-        return None;
+        cfg.hdr = STUDIO.into();
     }
     if cfg.width == 0 || cfg.height == 0 || cfg.spp == 0 {
         krbr_core::error!("invalid size or spp");
@@ -161,17 +176,30 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
     };
     let st = library.stats();
     info!("models: {} loaded+meshed, {} from cache, {} failed", st.loaded, st.cache_hits, st.failed);
+    for a in &scene.assignments {
+        debug!("material: {} {} [{}] -> {} ({})", a.reference, a.model_file, a.part_keys, a.material, a.source);
+    }
 
-    let env = match image_io::load_hdr_image(Path::new(&cfg.hdr)) {
+    let env = match load_environment_map(&cfg.hdr) {
         Ok(e) => e,
-        Err(e) => {
+        // コマンドラインで指定したものは誤りとして止める。設定ファイルのものは内蔵のスタジオで代える
+        Err(e) if from_cli || cfg.hdr == STUDIO => {
             krbr_core::error!("environment map {}: {}", cfg.hdr, e);
             return None;
         }
+        Err(e) => {
+            warn!("environment map {}: {} (using the built-in studio instead)", cfg.hdr, e);
+            cfg.hdr = STUDIO.into();
+            load_environment_map(STUDIO).ok()?
+        }
     };
     info!("environment: {} ({}x{})", cfg.hdr, env.width, env.height);
+    if from_cli {
+        cfg.hdr = remember::normalize_hdr(&cfg.hdr);
+        remember::remember_hdr(&board.file, &cfg.hdr, &config_hdr);
+    }
     let dist = build_env_distribution(&env, 2048);
-    Some(PreparedScene { board, cfg, scene, env, dist })
+    Some(PreparedScene { board, cfg, scene, env, dist, config_hdr })
 }
 
 pub fn camera_params(cfg: &ProjectConfig, width: u32, height: u32) -> CameraParams {

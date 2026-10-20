@@ -56,7 +56,8 @@ enum Command {
 struct RenderArgs {
     /// .kicad_pcb file
     pcb: PathBuf,
-    /// equirectangular environment map (.hdr / .exr)
+    /// equirectangular environment map (.hdr / .exr, or builtin:studio). Remembered per board;
+    /// if omitted: the one last used for this board, else [environment] hdr in environment.toml, else builtin:studio
     #[arg(long, default_value = "")]
     hdr: String,
     /// output PNG (EXR and AOVs are written next to it)
@@ -315,16 +316,58 @@ fn cmd_info(pcb: &PathBuf, models: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// エクスプローラーから起動されたか（exe のアイコンへのドラッグ＆ドロップ、ダブルクリック）。
+/// そのときはコンソールを使っているのがこのプロセスだけになる
+#[cfg(windows)]
+fn launched_from_explorer() -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
+    }
+    let mut ids = [0u32; 4];
+    // 安全性：ids の長さを渡している
+    unsafe { GetConsoleProcessList(ids.as_mut_ptr(), ids.len() as u32) == 1 }
+}
+
+#[cfg(not(windows))]
+fn launched_from_explorer() -> bool {
+    false
+}
+
+/// エクスプローラーから起動したときは、終わるとコンソールがすぐ閉じてエラーが読めないので、Enter を待つ
+fn exit_with(code: i32, explorer: bool) -> ! {
+    if explorer && code != 0 {
+        eprintln!("
+Enter キーで閉じます");
+        let _ = std::io::stdin().read_line(&mut String::new());
+    }
+    std::process::exit(code)
+}
+
 fn main() {
     // サブコマンドを省略して `krbr board.kicad_pcb ...` と書いたら view とみなす
+    // （exe のアイコンに .kicad_pcb をドラッグ＆ドロップしたときもこの形になる）
     let mut args: Vec<String> = std::env::args().collect();
+    let explorer = launched_from_explorer();
     if let Some(i) = args.iter().skip(1).position(|a| !a.starts_with('-')) {
         let i = i + 1;
         if args[i].to_lowercase().ends_with(".kicad_pcb") {
+            // エクスプローラーからの起動では作業フォルダが決まらないので、保存先（既定 out\）を基板のフォルダの下にする
+            if explorer {
+                if let Some(dir) = std::path::absolute(&args[i]).ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+                    let _ = std::env::set_current_dir(dir);
+                }
+            }
             args.insert(i, "view".into());
         }
     }
-    let cli = Cli::parse_from(args);
+    let cli = match Cli::try_parse_from(args) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = e.print();
+            exit_with(e.exit_code(), explorer)
+        }
+    };
     if cli.verbose {
         log::set_level(log::Level::Debug);
     }
@@ -335,7 +378,7 @@ fn main() {
             let vo = krbr_app::ViewOptions { common: args.render.to_options(), test_frames: args.test_frames, screenshot: args.screenshot.clone(), hidden: args.hidden, test_orbit_deg: args.test_orbit };
             krbr_app::run_viewer(vo).map(|rc| {
                 if rc != 0 {
-                    std::process::exit(rc);
+                    exit_with(rc, explorer);
                 }
             })
         }
@@ -345,6 +388,6 @@ fn main() {
     };
     if let Err(e) = result {
         krbr_core::error!("{e}");
-        std::process::exit(1);
+        exit_with(1, explorer);
     }
 }

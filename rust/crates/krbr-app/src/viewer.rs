@@ -13,7 +13,8 @@ use krbr_core::{error, info, warn};
 use krbr_render::image_io::{self, ImageF};
 use krbr_render::tonemapper::{DisplayMode, Tonemapper};
 use krbr_render::vk::{image_barrier, Buffer};
-use krbr_render::{build_env_distribution, Context, ContextOptions, EnvDistribution, GpuScene, Progressive};
+use krbr_render::studio_env::STUDIO;
+use krbr_render::{build_env_distribution, environment_label, is_builtin, load_environment_map, Context, ContextOptions, EnvDistribution, GpuScene, Progressive};
 use krbr_scene::config::apply_mask_color_spec;
 use krbr_scene::scene::{raycast, update_mask_material};
 use krbr_scene::{mask_presets, orbit_camera, LensModel, SceneOptions};
@@ -24,6 +25,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use crate::remember;
 use crate::prepare::{frame_params, initial_camera, prepare_scene, PreparedScene, RenderOptions};
 use crate::swapchain::Swapchain;
 
@@ -54,6 +56,7 @@ struct ViewState {
     /// 2 の累乗
     max_spp: u32,
     mode: DisplayMode,
+    /// 右側の設定パネルを出すか（閉じてもメニューの「表示」や F1 / Tab で再表示）
     show_panel: bool,
     /// カメラ・照明が変わった（累積をやり直す）
     dirty: bool,
@@ -64,6 +67,7 @@ struct ViewState {
     save_requested: bool,
     reset_requested: bool,
     auto_exposure_requested: bool,
+    quit_requested: bool,
     spectral: bool,
     integrator_changed: bool,
     rotating: bool,
@@ -72,8 +76,23 @@ struct ViewState {
     focus_pick: Option<(f64, f64)>,
     last_cursor: (f64, f64),
     ctrl: bool,
-    fb_height: u32,
+    /// 3D 表示の領域（ウィンドウのうちメニューとパネルを除いた所、物理ピクセル）。描画の解像度もこれ
+    viewport: Viewport,
     tan_half_fov_y: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Viewport {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+impl Viewport {
+    fn contains(&self, p: (f64, f64)) -> bool {
+        p.0 >= self.x as f64 && p.1 >= self.y as f64 && p.0 < (self.x + self.w) as f64 && p.1 < (self.y + self.h) as f64
+    }
 }
 
 /// 環境マップの読み込み（別スレッドで行い、終わったら GPU へ差し替える）
@@ -85,7 +104,7 @@ struct EnvData {
 }
 
 fn load_environment(path: String) -> EnvData {
-    match image_io::load_hdr_image(Path::new(&path)) {
+    match load_environment_map(&path) {
         Ok(image) => {
             let dist = build_env_distribution(&image, 2048);
             EnvData { path, image, dist, error: String::new() }
@@ -94,14 +113,41 @@ fn load_environment(path: String) -> EnvData {
     }
 }
 
-/// 同じフォルダの .hdr / .exr の一覧
-fn list_environments(current: &Path) -> Vec<PathBuf> {
-    let dir = current.parent().filter(|p| !p.as_os_str().is_empty()).map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
-    let mut out: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_file() && matches!(p.extension().map(|e| e.to_string_lossy().to_lowercase()).as_deref(), Some("hdr") | Some("exr"))).collect())
-        .unwrap_or_default();
-    out.sort();
-    out
+fn is_env_file(p: &Path) -> bool {
+    matches!(p.extension().map(|e| e.to_string_lossy().to_lowercase()).as_deref(), Some("hdr") | Some("exr"))
+}
+
+/// 同じ環境マップか（Windows では大文字・小文字と区切り文字の違いを無視する）
+fn same_env(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.replace('\\', "/").eq_ignore_ascii_case(&b.replace('\\', "/"))
+    } else {
+        a == b
+    }
+}
+
+/// 選べる環境マップ：内蔵のスタジオ、最近使ったもの、今のものと同じフォルダの .hdr / .exr（重なりは除く）
+fn list_environments(current: &str) -> Vec<Vec<String>> {
+    let mut groups: Vec<Vec<String>> = vec![vec![STUDIO.to_string()]];
+    let mut seen: Vec<String> = vec![STUDIO.to_string()];
+    let mut add = |groups: &mut Vec<Vec<String>>, items: Vec<String>| {
+        let items: Vec<String> = items.into_iter().filter(|p| !seen.iter().any(|s| same_env(s, p))).collect();
+        seen.extend(items.iter().cloned());
+        if !items.is_empty() {
+            groups.push(items);
+        }
+    };
+    let recent: Vec<String> = remember::recent_hdrs().into_iter().filter(|p| !is_builtin(p) && Path::new(p).is_file()).collect();
+    add(&mut groups, recent);
+    if !is_builtin(current) {
+        let dir = Path::new(current).parent().filter(|p| !p.as_os_str().is_empty()).map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+        let mut files: Vec<String> = std::fs::read_dir(&dir)
+            .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_file() && is_env_file(p)).map(|p| p.to_string_lossy().into_owned()).collect())
+            .unwrap_or_default();
+        files.sort();
+        add(&mut groups, files);
+    }
+    groups
 }
 
 /// 画像全体の対数平均輝度から露出を決める（中間の灰色 0.18 に合わせる）
@@ -133,6 +179,16 @@ fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// パネルを閉じるボタン（egui の Window の × と同じ描き方）
+fn close_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::Vec2::splat(ui.spacing().icon_width), egui::Sense::click());
+    let vis = ui.style().interact(&resp);
+    let r = rect.shrink(2.0).expand(vis.expansion);
+    ui.painter().line_segment([r.left_top(), r.right_bottom()], vis.fg_stroke);
+    ui.painter().line_segment([r.right_top(), r.left_bottom()], vis.fg_stroke);
+    resp
+}
+
 /// GPU 側の資源一式（ウィンドウができてから作る）
 struct Gpu {
     ctx: &'static Context,
@@ -159,7 +215,10 @@ struct App {
     gpu: Option<Gpu>,
     base_title: String,
     env_path: String,
-    env_list: Vec<PathBuf>,
+    /// 一覧に出す環境マップ（区切り線ごとのまとまり）
+    env_list: Vec<Vec<String>>,
+    /// 「開く...」のダイアログ（別スレッド）の結果
+    open_dialog: Option<mpsc::Receiver<Option<PathBuf>>>,
     env_job: Option<(String, mpsc::Receiver<EnvData>)>,
     env_error: String,
     last_update: String,
@@ -175,6 +234,18 @@ struct App {
     stem: String,
     rc: i32,
     done: bool,
+}
+
+/// egui の座標（ポイント）の領域を、w x h の中に収めた物理ピクセルの領域にする（1 ピクセル以上）
+fn viewport_px(r: egui::Rect, ppp: f32, w: u32, h: u32) -> Viewport {
+    let (w, h) = (w.max(1), h.max(1));
+    if !r.is_positive() {
+        return Viewport { x: 0, y: 0, w, h };
+    }
+    let px = |v: f32, max: u32| ((v * ppp).round().max(0.0) as u32).min(max);
+    let (x0, y0) = (px(r.min.x, w - 1), px(r.min.y, h - 1));
+    let (x1, y1) = (px(r.max.x, w).max(x0 + 1), px(r.max.y, h).max(y0 + 1));
+    Viewport { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
 }
 
 const TARGET_FRAME_MS: f64 = 10.0; // 60fps（16.7 ms）に収まるよう、表示処理の分を残す
@@ -203,7 +274,7 @@ impl App {
     }
 
     fn start_env_load(&mut self, path: String) {
-        if self.env_job.is_some() || path == self.env_path {
+        if self.env_job.is_some() || same_env(&path, &self.env_path) {
             return;
         }
         info!("loading environment {}", path);
@@ -236,6 +307,8 @@ impl App {
         let size = window.inner_size();
         let (fbw, fbh) = (size.width.max(1), size.height.max(1));
         self.reset_camera(fbw, fbh);
+        // 3D 表示の大きさはメニューとパネルを置いてから決まるので、最初のフレームで視点を合わせ直す
+        self.st.reset_requested = true;
         let swap = Swapchain::new(ctx, fbw, fbh)?;
         let frame = self.current_frame(swap.extent.width, swap.extent.height);
         // 安全性：Box の中身はムーブされず、Gpu を捨てるときに prog を gpu より先に捨てる（run_viewer）
@@ -275,16 +348,28 @@ impl App {
 
         ui.separator();
         ui.strong("環境マップ");
-        let cur_name = Path::new(&self.env_path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
         let mut chosen: Option<String> = None;
-        egui::ComboBox::from_id_salt("hdr").width(260.0).selected_text(&cur_name).show_ui(ui, |ui| {
-            for p in &self.env_list {
-                let name = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-                if ui.selectable_label(name == cur_name, &name).clicked() {
-                    chosen = Some(p.to_string_lossy().into_owned());
+        let mut open_dialog = false;
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("hdr").width(220.0).selected_text(environment_label(&self.env_path)).show_ui(ui, |ui| {
+                for (gi, group) in self.env_list.iter().enumerate() {
+                    if gi > 0 {
+                        ui.separator();
+                    }
+                    for p in group {
+                        let r = ui.selectable_label(same_env(p, &self.env_path), environment_label(p));
+                        let r = if is_builtin(p) { r.on_hover_text("灰色の撮影ブースと大きなソフトボックス") } else { r.on_hover_text(p) };
+                        if r.clicked() {
+                            chosen = Some(p.clone());
+                        }
+                    }
                 }
+            });
+            if ui.add_enabled(self.open_dialog.is_none(), egui::Button::new("開く...")).on_hover_text(".hdr / .exr を選ぶ（ウィンドウへのドラッグ＆ドロップでも可）").clicked() {
+                open_dialog = true;
             }
         });
+        ui.weak("選んだものは、この基板の次回の表示にも使う");
         if let Some((p, _)) = &self.env_job {
             ui.colored_label(egui::Color32::from_rgb(255, 204, 77), format!("読み込み中: {p}"));
         }
@@ -444,6 +529,97 @@ impl App {
         if let Some(p) = chosen {
             self.start_env_load(p);
         }
+        if open_dialog {
+            self.start_open_dialog();
+        }
+    }
+
+    /// ファイルを選ぶダイアログを別スレッドで開く（その間も描画を続ける）
+    fn start_open_dialog(&mut self) {
+        if self.open_dialog.is_some() {
+            return;
+        }
+        let mut dlg = rfd::FileDialog::new().set_title("環境マップを開く").add_filter("環境マップ (*.hdr, *.exr)", &["hdr", "exr"]);
+        if let Some(dir) = Path::new(&self.env_path).parent().filter(|d| !is_builtin(&self.env_path) && d.is_dir()) {
+            dlg = dlg.set_directory(dir);
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(dlg.pick_file());
+        });
+        self.open_dialog = Some(rx);
+    }
+
+    /// ウィンドウ上端のメニュー
+    fn menu_bar(&mut self, root: &mut egui::Ui) {
+        let st = &mut self.st;
+        egui::Panel::top("menu").show(root, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("ファイル", |ui| {
+                    if ui.add(egui::Button::new("画像を保存").shortcut_text("S")).clicked() {
+                        st.save_requested = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.add(egui::Button::new("終了").shortcut_text("Esc")).clicked() {
+                        st.quit_requested = true;
+                        ui.close();
+                    }
+                });
+                ui.menu_button("表示", |ui| {
+                    if ui.add(egui::Button::new("設定パネル").selected(st.show_panel).shortcut_text("F1 / Tab")).clicked() {
+                        st.show_panel = !st.show_panel;
+                        ui.close();
+                    }
+                    ui.separator();
+                    for (mode, name, key) in [(DisplayMode::Beauty, "画像", "1"), (DisplayMode::Albedo, "アルベド", "2"), (DisplayMode::Normal, "法線", "3")] {
+                        if ui.add(egui::Button::new(name).selected(st.mode == mode).shortcut_text(key)).clicked() {
+                            st.mode = mode;
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    if ui.add(egui::Button::new("視点を戻す").shortcut_text("R")).clicked() {
+                        st.reset_requested = true;
+                        ui.close();
+                    }
+                    if ui.button("露出を自動で合わせる").clicked() {
+                        st.auto_exposure_requested = true;
+                        ui.close();
+                    }
+                });
+                ui.menu_button("ヘルプ", |ui| {
+                    ui.label("左ドラッグ: 回転");
+                    ui.label("右 / 中ドラッグ: 移動");
+                    ui.label("ホイール: 拡大・縮小");
+                    ui.label("Ctrl + クリック: その点にピントを合わせる");
+                    ui.separator();
+                    ui.label("F1 / Tab: 設定パネル    R: 視点を戻す    S: 保存");
+                    ui.label("+ / -: 露出    [ / ]: 環境マップの回転    1 / 2 / 3: 画像 / アルベド / 法線");
+                    ui.label("Esc: 終了");
+                });
+            });
+        });
+    }
+
+    /// 右端に上下いっぱいで固定する設定パネル（幅は境目のドラッグで変えられる、× で閉じる）
+    fn side_panel(&mut self, root: &mut egui::Ui) {
+        let mut close = false;
+        egui::Panel::right("settings").resizable(true).default_size(340.0).size_range(300.0..=640.0).show(root, |ui| {
+            ui.horizontal(|ui| {
+                ui.strong("設定");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if close_button(ui).on_hover_text("閉じる（メニューの「表示」や F1 / Tab で再表示）").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            ui.separator();
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.panel(ui));
+        });
+        if close {
+            self.st.show_panel = false;
+        }
     }
 
     fn frame(&mut self) -> Result<(), String> {
@@ -453,31 +629,43 @@ impl App {
         if fbw == 0 || fbh == 0 {
             return Ok(()); // 最小化中
         }
-        self.st.fb_height = fbh;
         if self.vo.test_orbit_deg != 0.0 {
             self.st.azimuth += self.vo.test_orbit_deg;
             self.st.dirty = true;
         }
 
-        // ---- 操作パネル
+        // ---- メニューと操作パネル。残りの領域が 3D 表示になる
         let raw = self.egui_state.as_mut().unwrap().take_egui_input(window);
         let egui_ctx = self.egui_ctx.clone();
+        let mut central = egui::Rect::NOTHING;
         let full = egui_ctx.run_ui(raw, |root| {
+            self.menu_bar(root);
             if self.st.show_panel {
-                let mut open = true;
-                let ctx = root.ctx().clone();
-                let max_h = root.max_rect().height() - 24.0;
-                egui::Window::new("krbr").open(&mut open).default_pos([12.0, 12.0]).resizable(false).vscroll(true).max_height(max_h).default_height(max_h).show(&ctx, |ui| self.panel(ui));
-                if !open {
-                    self.st.show_panel = false;
-                }
+                self.side_panel(root);
             }
+            central = root.available_rect_before_wrap();
         });
+        if self.st.quit_requested {
+            self.done = true;
+            return Ok(());
+        }
         let window = self.window.as_ref().unwrap();
         self.egui_state.as_mut().unwrap().handle_platform_output(window, full.platform_output);
         let primitives = egui_ctx.tessellate(full.shapes, full.pixels_per_point);
 
         // ---- 状態の反映（GPU は前のフレームの完了を待っているので、ここで資源を触ってよい）
+        if let Some(rx) = &self.open_dialog {
+            match rx.try_recv() {
+                Ok(picked) => {
+                    self.open_dialog = None;
+                    if let Some(p) = picked {
+                        self.start_env_load(p.to_string_lossy().into_owned());
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.open_dialog = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
         if let Some((path, rx)) = &self.env_job {
             if let Ok(d) = rx.try_recv() {
                 let _ = path;
@@ -487,8 +675,9 @@ impl App {
                     g.ctx.wait_idle();
                     g.gpu.set_environment(&d.image, &d.dist);
                     g.prog.rebuild_integrator()?;
-                    self.env_path = d.path.clone();
-                    self.env_list = list_environments(Path::new(&self.env_path));
+                    self.env_path = remember::normalize_hdr(&d.path);
+                    remember::remember_hdr(&self.prep.board.file, &self.env_path, &self.prep.config_hdr);
+                    self.env_list = list_environments(&self.env_path);
                     self.st.dirty = true;
                     info!("environment: {} ({}x{})", self.env_path, d.image.width, d.image.height);
                 } else {
@@ -537,8 +726,27 @@ impl App {
             g.gpu.update_materials(&self.prep.scene.materials, self.st.bump_intensity);
             self.st.dirty = true;
         }
+        {
+            let g = self.gpu.as_mut().unwrap();
+            if self.need_recreate || fbw != g.swap.extent.width || fbh != g.swap.extent.height {
+                g.ctx.wait_idle();
+                g.swap.recreate(fbw, fbh)?;
+                self.need_recreate = false;
+            }
+            // 描画の解像度は 3D 表示の領域に合わせる（スワップチェーンがウィンドウと違う大きさのこともあるので、その中に収める）
+            let vp = viewport_px(central, full.pixels_per_point, g.swap.extent.width, g.swap.extent.height);
+            let t = g.prog.targets();
+            if vp.w != t.width || vp.h != t.height {
+                g.prog.resize(vp.w, vp.h)?;
+                g.tone = Tonemapper::new(g.ctx, g.prog.targets())?;
+                self.st.dirty = true;
+            }
+            self.st.viewport = vp;
+        }
         if let Some((px, py)) = self.st.focus_pick.take() {
-            let (ww, wh) = (fbw.max(1) as f64, fbh.max(1) as f64);
+            let vp = self.st.viewport;
+            let (ww, wh) = (vp.w as f64, vp.h as f64);
+            let (px, py) = (px - vp.x as f64, py - vp.y as f64);
             let c = orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, (ww / wh) as f32);
             let (nx, ny) = ((2.0 * px / ww - 1.0) as f32, (2.0 * py / wh - 1.0) as f32);
             let dir = (c.forward + nx * c.tan_half_fov_y * c.aspect * c.right - ny * c.tan_half_fov_y * c.up).normalize();
@@ -553,24 +761,12 @@ impl App {
         }
         if self.st.reset_requested {
             self.st.reset_requested = false;
-            self.reset_camera(fbw, fbh);
-        }
-        {
-            let g = self.gpu.as_ref().unwrap();
-            if self.need_recreate || fbw != g.swap.extent.width || fbh != g.swap.extent.height {
-                let g = self.gpu.as_mut().unwrap();
-                g.ctx.wait_idle();
-                g.swap.recreate(fbw, fbh)?;
-                g.prog.resize(g.swap.extent.width, g.swap.extent.height)?;
-                g.tone = Tonemapper::new(g.ctx, g.prog.targets())?;
-                self.need_recreate = false;
-                self.st.dirty = true;
-            }
+            self.reset_camera(self.st.viewport.w, self.st.viewport.h);
         }
         if self.st.dirty {
             let (w, h) = {
-                let g = self.gpu.as_ref().unwrap();
-                (g.swap.extent.width, g.swap.extent.height)
+                let t = self.gpu.as_ref().unwrap().prog.targets();
+                (t.width, t.height)
             };
             let f = self.current_frame(w, h);
             self.gpu.as_mut().unwrap().prog.set_frame(f);
@@ -623,9 +819,19 @@ impl App {
         let swap_img = g.swap.images[image_index as usize];
         let extent = g.swap.extent;
         image_barrier(dev, cmd, disp.image, vk::ImageLayout::GENERAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::BLIT, vk::AccessFlags2::TRANSFER_READ, 1);
-        image_barrier(dev, cmd, swap_img, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::PipelineStageFlags2::BLIT, vk::AccessFlags2::NONE, vk::PipelineStageFlags2::BLIT, vk::AccessFlags2::TRANSFER_WRITE, 1);
+        image_barrier(dev, cmd, swap_img, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::PipelineStageFlags2::CLEAR, vk::AccessFlags2::NONE, vk::PipelineStageFlags2::CLEAR, vk::AccessFlags2::TRANSFER_WRITE, 1);
+        // メニュー・パネルの下も含めて一度塗りつぶし、3D 表示の領域に画像を置く
+        let range = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
+        unsafe { dev.cmd_clear_color_image(cmd, swap_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &vk::ClearColorValue { float32: [0.1, 0.1, 0.1, 1.0] }, &[range]) };
+        image_barrier(dev, cmd, swap_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::PipelineStageFlags2::CLEAR, vk::AccessFlags2::TRANSFER_WRITE, vk::PipelineStageFlags2::BLIT, vk::AccessFlags2::TRANSFER_WRITE, 1);
+        let vp = self.st.viewport;
         let sub = vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 };
-        let blit = vk::ImageBlit { src_subresource: sub, src_offsets: [vk::Offset3D::default(), vk::Offset3D { x: disp.width as i32, y: disp.height as i32, z: 1 }], dst_subresource: sub, dst_offsets: [vk::Offset3D::default(), vk::Offset3D { x: extent.width as i32, y: extent.height as i32, z: 1 }] };
+        let blit = vk::ImageBlit {
+            src_subresource: sub,
+            src_offsets: [vk::Offset3D::default(), vk::Offset3D { x: disp.width as i32, y: disp.height as i32, z: 1 }],
+            dst_subresource: sub,
+            dst_offsets: [vk::Offset3D { x: vp.x as i32, y: vp.y as i32, z: 0 }, vk::Offset3D { x: (vp.x + vp.w) as i32, y: (vp.y + vp.h) as i32, z: 1 }],
+        };
         unsafe { dev.cmd_blit_image(cmd, disp.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, swap_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], vk::Filter::NEAREST) };
         image_barrier(dev, cmd, disp.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::GENERAL, vk::PipelineStageFlags2::BLIT, vk::AccessFlags2::TRANSFER_READ, vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::COPY, vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::TRANSFER_READ, 1);
 
@@ -719,6 +925,9 @@ impl App {
                         c[3] = 255;
                     }
                     g.ctx.destroy_buffer(&mut b);
+                    if let Some(dir) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
                     image_io::save_png_rgba8(p, extent.width, extent.height, &px)
                 } else {
                     Err("swapchain cannot be read back".into())
@@ -761,11 +970,18 @@ impl ApplicationHandler for App {
         let response = self.egui_state.as_mut().map(|s| s.on_window_event(window, &event)).unwrap_or_default();
         match event {
             WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::DroppedFile(path) => {
+                if is_env_file(&path) {
+                    self.start_env_load(path.to_string_lossy().into_owned());
+                } else {
+                    self.last_update = format!("環境マップ（.hdr / .exr）ではない: {}", path.display());
+                }
+            }
             WindowEvent::ModifiersChanged(m) => self.st.ctrl = m.state().control_key(),
             WindowEvent::MouseInput { state, button, .. } => {
                 let down = state == ElementState::Pressed;
-                if down && response.consumed {
-                    return; // パネルの上での操作はカメラに渡さない
+                if down && (response.consumed || !self.st.viewport.contains(self.st.last_cursor)) {
+                    return; // メニュー・パネルの上での操作はカメラに渡さない
                 }
                 if down && button == MouseButton::Left && self.st.ctrl {
                     self.st.focus_pick = Some(self.st.last_cursor);
@@ -786,13 +1002,13 @@ impl ApplicationHandler for App {
                     self.st.dirty = true;
                 } else if self.st.panning {
                     let c = orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, 1.0);
-                    let scale = 2.0 * self.st.distance * self.st.tan_half_fov_y / self.st.fb_height.max(1) as f32;
+                    let scale = 2.0 * self.st.distance * self.st.tan_half_fov_y / self.st.viewport.h.max(1) as f32;
                     self.st.target += (-c.right * dx as f32 + c.up * dy as f32) * scale;
                     self.st.dirty = true;
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if response.consumed {
+                if response.consumed || !self.st.viewport.contains(self.st.last_cursor) {
                     return;
                 }
                 let yoff = match delta {
@@ -891,6 +1107,7 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         save_requested: false,
         reset_requested: false,
         auto_exposure_requested: false,
+        quit_requested: false,
         spectral: cfg.spectral,
         integrator_changed: false,
         rotating: false,
@@ -898,14 +1115,14 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         focus_pick: None,
         last_cursor: (0.0, 0.0),
         ctrl: false,
-        fb_height: 1,
+        viewport: Viewport { x: 0, y: 0, w: 1, h: 1 },
         tan_half_fov_y: 0.27,
     };
     let out_png = vo.common.out.clone();
     let out_dir = out_png.parent().filter(|p| !p.as_os_str().is_empty()).map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
     let stem = out_png.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "view".into());
     let env_path = cfg.hdr.clone();
-    let env_list = list_environments(Path::new(&env_path));
+    let env_list = list_environments(&env_path);
     let mut app = App {
         base_title: format!("krbr - {}", prep.board.project_name),
         scene_as_configured: cfg.scene.clone(),
@@ -918,6 +1135,7 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         gpu: None,
         env_path,
         env_list,
+        open_dialog: None,
         env_job: None,
         env_error: String::new(),
         last_update: String::new(),

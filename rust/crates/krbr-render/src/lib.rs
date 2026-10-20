@@ -8,6 +8,7 @@ pub mod image_io;
 pub mod integrator;
 pub mod kernel;
 pub mod renderer;
+pub mod studio_env;
 pub mod tonemapper;
 pub mod vk;
 
@@ -16,6 +17,7 @@ pub use gpu_scene::GpuScene;
 pub use image_io::ImageF;
 pub use integrator::{FrameParams, Progressive, RenderTargets};
 pub use renderer::{render_offscreen, RenderOutput, RenderSettings};
+pub use studio_env::{environment_label, is_builtin, load_environment_map};
 pub use vk::{Context, ContextOptions, DeviceInfo};
 
 use std::path::PathBuf;
