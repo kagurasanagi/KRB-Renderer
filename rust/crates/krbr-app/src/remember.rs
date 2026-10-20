@@ -124,7 +124,7 @@ pub fn recent_hdrs() -> Vec<String> {
 pub type ViewValues = Table;
 
 /// ビューアだけの項目（render / watch には使わない。設定ファイルには無い）
-pub const VIEWER_ONLY: [&str; 4] = ["denoise", "denoise_strength", "max_spp", "display_mode"];
+pub const VIEWER_ONLY: [&str; 5] = ["denoise", "denoise_strength", "max_spp", "display_mode", "render_ratio"];
 
 /// 画像に関わるパネルの設定（設定ファイル・コマンドラインにもある項目）
 #[derive(Debug, Clone)]
@@ -141,6 +141,8 @@ pub struct ViewSettings<'a> {
     /// 視点の仰角・方位（注視点と距離は camera_of / set_camera で別に扱う）
     pub elevation_deg: f64,
     pub azimuth_deg: f64,
+    /// 描画のサイズ。None = ビューアのウィンドウに合わせる（覚えない。render は設定ファイルの大きさ）
+    pub render_size: Option<(u32, u32)>,
     pub lens: &'a LensParams,
 }
 
@@ -157,6 +159,7 @@ impl<'a> ViewSettings<'a> {
             fov_deg: cfg.fov_deg,
             elevation_deg: cfg.elevation_deg,
             azimuth_deg: cfg.azimuth_deg,
+            render_size: Some((cfg.width, cfg.height)),
             lens: &cfg.lens,
         }
     }
@@ -185,6 +188,9 @@ impl<'a> ViewSettings<'a> {
             ("lens_lateral_ca", l.lateral_ca),
         ] {
             f(k, v as f64);
+        }
+        if let Some((w, h)) = self.render_size {
+            t.insert("render_size".into(), Value::Array(vec![Value::Integer(w as i64), Value::Integer(h as i64)]));
         }
         t.insert("integrator".into(), Value::String(self.integrator.to_string()));
         t.insert("spectral".into(), Value::Boolean(self.spectral));
@@ -258,6 +264,10 @@ pub fn apply_view_values(cfg: &mut ProjectConfig, v: &ViewValues) {
     if let Some(b) = v.get("lens_natural_vignetting").and_then(|x| x.as_bool()) {
         l.natural_vignetting = b;
     }
+    if let Some((w, h)) = render_size_of(v) {
+        cfg.width = w;
+        cfg.height = h;
+    }
     if let Some(i) = v.get("integrator").and_then(|x| x.as_str()) {
         cfg.integrator = i.to_string();
     }
@@ -269,6 +279,13 @@ pub fn apply_view_values(cfg: &mut ProjectConfig, v: &ViewValues) {
             warn!("remembered mask color {}: {}", m, e);
         }
     }
+}
+
+/// 覚えた描画のサイズ（決まったサイズを選んでいたとき）
+pub fn render_size_of(v: &ViewValues) -> Option<(u32, u32)> {
+    let a = v.get("render_size")?.as_array()?;
+    let (w, h) = (a.first()?.as_integer()?, a.get(1)?.as_integer()?);
+    (w > 0 && h > 0 && w <= 16384 && h <= 16384).then_some((w as u32, h as u32))
 }
 
 /// 覚えた視点の注視点（ワールド座標）と距離（mm）
@@ -426,6 +443,8 @@ mod tests {
         panel.spectral = true;
         panel.lens.model = LensModel::Thin;
         panel.lens.blades = 6;
+        panel.width = 1080;
+        panel.height = 1350;
         apply_mask_color_spec(&mut panel.scene, "jlcpcb-purple").unwrap();
         let mut values = ViewSettings::of(&panel).values();
         values.insert("max_spp".into(), Value::Integer(1024));
@@ -444,6 +463,8 @@ mod tests {
         apply_view_values(&mut cfg, &got);
         assert_eq!((cfg.exposure_ev, cfg.integrator.as_str(), cfg.spectral, cfg.lens.model, cfg.lens.blades), (1.5, "vcm", true, LensModel::Thin, 6));
         assert_eq!(cfg.scene.mask_preset, "jlcpcb-purple");
+        assert_eq!((cfg.width, cfg.height), (1080, 1350));
+        assert_eq!(render_size_of(&got), Some((1080, 1350)));
 
         // 設定ファイルの露出が書き換えられたら、露出だけ設定ファイルを使う（ほかの項目とビューアだけの項目は覚えたもの）
         let mut edited = ProjectConfig::default();

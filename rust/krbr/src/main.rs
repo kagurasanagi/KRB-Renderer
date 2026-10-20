@@ -267,6 +267,12 @@ struct ViewArgs {
     /// development: press "reset all settings" in the menu during the test
     #[arg(long)]
     test_reset_settings: bool,
+    /// rendering size: WxH (the window is resized so that the 3D view is that size / ratio) or "fit" (follow the window); default: last used
+    #[arg(long, default_value = "")]
+    render_size: String,
+    /// rendering resolution / display size (e.g. 0.5 renders at half resolution, 2 renders finer and shrinks); default: last used
+    #[arg(long)]
+    render_ratio: Option<f32>,
     /// open with rendering paused (P or the toolbar button resumes); for weak GPUs
     #[arg(long)]
     paused: bool,
@@ -538,6 +544,8 @@ fn main() {
                 test_assign: args.test_assign.clone(),
                 test_mask: args.test_mask.clone(),
                 test_reset_settings: args.test_reset_settings,
+                render_size: args.render_size.clone(),
+                render_ratio: args.render_ratio,
                 paused: args.paused,
             };
             krbr_app::run_viewer(vo).map(|rc| {

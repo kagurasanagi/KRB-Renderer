@@ -60,6 +60,39 @@ pub struct ViewOptions {
     pub test_reset_settings: bool,
     /// レンダリングを一時停止した状態で開く（GPU の弱い PC 向け）
     pub paused: bool,
+    /// 描画のサイズ："WxH"（決まったサイズ。3D 表示の領域がそれ ÷ 比率になるようウィンドウの大きさを変える）か "fit"（ウィンドウに合わせる）。空なら覚えたもの
+    pub render_size: String,
+    /// レンダリングの比率（レンダリングの解像度 ÷ 表示の大きさ）。None なら覚えたもの
+    pub render_ratio: Option<f32>,
+}
+
+/// 描画のサイズの候補（表示名, 幅, 高さ）
+const SIZE_PRESETS: [(&str, u32, u32); 7] = [
+    ("1280×720（HD）", 1280, 720),
+    ("1920×1080（フル HD）", 1920, 1080),
+    ("2560×1440（WQHD）", 2560, 1440),
+    ("3840×2160（4K）", 3840, 2160),
+    ("1080×1080（正方形）", 1080, 1080),
+    ("1080×1350（4:5）", 1080, 1350),
+    ("1200×800（3:2）", 1200, 800),
+];
+
+/// レンダリングの比率の候補（レンダリングの解像度 ÷ 表示の大きさ）
+const RATIOS: [f32; 5] = [0.25, 0.5, 1.0, 1.5, 2.0];
+
+/// "WxH" を読む（"fit" や空は None）
+fn parse_size(s: &str) -> Option<(u32, u32)> {
+    let lower = s.to_lowercase();
+    let (w, h) = lower.split_once(['x', '×'])?;
+    let (w, h) = (w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?);
+    (w > 0 && h > 0 && w <= 16384 && h <= 16384).then_some((w, h))
+}
+
+/// w x h の画像を、縦横比を保って領域 vp の中央に収めた矩形
+fn fit_rect(vp: Viewport, w: u32, h: u32) -> Viewport {
+    let s = (vp.w as f64 / w.max(1) as f64).min(vp.h as f64 / h.max(1) as f64);
+    let (dw, dh) = (((w as f64 * s).round() as u32).clamp(1, vp.w.max(1)), ((h as f64 * s).round() as u32).clamp(1, vp.h.max(1)));
+    Viewport { x: vp.x + (vp.w - dw) / 2, y: vp.y + (vp.h - dh) / 2, w: dw, h: dh }
 }
 
 /// 基板の読み直し（裏のスレッド）の結果
@@ -127,8 +160,16 @@ struct ViewState {
     denoise_requested: bool,
     last_cursor: (f64, f64),
     ctrl: bool,
-    /// 3D 表示の領域（ウィンドウのうちメニューとパネルを除いた所、物理ピクセル）。描画の解像度もこれ
+    /// 3D 表示の領域（ウィンドウのうちメニューとパネルを除いた所、物理ピクセル）
     viewport: Viewport,
+    /// 画像を置く矩形（3D 表示の領域の中に、描画の縦横比を保って収めたもの）。クリックや輪郭線の換算はこれで行う
+    display: Viewport,
+    /// 描画のサイズ：None = ウィンドウに合わせる（3D 表示の領域 × 比率）、Some = 決まったサイズ
+    size_mode: Option<(u32, u32)>,
+    /// レンダリングの比率（レンダリングの解像度 ÷ 表示の大きさ）
+    render_ratio: f32,
+    /// 決まったサイズに合わせてウィンドウの大きさを変える
+    fit_window_requested: bool,
     tan_half_fov_y: f32,
 }
 
@@ -332,6 +373,8 @@ struct App {
     win_changed_at: Instant,
     /// 設定パネルの今の幅（egui のポイント）
     panel_width: f32,
+    /// 決まったサイズに合わせてウィンドウの大きさを変えている途中：あと何フレーム合わせ直すか
+    fit_frames: u32,
     /// 次に読み終えた環境マップを覚えない（「すべて既定に戻す」で設定ファイルのものに戻したとき）
     env_no_remember: bool,
     out_dir: PathBuf,
@@ -353,6 +396,46 @@ fn viewport_px(r: egui::Rect, ppp: f32, w: u32, h: u32) -> Viewport {
 }
 
 const TARGET_FRAME_MS: f64 = 10.0; // 60fps（16.7 ms）に収まるよう、表示処理の分を残す
+
+fn ratio_label(r: f32) -> String {
+    let what = if r < 1.0 {
+        "粗く速い"
+    } else if r > 1.0 {
+        "細かく描いて縮小"
+    } else {
+        "等倍"
+    };
+    format!("×{r}（{what}）")
+}
+
+/// 設定パネルの「表示」の欄：描画のサイズとレンダリングの比率
+fn size_controls(ui: &mut egui::Ui, st: &mut ViewState) {
+    let current = match st.size_mode {
+        None => "ウィンドウに合わせる".to_string(),
+        Some((w, h)) => SIZE_PRESETS.iter().find(|p| (p.1, p.2) == (w, h)).map(|p| p.0.to_string()).unwrap_or(format!("{w}×{h}")),
+    };
+    egui::ComboBox::from_id_salt("render_size").width(200.0).selected_text(current).show_ui(ui, |ui| {
+        if ui.selectable_label(st.size_mode.is_none(), "ウィンドウに合わせる").clicked() {
+            st.size_mode = None;
+        }
+        for (name, w, h) in SIZE_PRESETS {
+            if ui.selectable_label(st.size_mode == Some((w, h)), name).clicked() && st.size_mode != Some((w, h)) {
+                st.size_mode = Some((w, h));
+                st.fit_window_requested = true;
+            }
+        }
+    });
+    ui.weak("描画のサイズ（決まったサイズでは、ウィンドウの大きさを合わせる）");
+    egui::ComboBox::from_id_salt("render_ratio").width(200.0).selected_text(ratio_label(st.render_ratio)).show_ui(ui, |ui| {
+        for r in RATIOS {
+            if ui.selectable_label(st.render_ratio == r, ratio_label(r)).clicked() && st.render_ratio != r {
+                st.render_ratio = r;
+                st.fit_window_requested = st.size_mode.is_some();
+            }
+        }
+    });
+    ui.weak("レンダリングの比率（レンダリングの解像度 ÷ 表示の大きさ）");
+}
 
 fn display_mode_name(m: DisplayMode) -> &'static str {
     match m {
@@ -405,13 +488,60 @@ impl App {
         c.fov_deg = st.fov;
         c.elevation_deg = st.elevation;
         c.azimuth_deg = st.azimuth;
+        c.render_size = st.size_mode;
         let mut v = c.values();
+        v.insert("render_ratio".into(), toml::Value::Float(st.render_ratio as f64));
         remember::set_camera(&mut v, st.target, st.distance);
         v.insert("display_mode".into(), toml::Value::String(display_mode_name(st.mode).into()));
         v.insert("denoise".into(), toml::Value::Boolean(st.denoise));
         v.insert("denoise_strength".into(), toml::Value::Float(st.denoise_strength as f64));
         v.insert("max_spp".into(), toml::Value::Integer(st.max_spp as i64));
         v
+    }
+
+    /// 決まったサイズのとき、3D 表示の領域が「描画のサイズ ÷ 比率」になるようにウィンドウの大きさを変える。
+    /// 画面に入らなければ、入るまで比率を上げる。メニュー・パネル・ステータスバーの大きさが変わることがあるので、数フレームかけて合わせる
+    fn fit_window(&mut self) {
+        let Some((w, h)) = self.st.size_mode else {
+            self.st.fit_window_requested = false;
+            self.fit_frames = 0;
+            return;
+        };
+        let Some(window) = self.window.as_ref() else { return };
+        let inner = window.inner_size();
+        let vp = self.st.viewport;
+        // 領域以外（メニュー・パネル・ステータスバー）の大きさ
+        let (extra_w, extra_h) = (inner.width.saturating_sub(vp.w), inner.height.saturating_sub(vp.h));
+        if self.st.fit_window_requested {
+            self.st.fit_window_requested = false;
+            if window.is_maximized() {
+                window.set_maximized(false);
+            }
+            // 画面に入るまで比率を上げる（枠の分も見込む）
+            if let Some(m) = window.current_monitor() {
+                let outer = window.outer_size();
+                let (deco_w, deco_h) = (outer.width.saturating_sub(inner.width), outer.height.saturating_sub(inner.height));
+                let (mw, mh) = (m.size().width as f32 * 0.96, m.size().height as f32 * 0.92);
+                let fits = |r: f32| (w as f32 / r) + (extra_w + deco_w) as f32 <= mw && (h as f32 / r) + (extra_h + deco_h) as f32 <= mh;
+                krbr_core::debug!("fit window: monitor {}x{}, inner {}x{}, outer {}x{}, 3D view {}x{}", m.size().width, m.size().height, inner.width, inner.height, outer.width, outer.height, vp.w, vp.h);
+                if !fits(self.st.render_ratio) {
+                    let r = RATIOS.iter().copied().find(|&r| r > self.st.render_ratio && fits(r)).unwrap_or(*RATIOS.last().unwrap());
+                    self.last_update = format!("{}×{} は画面に入らないので、レンダリングの比率を ×{} にした（表示 {:.0}%）", w, h, r, 100.0 / r);
+                    self.st.render_ratio = r;
+                }
+            }
+            self.fit_frames = 6;
+        }
+        if self.fit_frames == 0 {
+            return;
+        }
+        let target = (((w as f32 / self.st.render_ratio).round() as u32).max(1), ((h as f32 / self.st.render_ratio).round() as u32).max(1));
+        if (vp.w, vp.h) == target {
+            self.fit_frames = 0;
+            return;
+        }
+        self.fit_frames -= 1;
+        let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(target.0 + extra_w, target.1 + extra_h));
     }
 
     /// 今のウィンドウの状態（最大化している間は、最大化する前の大きさと位置を残す）
@@ -480,6 +610,8 @@ impl App {
         st.denoise_strength = self.vo.common.denoise_strength.unwrap_or(1.0);
         st.mode = DisplayMode::Beauty;
         st.reset_requested = true; // 視点も自動の構図に
+        st.size_mode = None;
+        st.render_ratio = 1.0;
         st.mask_choice = if c.scene.mask_preset.is_empty() { None } else { mask_presets().iter().position(|p| p.name == c.scene.mask_preset) };
         st.mask_changed = true;
         st.materials_dirty = true;
@@ -794,6 +926,7 @@ impl App {
 
         ui.separator();
         ui.strong("表示");
+        size_controls(ui, st);
         ui.horizontal(|ui| {
             ui.radio_value(&mut st.mode, DisplayMode::Beauty, "画像");
             ui.radio_value(&mut st.mode, DisplayMode::Albedo, "アルベド");
@@ -898,7 +1031,7 @@ impl App {
 
     /// 画面の点（物理ピクセル）の部品を選ぶ。基板や何も無い所なら選択を外す
     fn pick_part(&mut self, p: (f64, f64)) {
-        let vp = self.st.viewport;
+        let vp = self.st.display;
         let (ww, wh) = (vp.w as f64, vp.h as f64);
         let (px, py) = (p.0 - vp.x as f64, p.1 - vp.y as f64);
         let c = orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, (ww / wh) as f32);
@@ -926,7 +1059,7 @@ impl App {
         if self.prep.cfg.lens.model == LensModel::Realistic || !central.is_positive() {
             return;
         }
-        let vp = self.st.viewport;
+        let vp = self.st.display;
         let ppp = root.ctx().pixels_per_point();
         let c = orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, vp.w as f32 / vp.h.max(1) as f32);
         let painter = root.painter().with_clip_rect(central);
@@ -1278,7 +1411,9 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 ui.weak(format!("{}・{}", g.prog.integrator_name().to_uppercase(), if st.spectral { "分光" } else { "RGB" }));
                 ui.separator();
-                ui.weak(format!("{}×{}", st.viewport.w, st.viewport.h));
+                let (rw, rh) = (g.prog.targets().width, g.prog.targets().height);
+                ui.weak(format!("描画 {}×{}（表示 {:.0}%）", rw, rh, 100.0 * st.display.w as f64 / rw.max(1) as f64))
+                    .on_hover_text(if st.size_mode.is_some() { "決まったサイズ（メニューの「表示」→「描画のサイズ」）" } else { "ウィンドウに合わせる（3D 表示の領域 × レンダリングの比率）" });
                 ui.separator();
                 ui.weak(format!("EV {:+.2}", st.exposure));
                 ui.separator();
@@ -1319,6 +1454,29 @@ impl App {
                         st.paused = !st.paused;
                         ui.close();
                     }
+                    ui.separator();
+                    ui.menu_button("描画のサイズ", |ui| {
+                        if ui.add(egui::Button::new("ウィンドウに合わせる").selected(st.size_mode.is_none())).clicked() {
+                            st.size_mode = None;
+                            ui.close();
+                        }
+                        for (name, w, h) in SIZE_PRESETS {
+                            if ui.add(egui::Button::new(name).selected(st.size_mode == Some((w, h)))).clicked() {
+                                st.size_mode = Some((w, h));
+                                st.fit_window_requested = true;
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.menu_button("レンダリングの比率", |ui| {
+                        for r in RATIOS {
+                            if ui.add(egui::Button::new(ratio_label(r)).selected(st.render_ratio == r)).clicked() {
+                                st.render_ratio = r;
+                                st.fit_window_requested = st.size_mode.is_some();
+                                ui.close();
+                            }
+                        }
+                    });
                     ui.separator();
                     for (mode, name, key) in [(DisplayMode::Beauty, "画像", "1"), (DisplayMode::Albedo, "アルベド", "2"), (DisplayMode::Normal, "法線", "3")] {
                         if ui.add(egui::Button::new(name).selected(st.mode == mode).shortcut_text(key)).clicked() {
@@ -1511,11 +1669,13 @@ impl App {
                 g.swap.recreate(fbw, fbh)?;
                 self.need_recreate = false;
             }
-            // 描画の解像度は 3D 表示の領域に合わせる（スワップチェーンがウィンドウと違う大きさのこともあるので、その中に収める）
+            // 3D 表示の領域（スワップチェーンがウィンドウと違う大きさのこともあるので、その中に収める）。
+            // 描画の解像度は、決まったサイズか、領域 × 比率
             let vp = viewport_px(central, full.pixels_per_point, g.swap.extent.width, g.swap.extent.height);
+            let (rw, rh) = self.st.size_mode.unwrap_or_else(|| (((vp.w as f32 * self.st.render_ratio).round() as u32).max(1), ((vp.h as f32 * self.st.render_ratio).round() as u32).max(1)));
             let t = g.prog.targets();
-            if vp.w != t.width || vp.h != t.height {
-                g.prog.resize(vp.w, vp.h)?;
+            if rw != t.width || rh != t.height {
+                g.prog.resize(rw, rh)?;
                 g.tone = Tonemapper::new(g.ctx, g.prog.targets())?;
                 // ノイズ除去は新しい大きさで作り直す
                 if g.denoiser.is_some() {
@@ -1526,7 +1686,9 @@ impl App {
                 self.st.dirty = true;
             }
             self.st.viewport = vp;
+            self.st.display = fit_rect(vp, rw, rh);
         }
+        self.fit_window();
         if self.vo.test_pick.is_some() && !self.test_pick_done && self.frames >= 5 {
             self.test_pick_done = true;
             let (x, y) = self.vo.test_pick.unwrap();
@@ -1540,7 +1702,7 @@ impl App {
             }
         }
         if let Some((px, py)) = self.st.focus_pick.take() {
-            let vp = self.st.viewport;
+            let vp = self.st.display;
             let (ww, wh) = (vp.w as f64, vp.h as f64);
             let (px, py) = (px - vp.x as f64, py - vp.y as f64);
             let c = orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, (ww / wh) as f32);
@@ -1557,11 +1719,11 @@ impl App {
         }
         if self.st.start_requested {
             self.st.start_requested = false;
-            self.start_camera(self.st.viewport.w, self.st.viewport.h);
+            self.start_camera(self.st.display.w, self.st.display.h);
         }
         if self.st.reset_requested {
             self.st.reset_requested = false;
-            self.reset_camera(self.st.viewport.w, self.st.viewport.h);
+            self.reset_camera(self.st.display.w, self.st.display.h);
         }
         if self.st.dirty {
             let (w, h) = {
@@ -1695,7 +1857,8 @@ impl App {
         let range = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
         unsafe { dev.cmd_clear_color_image(cmd, swap_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &vk::ClearColorValue { float32: [0.1, 0.1, 0.1, 1.0] }, &[range]) };
         image_barrier(dev, cmd, swap_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::PipelineStageFlags2::CLEAR, vk::AccessFlags2::TRANSFER_WRITE, vk::PipelineStageFlags2::BLIT, vk::AccessFlags2::TRANSFER_WRITE, 1);
-        let vp = self.st.viewport;
+        let vp = self.st.display;
+        let scaled = vp.w != disp.width || vp.h != disp.height;
         let sub = vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 };
         let blit = vk::ImageBlit {
             src_subresource: sub,
@@ -1703,7 +1866,7 @@ impl App {
             dst_subresource: sub,
             dst_offsets: [vk::Offset3D { x: vp.x as i32, y: vp.y as i32, z: 0 }, vk::Offset3D { x: (vp.x + vp.w) as i32, y: (vp.y + vp.h) as i32, z: 1 }],
         };
-        unsafe { dev.cmd_blit_image(cmd, disp.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, swap_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], vk::Filter::NEAREST) };
+        unsafe { dev.cmd_blit_image(cmd, disp.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, swap_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], if scaled { vk::Filter::LINEAR } else { vk::Filter::NEAREST }) };
         image_barrier(dev, cmd, disp.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::GENERAL, vk::PipelineStageFlags2::BLIT, vk::AccessFlags2::TRANSFER_READ, vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::COPY, vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::TRANSFER_READ, 1);
 
         // 操作パネルを画像の上に重ねて描く（動的レンダリング）
@@ -1796,10 +1959,12 @@ impl App {
 
         if last_test_frame {
             info!("test: {} frames, {} spp, last frame {:.1} ms (GPU {:.1} ms, {} spp/frame), swapchain {}x{} format {:?}, environment {}", self.frames, g.prog.samples(), self.last_frame_ms, self.last_gpu_ms, self.samples_per_frame, extent.width, extent.height, g.swap.format, self.env_path);
+            info!("test: render {}x{}, 3D view {}x{}, display {}x{} at ({}, {}), ratio {}", g.prog.targets().width, g.prog.targets().height, self.st.viewport.w, self.st.viewport.h, self.st.display.w, self.st.display.h, self.st.display.x, self.st.display.y, self.st.render_ratio);
             info!("test: rendering {:.2} s for {} spp, average {:.1} ms/spp (GPU {:.1} ms/spp)", self.accum_wall.as_secs_f64(), self.accum_measured, self.accum_wall.as_secs_f64() * 1000.0 / self.accum_measured.max(1) as f64, self.accum_gpu_ms / self.accum_measured.max(1) as f64);
             if let Some(p) = &self.vo.screenshot {
                 let ok = if let Some(mut b) = shot.take() {
-                    let mut px = b.mapped_ref().unwrap().to_vec();
+                    // 確保した大きさは要求より大きいことがあるので、画像の分だけを使う
+                    let mut px = b.mapped_ref().unwrap()[..extent.width as usize * extent.height as usize * 4].to_vec();
                     if g.swap.format == vk::Format::B8G8R8A8_UNORM {
                         for c in px.chunks_exact_mut(4) {
                             c.swap(0, 2);
@@ -1897,7 +2062,7 @@ impl ApplicationHandler for App {
                     self.st.dirty = true;
                 } else if self.st.panning {
                     let c = orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, 1.0);
-                    let scale = 2.0 * self.st.distance * self.st.tan_half_fov_y / self.st.viewport.h.max(1) as f32;
+                    let scale = 2.0 * self.st.distance * self.st.tan_half_fov_y / self.st.display.h.max(1) as f32;
                     self.st.target += (-c.right * dx as f32 + c.up * dy as f32) * scale;
                     self.st.dirty = true;
                 }
@@ -1978,6 +2143,9 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
     let cfg = &prep.cfg;
     let rv = &prep.remembered_view;
     let win = remember::window_state();
+    // 描画のサイズと比率：コマンドライン、覚えたもの、ウィンドウに合わせる・×1
+    let size_mode = if vo.render_size.is_empty() { remember::render_size_of(rv) } else { parse_size(&vo.render_size) };
+    let render_ratio = vo.render_ratio.or_else(|| rv.get("render_ratio").and_then(|v| v.as_float()).map(|v| v as f32)).map(|r| r.clamp(0.1, 4.0)).unwrap_or(1.0);
     let max_spp = vo.common.spp.map(pow2_spp).or_else(|| rv.get("max_spp").and_then(|v| v.as_integer()).map(|v| pow2_spp(v as u32))).unwrap_or(4096);
     let mask_choice = if cfg.scene.mask_preset.is_empty() { None } else { mask_presets().iter().position(|p| p.name == cfg.scene.mask_preset) };
     let st = ViewState {
@@ -2018,6 +2186,10 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         last_cursor: (0.0, 0.0),
         ctrl: false,
         viewport: Viewport { x: 0, y: 0, w: 1, h: 1 },
+        display: Viewport { x: 0, y: 0, w: 1, h: 1 },
+        size_mode,
+        render_ratio,
+        fit_window_requested: size_mode.is_some(),
         tan_half_fov_y: 0.27,
     };
     let out_png = vo.common.out.clone();
@@ -2089,6 +2261,7 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         win_saved: win.clone(),
         win_changed_at: Instant::now(),
         panel_width: win.panel_width.unwrap_or(340.0),
+        fit_frames: 0,
         env_no_remember: false,
         out_dir,
         stem,
