@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// そのまま SPIR-V にするもの（ファイル名の拡張子でステージが決まる）
-const SOURCES: &[&str] = &["pathtrace.comp", "tonemap.comp", "denoise_prep.comp", "denoise_blend.comp", "vcm_light.comp", "vcm_camera.comp", "rt_hit.rchit", "rt_miss.rmiss", "rt_shadow.rmiss"];
+const SOURCES: &[&str] = &["pathtrace.comp", "tonemap.comp", "glow.comp", "denoise_prep.comp", "denoise_blend.comp", "vcm_light.comp", "vcm_camera.comp", "rt_hit.rchit", "rt_miss.rmiss", "rt_shadow.rmiss"];
 /// ray tracing pipeline 版（.rgen.spv）も作るもの
 const RAY_SOURCES: &[&str] = &["pathtrace.comp", "vcm_light.comp", "vcm_camera.comp"];
 

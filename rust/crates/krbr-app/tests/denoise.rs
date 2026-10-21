@@ -25,7 +25,7 @@ fn mean_abs_diff(a: &ImageF, b: &ImageF) -> f64 {
 #[ignore = "needs a Vulkan GPU with ray tracing and the OIDN DLLs"]
 fn denoising_a_4spp_image_approaches_the_reference() {
     let ws = std::env::temp_dir().join(format!("krbr_rust_denoise_{}", std::process::id()));
-    std::env::set_var("KRBR_CONFIG_DIR", ws.join("config")); // 環境マップの記憶を書き込まない
+    common::use_config_dir(&ws.join("config")); // 環境マップの記憶を、テストの基板の横に書かない
     assert!(krbr_render::denoiser_available(), "OIDN DLLs not found");
     let pcb = common::test_board();
     // 既定の基板では部品の多いところ（95, 95）を寄って見る。別の基板では自動の構図の中央

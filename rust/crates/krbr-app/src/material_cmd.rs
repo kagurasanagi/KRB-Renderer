@@ -18,7 +18,7 @@ use crate::prepare::load_board_or_report;
 #[derive(Debug, Clone, Default)]
 pub struct MaterialSetOptions {
     pub pcb: PathBuf,
-    /// 部品番号ごと（プロジェクトの overrides.toml）
+    /// 部品番号ごと（基板の設定ファイル <名前>.krbr の [ref.*]）
     pub reference: String,
     /// 3D モデルごと（展開前のパス、ファイル名、実ファイルのパス）
     pub model: String,

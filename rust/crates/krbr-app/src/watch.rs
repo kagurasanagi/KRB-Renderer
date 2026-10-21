@@ -72,7 +72,7 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
     let mut watcher = FileWatcher::with_defaults(&prep.board.file);
     // ノイズ除去は既定で有効（C++ 版と同じ。--no-denoise で無効）
     let denoise = common.denoise.unwrap_or(true);
-    let mut r = Renderer { ctx: &ctx, integrator: prep.cfg.integrator.clone(), width: w, height: h, spp, exposure: prep.cfg.exposure_ev, frame, denoise, denoise_strength: common.denoise_strength.unwrap_or(1.0), denoiser: None };
+    let mut r = Renderer { ctx: &ctx, integrator: prep.cfg.integrator.clone(), width: w, height: h, spp, exposure: prep.cfg.exposure_ev, glow: crate::prepare::glow_params(&prep.cfg), frame, denoise, denoise_strength: common.denoise_strength.unwrap_or(1.0), denoiser: None };
     let (render_ms, write_ms, _) = r.render_and_write(&gpu, &out)?;
     info!("watch: wrote {} ({}x{}, {} spp, render {:.0} ms, write {:.0} ms); watching {} for saves", out.display(), w, h, spp, render_ms, write_ms, prep.board.file.display());
     if !on_event(WatchEvent::Ready(&out)) {
@@ -203,6 +203,7 @@ struct Renderer<'a> {
     height: u32,
     spp: u32,
     exposure: f32,
+    glow: krbr_render::glow::GlowParams,
     frame: FrameParams,
     /// ノイズ除去をする・強さ・OIDN（最初の描画で作り、以後は使い回す。作れなければ None のまま）
     denoise: bool,
@@ -265,7 +266,7 @@ impl<'a> Renderer<'a> {
             if let Some(d) = denoiser {
                 d.record_output(cmd, strength);
             }
-            tm.record(cmd, self.exposure, DisplayMode::Beauty, xyz);
+            tm.record(cmd, self.exposure, DisplayMode::Beauty, xyz, &self.glow);
             memory_barrier(dev, cmd, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_READ);
             let region = vk::BufferImageCopy::default()
                 .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })

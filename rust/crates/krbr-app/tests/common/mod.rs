@@ -11,6 +11,13 @@ pub fn test_board() -> PathBuf {
     }
 }
 
+/// 全体設定のフォルダをテスト用にし、基板の設定ファイル <名前>.krbr もそこへ置く（テストの基板のフォルダに書かない）
+pub fn use_config_dir(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("settings.toml"), "board_settings = \"config_dir\"\n").unwrap();
+    std::env::set_var("KRBR_CONFIG_DIR", dir);
+}
+
 /// KRBR_TEST_PCB で別の基板を指定したか（既定の基板の座標に合わせた設定を使わない）
 pub fn custom_board() -> bool {
     std::env::var_os("KRBR_TEST_PCB").is_some()

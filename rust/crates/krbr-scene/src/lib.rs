@@ -2,6 +2,7 @@
 //! 分光の土台（等色関数・色空間・RGB → スペクトルの表）、カメラ・レンズ、プロジェクト設定、
 //! 基板と部品からレンダラに渡すシーンを作る。C++ 版の `scene/` と `app/config` に相当する。
 
+pub mod board_file;
 pub mod camera;
 pub mod config;
 pub mod config_templates;
@@ -15,7 +16,7 @@ pub mod scene;
 pub mod spectrum;
 
 pub use camera::{frame_camera, orbit_camera, Camera, CameraParams};
-pub use config::{load_project_config, project_config_dir, ProjectConfig};
+pub use config::{load_project_config, ProjectConfig};
 pub use lens::{LensModel, LensParams, LensSystem};
 pub use mask_presets::{find_mask_preset, mask_presets, MaskPreset};
 pub use material::{linear_to_srgb, srgb_to_linear, BumpPattern, Material, MaterialKind};

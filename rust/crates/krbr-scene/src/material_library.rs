@@ -3,24 +3,94 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::material::Material;
+use glam::Vec3;
+
+use crate::material::{srgb_to_linear, Material};
 use crate::material_io::read_material;
 
 /// 材質名の後ろに付けると、表面の模様（凹凸と粗さのむら）を無くした版になる（例 "plastic+smooth"）。Rust 版だけの書き方
 pub const SMOOTH_SUFFIX: &str = "+smooth";
+/// 材質名の後ろに付けると、発光する版になる（例 "plastic+emit=#ff2010,5000"：sRGB の色と輝度 cd/m²）。LED の点灯など
+pub const EMIT_PREFIX: &str = "+emit=";
 
-/// 名前を（ライブラリの材質名, 模様なしか）に分ける
-pub fn split_variant(name: &str) -> (&str, bool) {
-    match name.strip_suffix(SMOOTH_SUFFIX) {
-        Some(base) => (base, true),
-        None => (name, false),
+/// 発光する部位の地の色（拡散の反射率）：発光の色を最も明るい成分がこの値になるようにしたもの
+pub const EMISSIVE_BASE_ALBEDO: f32 = 0.7;
+
+/// 発光の指定（材質名の "+emit=#rrggbb,<cd/m²>"）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Emission {
+    /// 表示の色（sRGB）
+    pub srgb: [u8; 3],
+    /// 輝度（cd/m²）
+    pub luminance: f32,
+}
+
+impl Emission {
+    /// "#rrggbb,<cd/m²>"（# は省略可）
+    pub fn parse(s: &str) -> Option<Self> {
+        let (color, lum) = s.split_once(',')?;
+        let hex = color.trim().trim_start_matches('#');
+        if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+        let luminance: f32 = lum.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 0.0)?;
+        Some(Self { srgb: [byte(0)?, byte(2)?, byte(4)?], luminance })
+    }
+
+    pub fn suffix(&self) -> String {
+        let [r, g, b] = self.srgb;
+        format!("{EMIT_PREFIX}#{r:02x}{g:02x}{b:02x},{}", self.luminance)
+    }
+
+    /// 発光の色（リニア）
+    pub fn linear_color(&self) -> Vec3 {
+        srgb_to_linear(Vec3::new(self.srgb[0] as f32, self.srgb[1] as f32, self.srgb[2] as f32) / 255.0)
     }
 }
 
-/// 模様のあり・なしを切り替えた名前
+/// 材質名を（ライブラリの材質名, 模様なしか, 発光）に分ける。後ろに付いた "+smooth" と "+emit=..." を外す
+pub fn parse_variant(name: &str) -> (&str, bool, Option<Emission>) {
+    let (mut base, mut smooth, mut emission) = (name, false, None);
+    loop {
+        if let Some(b) = base.strip_suffix(SMOOTH_SUFFIX) {
+            (base, smooth) = (b, true);
+        } else if let Some((b, e)) = base.rsplit_once(EMIT_PREFIX).and_then(|(b, s)| Emission::parse(s).map(|e| (b, e))) {
+            (base, emission) = (b, emission.or(Some(e)));
+        } else {
+            return (base, smooth, emission);
+        }
+    }
+}
+
+/// 材質名を組み立てる（"<材質>[+smooth][+emit=...]"）
+pub fn variant_name(base: &str, smooth: bool, emission: Option<Emission>) -> String {
+    let mut s = base.to_string();
+    if smooth {
+        s += SMOOTH_SUFFIX;
+    }
+    if let Some(e) = emission {
+        s += &e.suffix();
+    }
+    s
+}
+
+/// 名前を（ライブラリの材質名, 模様なしか）に分ける（発光の指定は外す）
+pub fn split_variant(name: &str) -> (&str, bool) {
+    let (base, smooth, _) = parse_variant(name);
+    (base, smooth)
+}
+
+/// 模様のあり・なしを切り替えた名前（発光の指定は保つ）
 pub fn with_smooth(name: &str, smooth: bool) -> String {
-    let (base, _) = split_variant(name);
-    if smooth { format!("{base}{SMOOTH_SUFFIX}") } else { base.to_string() }
+    let (base, _, emission) = parse_variant(name);
+    variant_name(base, smooth, emission)
+}
+
+/// 発光を付け替えた名前（None なら外す。模様のあり・なしは保つ）
+pub fn with_emission(name: &str, emission: Option<Emission>) -> String {
+    let (base, smooth, _) = parse_variant(name);
+    variant_name(base, smooth, emission)
 }
 
 /// krbr 組み込みの材質（OpenPBR Surface）。色はリニア。base_color を書かなければ 3D モデルの面の色を使う
@@ -179,14 +249,23 @@ impl MaterialLibrary {
         self.materials.get(name)
     }
 
-    /// 名前の材質を作る。名前の後ろの「+smooth」は、表面の模様（凹凸と粗さのむら）を無くした版
+    /// 名前の材質を作る。名前の後ろの「+smooth」は、表面の模様（凹凸と粗さのむら）を無くした版、
+    /// 「+emit=#rrggbb,<cd/m²>」は、その色と輝度で光る版
     pub fn find_variant(&self, name: &str) -> Option<Material> {
-        let (base, smooth) = split_variant(name);
+        let (base, smooth, emission) = parse_variant(name);
         let mut m = self.materials.get(base)?.clone();
         if smooth {
             m.bump_pattern = crate::material::BumpPattern::None;
             m.bump_strength = 0.0;
             m.roughness_variation = 0.0;
+        }
+        if let Some(e) = emission {
+            m.emission_color = e.linear_color();
+            m.emission_luminance = e.luminance;
+            // 光っている部位の地の色は発光の色にする（色のついた拡散レンズ）。白い地のままだと、周りの光を白く返して発光の色を薄める
+            let c = m.emission_color;
+            m.base_color = c / c.max_element().max(1e-6) * EMISSIVE_BASE_ALBEDO;
+            m.base_color_from_model = false;
         }
         Some(m)
     }
@@ -217,6 +296,36 @@ mod tests {
         assert_eq!(with_smooth("plastic", true), "plastic+smooth");
         assert_eq!(with_smooth("plastic+smooth", false), "plastic");
         assert_eq!(split_variant("metal_tin+smooth"), ("metal_tin", true));
+    }
+
+    #[test]
+    fn emission_variant() {
+        let lib = MaterialLibrary::builtin();
+        let m = lib.find_variant("plastic+emit=#ff8000,5000").unwrap();
+        assert_eq!(m.emission_luminance, 5000.0);
+        assert!((m.emission_color - Vec3::new(1.0, srgb_to_linear(Vec3::splat(128.0 / 255.0)).x, 0.0)).abs().max_element() < 1e-6);
+        assert_eq!(m.specular_roughness, lib.find("plastic").unwrap().specular_roughness); // 発光以外はそのまま
+        assert_eq!(lib.find("plastic").unwrap().emission_luminance, 0.0);
+        // 地の色は発光の色（モデルの色は使わない）
+        assert!(!m.base_color_from_model);
+        assert!((m.base_color.x - EMISSIVE_BASE_ALBEDO).abs() < 1e-6 && m.base_color.z == 0.0);
+        // # は省略可。模様なしと組み合わせられる（どちらの順でも）
+        for name in ["plastic+smooth+emit=ff8000,5000", "plastic+emit=#FF8000,5000+smooth"] {
+            let (base, smooth, e) = parse_variant(name);
+            assert_eq!((base, smooth, e), ("plastic", true, Some(Emission { srgb: [255, 128, 0], luminance: 5000.0 })));
+        }
+        // 書き方の誤りは材質名の一部とみなす（ライブラリに無いので見つからない）
+        for bad in ["plastic+emit=#ff80,5000", "plastic+emit=#ff8000", "plastic+emit=#ff8000,-1", "plastic+emit=#gg8000,1"] {
+            assert!(lib.find_variant(bad).is_none(), "{bad}");
+        }
+        // 組み立てと付け替え
+        let e = Emission { srgb: [0x20, 0xff, 0x40], luminance: 2500.0 };
+        assert_eq!(variant_name("plastic", true, Some(e)), "plastic+smooth+emit=#20ff40,2500");
+        assert_eq!(with_emission("plastic+smooth", Some(e)), "plastic+smooth+emit=#20ff40,2500");
+        assert_eq!(with_emission("plastic+smooth+emit=#20ff40,2500", None), "plastic+smooth");
+        assert_eq!(with_smooth("plastic+emit=#20ff40,2500", false), "plastic+emit=#20ff40,2500");
+        assert_eq!(split_variant("plastic+smooth+emit=#20ff40,2500"), ("plastic", true));
+        assert_eq!(Emission::parse("#20ff40,0.5").unwrap().suffix(), "+emit=#20ff40,0.5");
     }
 
     #[test]

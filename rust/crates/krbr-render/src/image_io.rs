@@ -68,13 +68,15 @@ pub fn aces_fitted(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     (1.60475 * o0 - 0.53108 * o1 - 0.07367 * o2, -0.10208 * o0 + 1.10813 * o1 - 0.00605 * o2, -0.00327 * o0 - 0.07276 * o1 + 1.07602 * o2)
 }
 
-/// ACES でトーンマッピングして sRGB の 8bit にする（C++ 版 savePngTonemapped と同じ式）
-pub fn tonemap_rgba8(img: &ImageF, exposure_ev: f32) -> Vec<u8> {
+/// 露出とグロー（crate::glow）をかけ、ACES でトーンマッピングして sRGB の 8bit にする（表示の shaders/tonemap.comp と同じ式）
+pub fn tonemap_rgba8(img: &ImageF, exposure_ev: f32, glow: &crate::glow::GlowParams) -> Vec<u8> {
     let scale = 2f32.powf(exposure_ev);
     let n = (img.width * img.height) as usize;
+    let mut lin: Vec<[f32; 3]> = (0..n).map(|i| [img.rgba[i * 4] * scale, img.rgba[i * 4 + 1] * scale, img.rgba[i * 4 + 2] * scale].map(|v| v.max(0.0))).collect();
+    crate::glow::apply(&mut lin, img.width, img.height, glow);
     let mut px = vec![0u8; n * 4];
     for i in 0..n {
-        let (r, g, b) = aces_fitted(img.rgba[i * 4] * scale, img.rgba[i * 4 + 1] * scale, img.rgba[i * 4 + 2] * scale);
+        let (r, g, b) = aces_fitted(lin[i][0], lin[i][1], lin[i][2]);
         // 量子化の縞を減らす小さなディザ
         let d = ((((i as u32).wrapping_mul(2654435761)) & 255) as f32 / 255.0 - 0.5) / 255.0;
         px[i * 4] = ((linear_to_srgb_f(r) + d).clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -103,8 +105,8 @@ pub fn save_png_rgba8_fast(p: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), 
     std::fs::rename(&tmp, p).map_err(|e| format!("{e}"))
 }
 
-pub fn save_png_tonemapped(p: &Path, img: &ImageF, exposure_ev: f32) -> Result<(), String> {
-    save_png_rgba8(p, img.width, img.height, &tonemap_rgba8(img, exposure_ev))
+pub fn save_png_tonemapped(p: &Path, img: &ImageF, exposure_ev: f32, glow: &crate::glow::GlowParams) -> Result<(), String> {
+    save_png_rgba8(p, img.width, img.height, &tonemap_rgba8(img, exposure_ev, glow))
 }
 
 #[cfg(test)]
@@ -125,7 +127,7 @@ mod tests {
         assert_eq!((back.width, back.height), (4, 3));
         assert!((back.rgba[5] - 1.25).abs() < 1e-6);
         let png = dir.join("t.png");
-        save_png_tonemapped(&png, &img, 0.0).unwrap();
+        save_png_tonemapped(&png, &img, 0.0, &crate::glow::GlowParams::OFF).unwrap();
         assert!(png.exists());
     }
 

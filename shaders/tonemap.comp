@@ -1,12 +1,13 @@
 #version 460
-// 表示用：累積画像を ACES（Hill 近似）でトーンマッピングし sRGB の RGBA8 にする。
-// io/image_io.cpp の savePngTonemapped と同じ式にそろえること
+// 表示用：累積画像に露出とグロー（glow.comp で作ったピラミッドの最上段）をかけ、ACES（Hill 近似）でトーンマッピングし sRGB の RGBA8 にする。
+// rust/crates/krbr-render/src/image_io.rs の tonemap_rgba8 と同じ式にそろえること
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0, rgba32f) uniform readonly image2D accumColor;
 layout(set = 0, binding = 1, rgba32f) uniform readonly image2D accumAlbedo;
 layout(set = 0, binding = 2, rgba32f) uniform readonly image2D accumNormal;
 layout(set = 0, binding = 3, rgba8) uniform writeonly image2D outImage;
+layout(set = 0, binding = 4, rgba32f) uniform readonly image2D glowImage;
 
 layout(push_constant) uniform Push {
     float exposureScale;
@@ -16,6 +17,7 @@ layout(push_constant) uniform Push {
     vec4 xyzToRgb0;  // 入力が XYZ（分光モード）のとき、リニア sRGB への変換の列。w = 1 なら変換する
     vec4 xyzToRgb1;
     vec4 xyzToRgb2;
+    vec4 glow;       // x: 強さ / 段の重みの合計（0 ならグローなし）, y, z: glowImage の大きさ
 } pc;
 
 vec3 toRgb(vec3 c) {
@@ -30,6 +32,20 @@ vec3 acesFitted(vec3 c) {
     vec3 a = v * (v + 0.0245786) - 0.000090537;
     vec3 b = v * (0.983729 * v + 0.4329510) + 0.238081;
     return outM * (a / b);
+}
+
+vec3 glowAt(ivec2 q) {
+    q = clamp(q, ivec2(0), ivec2(int(pc.glow.y) - 1, int(pc.glow.z) - 1));
+    return imageLoad(glowImage, q).rgb;
+}
+
+// グローの最上段（半分の解像度）を双線形で広げる
+vec3 glowSample(uvec2 p) {
+    vec2 f = (vec2(p) + 0.5) * 0.5 - 0.5;
+    vec2 f0 = floor(f);
+    vec2 t = f - f0;
+    ivec2 q = ivec2(f0);
+    return mix(mix(glowAt(q), glowAt(q + ivec2(1, 0)), t.x), mix(glowAt(q + ivec2(0, 1)), glowAt(q + ivec2(1, 1)), t.x), t.y);
 }
 
 vec3 linearToSrgb(vec3 x) {
@@ -51,6 +67,7 @@ void main() {
     } else {
         vec4 a = imageLoad(accumColor, ip);
         vec3 l = a.a > 0.0 ? max(toRgb(a.rgb / a.a), vec3(0.0)) * pc.exposureScale : vec3(0.0);
+        if (pc.glow.x > 0.0) l += glowSample(p) * pc.glow.x;
         c = linearToSrgb(acesFitted(l));
         // 量子化の縞を減らす小さなディザ
         uint i = p.y * pc.width + p.x;

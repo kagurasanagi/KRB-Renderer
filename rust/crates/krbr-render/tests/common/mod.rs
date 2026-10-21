@@ -32,7 +32,7 @@ pub fn out_dir() -> PathBuf {
 }
 
 pub fn save_png(name: &str, img: &ImageF, exposure_ev: f32) {
-    krbr_render::image_io::save_png_tonemapped(&out_dir().join(name), img, exposure_ev).expect("save png");
+    krbr_render::image_io::save_png_tonemapped(&out_dir().join(name), img, exposure_ev, &krbr_render::glow::GlowParams::OFF).expect("save png");
 }
 
 // ---------------------------------------------------------------- 形状

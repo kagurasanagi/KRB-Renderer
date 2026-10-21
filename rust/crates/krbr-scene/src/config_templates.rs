@@ -1,8 +1,17 @@
-//! `--init` で書き出す設定ファイルのひな形（C++ 版 app/config.cpp の kBoardToml / kEnvironmentToml と同じ文面。
-//! environment.toml の hdr の説明だけ、Rust 版の決め方に合わせてある）
+//! 基板ごとの設定ファイル `<名前>.krbr`（crate::board_file）のひな形。ファイルを作るときと `--init` で使う
+//! （文面は C++ 版 app/config.cpp の kBoardToml / kEnvironmentToml がもと）
 
-pub const BOARD_TOML: &str = r#"# krbr: 基板の設定（このファイルが無ければ既定値を使います）
-# 色は sRGB の [r, g, b]（0..1）
+/// ファイルの先頭の説明
+pub const HEADER: &str = r#"# krbr: この基板の設定。書いていない項目は既定値を使います（コマンドラインの指定が優先されます）
+# 相対パスは基板のフォルダから。色は sRGB の [r, g, b]（0..1）
+#   [board] [relief] [surface] [placeholder] [paths] [kicad_cli]  基板の設定
+#   [environment] [camera] [render] [lens]                         照明・カメラ・レンダリングの設定
+#   [ref.<部品番号>] / [[model]]  材質の上書き（ビューアと krbr material set が書く）
+#   [remembered]                  ビューアで最後に使った設定（ビューアが書く。消すと上の設定の値に戻る）
+"#;
+
+pub const BOARD_TOML: &str = r#"
+# ---------------------------------------------------------------- 基板の設定
 
 [board]
 finish = "auto"              # auto（stackup の copper_finish に従う）/ ENIG / HASL / OSP
@@ -42,10 +51,11 @@ use_for_text = true
 # path = "C:/Program Files/KiCad/10.0/bin/kicad-cli.exe"
 "#;
 
-pub const ENVIRONMENT_TOML: &str = r#"# krbr: 照明・カメラ・レンダリングの設定（コマンドラインの指定が優先されます）
+pub const ENVIRONMENT_TOML: &str = r#"
+# ---------------------------------------------------------------- 照明・カメラ・レンダリングの設定
 
 [environment]
-# hdr = "../hdr/studio.exr"   # このファイルからの相対パスも可。builtin:studio で内蔵のスタジオ
+# hdr = "../hdr/studio.exr"   # 基板のフォルダからの相対パスも可。builtin:studio で内蔵のスタジオ
 #                             # 省略時は、この基板で最後に使ったもの、無ければ内蔵のスタジオ
 intensity = 1.0
 rotation_deg = 0.0
@@ -62,6 +72,9 @@ height = 1080
 spp = 64                     # 1 画素あたりのサンプル数（作業中の PC 向けに控えめ）
 max_depth = 8
 exposure_ev = 0.7
+glow = 1.0                   # 明るい光（点灯した LED など）が周りへにじむ強さ。0 でなし
+glow_threshold = 4.0         # これより明るい光だけがにじむ（露出後の RGB の最大。1 が画面の白。白い基板が光るなら上げる）
+glow_spread = 0.7            # にじみの広がり（0..1。小さいと光の近くに締まる）
 radiance_clamp = 10.0        # 間接光の放射輝度の上限（ホタル対策）。0 で無効（偏りのない結果）
 spectral = false             # true で分光レンダリング（代表波長方式。分散による色の分かれを再現する）
 integrator = "pt"            # pt（パストレーサー）/ bdpt（双方向）/ vcm（透明な物体越しの集光模様も扱う）

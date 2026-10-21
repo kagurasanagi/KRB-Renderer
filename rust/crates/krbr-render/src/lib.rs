@@ -3,6 +3,7 @@
 
 pub mod denoiser;
 pub mod env_map;
+pub mod glow;
 pub mod gpu_scene;
 pub mod gpu_types;
 pub mod image_io;

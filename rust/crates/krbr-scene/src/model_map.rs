@@ -1,6 +1,6 @@
 //! 部品の 3D モデルへの材質の割り当て。
 //!   全体設定  model_map.toml：3D モデルごとの設定（他のプロジェクトと共有）と、色・名前の規則
-//!   プロジェクト overrides.toml：部品番号ごと・3D モデルごとの上書き
+//!   プロジェクト（基板の設定ファイル <名前>.krbr の [ref.*] / [[model]]）：部品番号ごと・3D モデルごとの上書き
 //! 解決順序（優先度の高い順）：
 //!   1. 部品番号ごとの上書き（プロジェクト）  2. 3D モデルごとの上書き（プロジェクト）
 //!   3. 3D モデルごとの設定（全体）           4. 色・名前の規則（全体 → 組み込み）  5. 既定値
@@ -386,7 +386,7 @@ impl GlobalModelMap {
     }
 }
 
-/// プロジェクト overrides.toml
+/// プロジェクトの上書き（基板の設定ファイル <名前>.krbr の [ref.<部品番号>] と [[model]]）
 #[derive(Debug, Clone, Default)]
 pub struct ProjectOverrides {
     pub refs: BTreeMap<String, PartAssignment>,
@@ -420,13 +420,8 @@ impl ProjectOverrides {
         if !self.models.is_empty() {
             root.insert("model".into(), write_models(&self.models));
         }
-        write_file(
-            p,
-            "# krbr: このプロジェクトの材質の上書き（全体設定より優先）\n\
-             # [ref.<部品番号>] 部品ごと / [[model]] 3D モデルごと（path か hash で照合）\n\
-             #   material: 全部位, parts: 部位ごと（キーは XDE の名前 / \"kicad:<色名>\" / \"#rrggbb\" / \"*\"）",
-            &root,
-        )
+        // 基板の設定ファイル <名前>.krbr の [ref.*] / [[model]] だけを差し替える（ほかの表とコメントは残す）
+        crate::board_file::edit_toml(p, &crate::board_file::template(), |doc| crate::board_file::replace_tables(doc, &root, &["ref", "model"]))
     }
     pub fn upsert(&mut self, path: &str, hash: &str) -> &mut ModelEntry {
         upsert_model(&mut self.models, path, hash)

@@ -1,6 +1,6 @@
 //! 設定・キャッシュの場所（C++ 版と同じ：`%APPDATA%\krbr`、`%LOCALAPPDATA%\krbr\cache`。環境変数で差し替え可）
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn home_based(xdg: &str, fallback: &str) -> PathBuf {
     if let Ok(v) = std::env::var(xdg) {
@@ -130,6 +130,24 @@ pub fn process_priority_is_low() -> bool {
     }
     #[cfg(not(windows))]
     false
+}
+
+/// ファイルをエクスプローラーで選んだ状態で表示する（無ければ、そのフォルダを開く）
+pub fn reveal_in_file_manager(path: &Path) {
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let r = if cfg!(windows) {
+        if path.is_file() {
+            std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn()
+        } else {
+            std::process::Command::new("explorer").arg(path.parent().unwrap_or(&path)).spawn()
+        }
+    } else {
+        let dir = if path.is_dir() { path.as_path() } else { path.parent().unwrap_or(&path) };
+        std::process::Command::new(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }).arg(dir).spawn()
+    };
+    if let Err(e) = r {
+        crate::warn!("cannot open {}: {}", path.display(), e);
+    }
 }
 
 #[cfg(test)]

@@ -843,7 +843,8 @@ pub fn load_material_setup(pcb: &std::path::Path) -> MaterialSetup {
     } else {
         Default::default()
     };
-    let project_file = crate::config::project_config_dir(pcb).join("overrides.toml");
+    // 材質の上書き（[ref.*] / [[model]]）は基板の設定ファイル <名前>.krbr の中
+    let project_file = crate::board_file::resolve(pcb);
     let project = if project_file.exists() {
         match crate::model_map::ProjectOverrides::load(&project_file) {
             Ok(p) => {

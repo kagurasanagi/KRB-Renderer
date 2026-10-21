@@ -1,0 +1,78 @@
+#version 460
+// グロー（光のにじみ）のピラミッドの 1 段。rust/crates/krbr-render/src/glow.rs（画像の保存）と同じ式にそろえること
+//   mode 0: 累積画像（A が割る数）から、露出をかけてしきい値を超えた分を取り出しながら半分に縮める
+//   mode 1: 1 段下へ縮める（4×4、(1,3,3,1)/8 の重み）
+//   mode 2: 小さい段（src）を広げ、広がりの重み（spread）をかけて、同じ大きさの段（addImg）に足す
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D src;
+layout(set = 0, binding = 1, rgba32f) uniform writeonly image2D dst;
+layout(set = 0, binding = 2, rgba32f) uniform readonly image2D addImg;
+
+layout(push_constant) uniform Push {
+    uint mode;
+    uint srcW;
+    uint srcH;
+    uint dstW;
+    uint dstH;
+    float exposureScale;
+    float threshold;
+    float knee;
+    float spread;
+    float pad0;
+    float pad1;
+    float pad2;
+    vec4 xyzToRgb0;  // 累積が XYZ（分光モード）のとき、リニア sRGB への変換の列。w = 1 なら変換する
+    vec4 xyzToRgb1;
+    vec4 xyzToRgb2;
+} pc;
+
+vec3 toRgb(vec3 c) {
+    if (pc.xyzToRgb0.w < 0.5) return c;
+    return mat3(pc.xyzToRgb0.xyz, pc.xyzToRgb1.xyz, pc.xyzToRgb2.xyz) * c;
+}
+
+// しきい値を超えた分（なめらかなひざ付き）。色合いは保つ
+vec3 prefilter(vec3 c) {
+    float l = max(c.r, max(c.g, c.b));
+    float soft = clamp(l - pc.threshold + pc.knee, 0.0, 2.0 * pc.knee);
+    soft = soft * soft / max(4.0 * pc.knee, 1e-6);
+    return c * (max(soft, l - pc.threshold) / max(l, 1e-4));
+}
+
+vec3 fetchSrc(ivec2 q) {
+    q = clamp(q, ivec2(0), ivec2(int(pc.srcW) - 1, int(pc.srcH) - 1));
+    vec4 a = imageLoad(src, q);
+    if (pc.mode == 0u) {
+        vec3 l = a.a > 0.0 ? max(toRgb(a.rgb / a.a), vec3(0.0)) * pc.exposureScale : vec3(0.0);
+        return prefilter(l);
+    }
+    return a.rgb;
+}
+
+// 双線形（座標は画素の中心が整数）
+vec3 bilinearSrc(vec2 f) {
+    vec2 f0 = floor(f);
+    vec2 t = f - f0;
+    ivec2 q = ivec2(f0);
+    vec3 a = fetchSrc(q), b = fetchSrc(q + ivec2(1, 0)), c = fetchSrc(q + ivec2(0, 1)), d = fetchSrc(q + ivec2(1, 1));
+    return mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
+}
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= pc.dstW || p.y >= pc.dstH) return;
+    ivec2 ip = ivec2(p);
+    vec3 s = vec3(0.0);
+    if (pc.mode == 2u) {
+        s = imageLoad(addImg, ip).rgb + bilinearSrc((vec2(p) + 0.5) * 0.5 - 0.5) * pc.spread;
+    } else {
+        const float w[4] = float[4](0.125, 0.375, 0.375, 0.125);
+        for (int j = 0; j < 4; j++) {
+            for (int i = 0; i < 4; i++) {
+                s += fetchSrc(2 * ip - 1 + ivec2(i, j)) * (w[i] * w[j]);
+            }
+        }
+    }
+    imageStore(dst, ip, vec4(s, 1.0));
+}

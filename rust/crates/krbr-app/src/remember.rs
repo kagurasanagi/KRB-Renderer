@@ -1,10 +1,14 @@
-//! 基板ごとに最後に使った環境マップとパネルの設定、最近使った環境マップの一覧を覚えておく（`%APPDATA%\krbr\state.toml`）。
-//! プロジェクトのファイル（`<名前>.krbr\environment.toml` / `board.toml`）は書き換えない。
+//! 覚えておくもの：
+//!   基板ごと   最後に使った環境マップとパネルの設定（基板の設定ファイル `<名前>.krbr` の [remembered]。krbr_scene::board_file）
+//!   基板によらない  最近使った環境マップの一覧、ウィンドウの状態（`%APPDATA%\krbr\state.toml`）
+//! `<名前>.krbr` の [remembered] 以外の表（手で書く設定）は書き換えない。
 //! どの項目も、覚えたときの設定ファイルの値を一緒に残し、後で設定ファイルの方が書き換えられたら、そちらを優先する。
+//! 以前は基板ごとのものも state.toml の [boards."<パス>"] に置いていた。見つけたら `<名前>.krbr` へ移す。
 
 use std::path::{Path, PathBuf};
 
-use krbr_core::warn;
+use krbr_core::{info, warn};
+use krbr_scene::board_file;
 use krbr_scene::config::{apply_mask_color_spec, ProjectConfig};
 use krbr_scene::{LensModel, LensParams};
 use toml::{Table, Value};
@@ -15,23 +19,12 @@ const MAX_RECENT: usize = 12;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Remembered {
     pub hdr: String,
-    /// 覚えたときの environment.toml の hdr。後で設定ファイルの方が書き換えられたら、そちらを優先する
+    /// 覚えたときの設定ファイルの [environment] hdr。後で設定ファイルの方が書き換えられたら、そちらを優先する
     pub config_hdr: String,
 }
 
 fn state_file() -> PathBuf {
     krbr_core::platform::config_dir().join("state.toml")
-}
-
-/// 表を引く鍵：絶対パス、区切りは /、Windows では大文字・小文字を区別しない
-fn board_key(pcb: &Path) -> String {
-    let abs = std::path::absolute(pcb).unwrap_or_else(|_| pcb.to_path_buf());
-    let s = abs.to_string_lossy().replace('\\', "/");
-    if cfg!(windows) {
-        s.to_lowercase()
-    } else {
-        s
-    }
 }
 
 /// 環境マップの指定を、作業フォルダによらない形にする（内蔵の名前はそのまま）
@@ -64,36 +57,61 @@ fn save(file: &Path, t: &Table) {
     }
 }
 
-fn remembered_in(t: &Table, pcb: &Path) -> Option<Remembered> {
-    let b = t.get("boards")?.as_table()?.get(&board_key(pcb))?.as_table()?;
+/// この基板について覚えたもの（<名前>.krbr の [remembered]）。以前の形（state.toml の [boards."<パス>"]）にあれば移す
+fn board_remembered(pcb: &Path) -> Table {
+    let (_, t) = board_file::read(pcb);
+    if let Some(r) = t.as_ref().and_then(|t| t.get("remembered")).and_then(|v| v.as_table()) {
+        return r.clone();
+    }
+    let file = state_file();
+    let mut st = load(&file);
+    let old = st.get_mut("boards").and_then(|b| b.as_table_mut()).and_then(|b| b.remove(&board_file::board_key(pcb)));
+    if let Some(Value::Table(b)) = old {
+        // 書けたときだけ state.toml から消す
+        if let Some(to) = write_board_remembered(pcb, &b) {
+            if st.get("boards").and_then(|v| v.as_table()).is_some_and(|t| t.is_empty()) {
+                st.remove("boards");
+            }
+            save(&file, &st);
+            info!("remembered settings: moved from {} to {}", file.display(), to.display());
+        }
+        return b;
+    }
+    Table::new()
+}
+
+/// この基板について覚えたものを <名前>.krbr の [remembered] に書く（空なら [remembered] を消す）。書いたファイル
+fn write_board_remembered(pcb: &Path, b: &Table) -> Option<PathBuf> {
+    let mut src = Table::new();
+    if !b.is_empty() {
+        src.insert("remembered".into(), Value::Table(b.clone()));
+    }
+    match board_file::edit(pcb, |doc| board_file::replace_tables(doc, &src, &["remembered"])) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            warn!("remembered settings: {}", e);
+            None
+        }
+    }
+}
+
+fn remembered_in(b: &Table) -> Option<Remembered> {
     let hdr = b.get("hdr")?.as_str()?.to_string();
     let config_hdr = b.get("config_hdr").and_then(|v| v.as_str()).unwrap_or("").to_string();
     Some(Remembered { hdr, config_hdr })
 }
 
-fn remember_in(t: &mut Table, pcb: &Path, hdr: &str, config_hdr: &str) {
-    let b = board_table(t, pcb);
+fn remember_in(b: &mut Table, hdr: &str, config_hdr: &str) {
     b.insert("hdr".into(), Value::String(hdr.to_string()));
     b.insert("config_hdr".into(), Value::String(config_hdr.to_string()));
+}
 
+fn add_recent(t: &mut Table, hdr: &str) {
     let mut recent = recent_in(t);
     recent.retain(|r| r != hdr);
     recent.insert(0, hdr.to_string());
     recent.truncate(MAX_RECENT);
     t.insert("recent_hdr".into(), Value::Array(recent.into_iter().map(Value::String).collect()));
-}
-
-/// この基板の表（無ければ作る）。環境マップとパネルの設定は同じ表に入れる
-fn board_table<'a>(t: &'a mut Table, pcb: &Path) -> &'a mut Table {
-    let boards = t.entry("boards").or_insert_with(|| Value::Table(Table::new()));
-    if !boards.is_table() {
-        *boards = Value::Table(Table::new());
-    }
-    let b = boards.as_table_mut().unwrap().entry(board_key(pcb)).or_insert_with(|| Value::Table(Table::new()));
-    if !b.is_table() {
-        *b = Value::Table(Table::new());
-    }
-    b.as_table_mut().unwrap()
 }
 
 fn recent_in(t: &Table) -> Vec<String> {
@@ -102,14 +120,17 @@ fn recent_in(t: &Table) -> Vec<String> {
 
 /// この基板で最後に使った環境マップ
 pub fn remembered_hdr(pcb: &Path) -> Option<Remembered> {
-    remembered_in(&load(&state_file()), pcb)
+    remembered_in(&board_remembered(pcb))
 }
 
 /// この基板で使った環境マップを覚える（最近使った一覧の先頭にも入れる）
 pub fn remember_hdr(pcb: &Path, hdr: &str, config_hdr: &str) {
+    let mut b = board_remembered(pcb);
+    remember_in(&mut b, hdr, config_hdr);
+    write_board_remembered(pcb, &b);
     let file = state_file();
     let mut t = load(&file);
-    remember_in(&mut t, pcb, hdr, config_hdr);
+    add_recent(&mut t, hdr);
     save(&file, &t);
 }
 
@@ -132,6 +153,9 @@ pub struct ViewSettings<'a> {
     pub env_intensity: f32,
     pub env_rotation_deg: f32,
     pub exposure_ev: f32,
+    pub glow: f32,
+    pub glow_threshold: f32,
+    pub glow_spread: f32,
     pub integrator: &'a str,
     pub spectral: bool,
     pub bump_intensity: f32,
@@ -152,6 +176,9 @@ impl<'a> ViewSettings<'a> {
             env_intensity: cfg.env_intensity,
             env_rotation_deg: cfg.env_rotation_deg,
             exposure_ev: cfg.exposure_ev,
+            glow: cfg.glow,
+            glow_threshold: cfg.glow_threshold,
+            glow_spread: cfg.glow_spread,
             integrator: &cfg.integrator,
             spectral: cfg.spectral,
             bump_intensity: cfg.scene.bump_intensity,
@@ -172,6 +199,9 @@ impl<'a> ViewSettings<'a> {
         f("env_intensity", self.env_intensity as f64);
         f("env_rotation_deg", self.env_rotation_deg as f64);
         f("exposure_ev", self.exposure_ev as f64);
+        f("glow", self.glow as f64);
+        f("glow_threshold", self.glow_threshold as f64);
+        f("glow_spread", self.glow_spread as f64);
         f("bump_intensity", self.bump_intensity as f64);
         f("fov_deg", self.fov_deg);
         f("elevation_deg", self.elevation_deg);
@@ -232,6 +262,9 @@ pub fn apply_view_values(cfg: &mut ProjectConfig, v: &ViewValues) {
     set(&mut cfg.env_intensity, "env_intensity");
     set(&mut cfg.env_rotation_deg, "env_rotation_deg");
     set(&mut cfg.exposure_ev, "exposure_ev");
+    set(&mut cfg.glow, "glow");
+    set(&mut cfg.glow_threshold, "glow_threshold");
+    set(&mut cfg.glow_spread, "glow_spread");
     set(&mut cfg.scene.bump_intensity, "bump_intensity");
     if let Some(x) = f("fov_deg") {
         cfg.fov_deg = x;
@@ -303,10 +336,7 @@ pub fn set_camera(v: &mut ViewValues, target: glam::Vec3, distance: f32) {
 }
 
 /// 覚えたパネルの設定のうち、覚えたときから設定ファイルの値が変わっていない項目（ビューアだけの項目は常に）
-fn usable_view_values(t: &Table, pcb: &Path, config_now: &ViewValues) -> ViewValues {
-    let Some(b) = t.get("boards").and_then(|b| b.as_table()).and_then(|b| b.get(&board_key(pcb))).and_then(|b| b.as_table()) else {
-        return ViewValues::new();
-    };
+fn usable_view_values(b: &Table, config_now: &ViewValues) -> ViewValues {
     let Some(values) = b.get("view").and_then(|v| v.as_table()) else {
         return ViewValues::new();
     };
@@ -314,37 +344,28 @@ fn usable_view_values(t: &Table, pcb: &Path, config_now: &ViewValues) -> ViewVal
     values.iter().filter(|(k, _)| config_then.and_then(|c| c.get(*k)) == config_now.get(*k)).map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
-fn remember_view_in(t: &mut Table, pcb: &Path, values: &ViewValues, config: &ViewValues) {
-    let b = board_table(t, pcb);
+fn remember_view_in(b: &mut Table, values: &ViewValues, config: &ViewValues) {
     b.insert("view".into(), Value::Table(values.clone()));
     b.insert("view_config".into(), Value::Table(config.clone()));
 }
 
-fn forget_in(t: &mut Table, pcb: &Path) {
-    if let Some(b) = t.get_mut("boards").and_then(|b| b.as_table_mut()) {
-        b.remove(&board_key(pcb));
-    }
-}
-
 /// この基板で覚えているパネルの設定（設定ファイルが変わった項目は除く）。config_now は今の設定ファイルの値
 pub fn remembered_view(pcb: &Path, config_now: &ViewValues) -> ViewValues {
-    usable_view_values(&load(&state_file()), pcb, config_now)
+    usable_view_values(&board_remembered(pcb), config_now)
 }
 
 /// この基板のパネルの設定を覚える。config は今の設定ファイルの値（ViewSettings::of(設定ファイルだけの設定).values()）
 pub fn remember_view(pcb: &Path, values: &ViewValues, config: &ViewValues) {
-    let file = state_file();
-    let mut t = load(&file);
-    remember_view_in(&mut t, pcb, values, config);
-    save(&file, &t);
+    let mut b = board_remembered(pcb);
+    remember_view_in(&mut b, values, config);
+    write_board_remembered(pcb, &b);
 }
 
 /// この基板について覚えたもの（環境マップとパネルの設定）をすべて忘れる。最近使った環境マップの一覧は残す
 pub fn forget_board(pcb: &Path) {
-    let file = state_file();
-    let mut t = load(&file);
-    forget_in(&mut t, pcb);
-    save(&file, &t);
+    if !board_remembered(pcb).is_empty() {
+        write_board_remembered(pcb, &Table::new());
+    }
 }
 
 // ---------------------------------------------------------------- ウィンドウ（基板によらず 1 つ）
@@ -418,18 +439,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remembers_per_board_and_recent() {
-        let mut t = Table::new();
-        let (a, b) = (Path::new("/x/a.kicad_pcb"), Path::new("/x/b.kicad_pcb"));
-        remember_in(&mut t, a, "/hdr/one.exr", "");
-        remember_in(&mut t, b, "/hdr/two.exr", "/cfg.exr");
-        remember_in(&mut t, a, "/hdr/two.exr", "");
+    fn remembers_hdr_and_recent() {
+        let (mut a, mut b) = (Table::new(), Table::new());
+        let mut st = Table::new();
+        remember_in(&mut a, "/hdr/one.exr", "");
+        add_recent(&mut st, "/hdr/one.exr");
+        remember_in(&mut b, "/hdr/two.exr", "/cfg.exr");
+        add_recent(&mut st, "/hdr/two.exr");
+        remember_in(&mut a, "/hdr/two.exr", "");
+        add_recent(&mut st, "/hdr/two.exr");
         // 文字列にして読み直しても同じ
-        let t: Table = t.to_string().parse().unwrap();
-        assert_eq!(remembered_in(&t, a), Some(Remembered { hdr: "/hdr/two.exr".into(), config_hdr: String::new() }));
-        assert_eq!(remembered_in(&t, b).unwrap().config_hdr, "/cfg.exr");
-        assert_eq!(remembered_in(&t, Path::new("/x/c.kicad_pcb")), None);
-        assert_eq!(recent_in(&t), vec!["/hdr/two.exr".to_string(), "/hdr/one.exr".to_string()]);
+        let (a, st): (Table, Table) = (a.to_string().parse().unwrap(), st.to_string().parse().unwrap());
+        assert_eq!(remembered_in(&a), Some(Remembered { hdr: "/hdr/two.exr".into(), config_hdr: String::new() }));
+        assert_eq!(remembered_in(&b).unwrap().config_hdr, "/cfg.exr");
+        assert_eq!(remembered_in(&Table::new()), None);
+        assert_eq!(recent_in(&st), vec!["/hdr/two.exr".to_string(), "/hdr/one.exr".to_string()]);
     }
 
     #[test]
@@ -449,16 +473,14 @@ mod tests {
         let mut values = ViewSettings::of(&panel).values();
         values.insert("max_spp".into(), Value::Integer(1024));
 
-        let (pcb, other) = (Path::new("/x/a.kicad_pcb"), Path::new("/x/b.kicad_pcb"));
-        let mut t = Table::new();
-        remember_in(&mut t, pcb, "/hdr/one.exr", "");
-        remember_view_in(&mut t, pcb, &values, &config_then);
-        remember_in(&mut t, other, "/hdr/two.exr", "");
-        let mut t: Table = t.to_string().parse().unwrap();
-        assert_eq!(remembered_in(&t, pcb).unwrap().hdr, "/hdr/one.exr"); // 環境マップも残っている
+        let mut b = Table::new();
+        remember_in(&mut b, "/hdr/one.exr", "");
+        remember_view_in(&mut b, &values, &config_then);
+        let b: Table = b.to_string().parse().unwrap();
+        assert_eq!(remembered_in(&b).unwrap().hdr, "/hdr/one.exr"); // 環境マップも残っている
 
         // 設定ファイルが同じなら全部使う
-        let got = usable_view_values(&t, pcb, &config_then);
+        let got = usable_view_values(&b, &config_then);
         assert_eq!(got, values);
         apply_view_values(&mut cfg, &got);
         assert_eq!((cfg.exposure_ev, cfg.integrator.as_str(), cfg.spectral, cfg.lens.model, cfg.lens.blades), (1.5, "vcm", true, LensModel::Thin, 6));
@@ -469,7 +491,7 @@ mod tests {
         // 設定ファイルの露出が書き換えられたら、露出だけ設定ファイルを使う（ほかの項目とビューアだけの項目は覚えたもの）
         let mut edited = ProjectConfig::default();
         edited.exposure_ev = -1.0;
-        let got = usable_view_values(&t, pcb, &ViewSettings::of(&edited).values());
+        let got = usable_view_values(&b, &ViewSettings::of(&edited).values());
         assert!(!got.contains_key("exposure_ev"));
         assert_eq!(got.get("integrator").and_then(|v| v.as_str()), Some("vcm"));
         assert_eq!(got.get("max_spp").and_then(|v| v.as_integer()), Some(1024));
@@ -480,12 +502,41 @@ mod tests {
         set_camera(&mut v, glam::Vec3::new(1.0, -2.0, 3.5), 120.0);
         let v: Table = Table::from_iter([("view".to_string(), Value::Table(v))]).to_string().parse::<Table>().unwrap()["view"].as_table().unwrap().clone();
         assert_eq!(camera_of(&v), Some((glam::Vec3::new(1.0, -2.0, 3.5), 120.0)));
+    }
 
-        // 忘れる：環境マップも含めて、この基板の分だけ消える
-        forget_in(&mut t, pcb);
-        assert!(usable_view_values(&t, pcb, &config_then).is_empty());
-        assert_eq!(remembered_in(&t, pcb), None);
-        assert!(remembered_in(&t, other).is_some());
+    /// 基板の設定ファイルの [remembered] に書き、手で書いた表は残す。以前の state.toml の分は移す。忘れると [remembered] だけ消える
+    #[test]
+    fn remembered_settings_live_in_the_board_file() {
+        let ws = std::env::temp_dir().join(format!("krbr_remember_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        std::env::set_var("KRBR_CONFIG_DIR", ws.join("config"));
+        let (a, b) = (ws.join("a.kicad_pcb"), ws.join("b.kicad_pcb"));
+        std::fs::write(ws.join("a.krbr"), "# mine\n[render]\nspp = 16   # keep\n").unwrap();
+        let config = ViewSettings::of(&ProjectConfig::default()).values();
+        let mut values = config.clone();
+        values.insert("exposure_ev".into(), Value::Float(2.0));
+        remember_view(&a, &values, &config);
+        remember_hdr(&a, "/hdr/one.exr", "");
+        let text = std::fs::read_to_string(ws.join("a.krbr")).unwrap();
+        assert!(text.starts_with("# mine\n[render]\nspp = 16   # keep\n") && text.contains("[remembered]"), "{text}");
+        assert_eq!(remembered_view(&a, &config).get("exposure_ev").and_then(|v| v.as_float()), Some(2.0));
+        assert_eq!(remembered_hdr(&a).unwrap().hdr, "/hdr/one.exr");
+        assert_eq!(recent_hdrs(), vec!["/hdr/one.exr".to_string()]);
+        // 以前の形：state.toml の [boards."<パス>"] は、読んだときに b.krbr へ移る
+        let mut st = load(&state_file());
+        let mut old = Table::new();
+        remember_in(&mut old, "/hdr/two.exr", "");
+        st.insert("boards".into(), Value::Table(Table::from_iter([(board_file::board_key(&b), Value::Table(old))])));
+        save(&state_file(), &st);
+        assert_eq!(remembered_hdr(&b).unwrap().hdr, "/hdr/two.exr");
+        assert!(ws.join("b.krbr").is_file());
+        assert!(!load(&state_file()).contains_key("boards"));
+        // 忘れる
+        forget_board(&a);
+        assert!(remembered_hdr(&a).is_none() && remembered_view(&a, &config).is_empty());
+        assert!(std::fs::read_to_string(ws.join("a.krbr")).unwrap().contains("spp = 16   # keep"));
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

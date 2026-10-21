@@ -12,6 +12,7 @@ use glam::Vec3;
 use krbr_core::{error, info, warn, FileWatcher};
 use krbr_kicad::Board;
 use krbr_render::image_io::{self, ImageF};
+use krbr_render::glow::GlowParams;
 use krbr_render::tonemapper::{DisplayMode, Tonemapper};
 use krbr_render::vk::{image_barrier, Buffer};
 use krbr_render::studio_env::STUDIO;
@@ -29,7 +30,8 @@ use winit::window::{Window, WindowId};
 use crate::kicad_cli::{plot_stroke_silk, SilkPlot};
 use crate::material_cmd::{clear_material, set_material, MaterialSetOptions};
 use crate::selection::{Outline, Selected};
-use krbr_scene::material_library::{split_variant, with_smooth};
+use krbr_scene::board_file;
+use krbr_scene::material_library::{parse_variant, split_variant, with_emission, with_smooth, Emission};
 use crate::prepare::{ReloadStats, SceneSource};
 use crate::remember;
 use crate::prepare::{frame_params, framed_camera, initial_camera, prepare_scene, PreparedScene, RenderOptions};
@@ -56,6 +58,8 @@ pub struct ViewOptions {
     pub test_assign: String,
     /// 開発用：テスト中に、パネルでこのレジストの色（プリセット）を選んだことにする
     pub test_mask: String,
+    /// 開発用：テストの終わり近くに「名前を付けて保存」でこのファイル（.png / .exr）を選んだことにする
+    pub test_save_as: Option<PathBuf>,
     /// 開発用：テスト中に、メニューの「設定をすべて既定に戻す」を押したことにする
     pub test_reset_settings: bool,
     /// レンダリングを一時停止した状態で開く（GPU の弱い PC 向け）
@@ -95,6 +99,49 @@ fn fit_rect(vp: Viewport, w: u32, h: u32) -> Viewport {
     Viewport { x: vp.x + (vp.w - dw) / 2, y: vp.y + (vp.h - dh) / 2, w: dw, h: dh }
 }
 
+/// 「名前を付けて保存」の形式
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveFormat {
+    /// 露出・グロー・トーンマッピング済み
+    Png,
+    /// リニアの放射輝度
+    Exr,
+}
+
+impl SaveFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            SaveFormat::Png => "png",
+            SaveFormat::Exr => "exr",
+        }
+    }
+}
+
+/// 発光の色・明るさの編集中の値。止まってから書き込み、組み直しが終わるまでは表示にこの値を使う
+struct EmitEdit {
+    reference: String,
+    part: String,
+    /// 書き込む材質名（"<材質>+emit=..."）
+    material: String,
+    changed_at: Instant,
+    written: bool,
+}
+
+/// 発光を付けたときの明るさの既定値（cd/m²。露出 0.7 EV で画面の白の約 8 倍になり、グローの既定のしきい値 4 を超えてにじむ）
+const DEFAULT_EMISSION_LUMINANCE: f32 = 5000.0;
+/// 発光の色・明るさを最後に変えてから書き込むまでの時間
+const EMIT_EDIT_DELAY: Duration = Duration::from_millis(400);
+
+/// 発光を付けたときの色の既定値：部位の色（部位のキーの "#rrggbb"）を、色合いを保って最も明るくしたもの。色が無ければ白
+fn emission_color_of_part(part_keys: &str) -> [u8; 3] {
+    let Some(c) = part_keys.split(' ').find_map(|k| Emission::parse(&format!("{k},0"))) else { return [255; 3] };
+    let max = *c.srgb.iter().max().unwrap();
+    if max == 0 {
+        return [255; 3];
+    }
+    c.srgb.map(|v| (v as u32 * 255 / max as u32) as u8)
+}
+
 /// 基板の読み直し（裏のスレッド）の結果
 struct ReloadDone {
     source: SceneSource,
@@ -118,6 +165,10 @@ struct ViewState {
     azimuth: f64,
     fov: f64,
     exposure: f32,
+    /// グロー（明るい光のにじみ）：強さ（0 でなし）、しきい値、広がり。表示だけに効く（累積はやり直さない）
+    glow: f32,
+    glow_threshold: f32,
+    glow_spread: f32,
     env_rotation_deg: f32,
     env_intensity: f32,
     bump_intensity: f32,
@@ -133,6 +184,11 @@ struct ViewState {
     mask_choice: Option<usize>,
     mask_changed: bool,
     save_requested: bool,
+    /// メニュー「PNG / EXR として保存...」：保存のダイアログを開く
+    save_as_requested: Option<SaveFormat>,
+    /// メニュー：基板の設定ファイルの置き場所を変える・ファイルを表示する
+    settings_location_requested: Option<board_file::Location>,
+    reveal_settings_requested: bool,
     reset_requested: bool,
     auto_exposure_requested: bool,
     /// メニュー：パネルの設定をすべて既定（設定ファイルとコマンドライン）に戻し、覚えたものを忘れる
@@ -171,6 +227,12 @@ struct ViewState {
     /// 決まったサイズに合わせてウィンドウの大きさを変える
     fit_window_requested: bool,
     tan_half_fov_y: f32,
+}
+
+impl ViewState {
+    fn glow_params(&self) -> GlowParams {
+        GlowParams { strength: self.glow, threshold: self.glow_threshold, spread: self.glow_spread }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,6 +376,9 @@ struct App {
     env_list: Vec<Vec<String>>,
     /// 「開く...」のダイアログ（別スレッド）の結果
     open_dialog: Option<mpsc::Receiver<Option<PathBuf>>>,
+    /// 「名前を付けて保存」のダイアログ（別スレッド）の結果と、選ばれた保存先（次のフレームで書く）
+    save_dialog: Option<(SaveFormat, mpsc::Receiver<Option<PathBuf>>)>,
+    save_as_target: Option<(SaveFormat, PathBuf)>,
     env_job: Option<(String, mpsc::Receiver<EnvData>)>,
     env_error: String,
     /// 保存の監視（--no-watch なら None）
@@ -338,6 +403,8 @@ struct App {
     assign_scope: usize,
     material_names: Vec<String>,
     material_error: String,
+    /// 発光の色・明るさの編集中の値（ドラッグ中に毎回書き込まないよう、止まってから書く）
+    emit_edit: Option<EmitEdit>,
     test_pick_done: bool,
     /// ノイズ除去：作ってみたか（失敗したら作り直さない）、累積をやり直した回数、どの累積をいくつのサンプルで除去したか
     denoiser_tried: bool,
@@ -483,6 +550,9 @@ impl App {
         c.env_intensity = st.env_intensity;
         c.env_rotation_deg = st.env_rotation_deg;
         c.exposure_ev = st.exposure;
+        c.glow = st.glow;
+        c.glow_threshold = st.glow_threshold;
+        c.glow_spread = st.glow_spread;
         c.spectral = st.spectral;
         c.bump_intensity = st.bump_intensity;
         c.fov_deg = st.fov;
@@ -600,6 +670,9 @@ impl App {
         let c = self.prep.configured.clone();
         let st = &mut self.st;
         st.exposure = c.exposure_ev;
+        st.glow = c.glow;
+        st.glow_threshold = c.glow_threshold;
+        st.glow_spread = c.glow_spread;
         st.env_intensity = c.env_intensity;
         st.env_rotation_deg = c.env_rotation_deg;
         st.bump_intensity = c.scene.bump_intensity;
@@ -621,7 +694,7 @@ impl App {
             st.integrator_changed = true;
         }
         self.prep.cfg.lens = c.lens.clone();
-        // 環境マップ：--hdr、environment.toml、内蔵のスタジオ（読み込みが終わると、それを覚え直す）
+        // 環境マップ：--hdr、設定ファイルの [environment] hdr、内蔵のスタジオ（読み込みが終わると、それを覚え直す）
         let hdr = if !self.vo.common.hdr.is_empty() {
             remember::normalize_hdr(&self.vo.common.hdr)
         } else if !self.prep.config_hdr.is_empty() {
@@ -806,6 +879,14 @@ impl App {
                 st.exposure = 0.0;
             }
         });
+        ui.add(egui::Slider::new(&mut st.glow, 0.0..=4.0).text("グロー"))
+            .on_hover_text("点灯した LED など、とても明るい光が周りへにじむ強さ（0 でなし）。保存する画像にも入る");
+        if st.glow > 0.0 {
+            ui.add(egui::Slider::new(&mut st.glow_threshold, 0.5..=20.0).logarithmic(true).text("しきい値"))
+                .on_hover_text("これより明るい光だけがにじむ（露出をかけた後の RGB の最大。1 が画面の白）。白い基板や部品までにじむときは上げる");
+            ui.add(egui::Slider::new(&mut st.glow_spread, 0.0..=1.0).text("広がり"))
+                .on_hover_text("にじみの広がり。小さいと光のすぐ近くに締まり、1 で画面の大きさ近くまで薄く広がる");
+        }
         {
             let on_cpu = self.gpu.as_ref().and_then(|g| g.denoiser.as_ref()).is_some_and(|d| d.device_name() == "CPU");
             ui.horizontal(|ui| {
@@ -1000,7 +1081,7 @@ impl App {
                 source.tiles.invalidate_all(); // シルクが変わったので、どのタイルも作り直す
             }
             if materials {
-                source.materials = load_material_setup(&old.file); // 材質の割り当て（overrides.toml / model_map.toml）を書き換えた
+                source.materials = load_material_setup(&old.file); // 材質の割り当て（<名前>.krbr / model_map.toml）を書き換えた
             }
             let result = if saved { source.reload(&old, &options).map(|(b, s, st)| (Some(b), s, st)) } else { Ok((None, source.build(&old, &options, true), ReloadStats::default())) };
             let _ = tx.send(ReloadDone { source, saved, result, saved_at, silk, materials });
@@ -1031,6 +1112,8 @@ impl App {
 
     /// 画面の点（物理ピクセル）の部品を選ぶ。基板や何も無い所なら選択を外す
     fn pick_part(&mut self, p: (f64, f64)) {
+        self.flush_emit_edit(true);
+        self.emit_edit = None;
         let vp = self.st.display;
         let (ww, wh) = (vp.w as f64, vp.h as f64);
         let (px, py) = (p.0 - vp.x as f64, p.1 - vp.y as f64);
@@ -1103,6 +1186,29 @@ impl App {
         }
     }
 
+    /// 発光の色・明るさの編集が止まっていれば（now なら待たずに）書き込む。
+    /// 書き込んだ後は、組み直しが終わるまで表示に編集中の値を使い、終わったら捨てる
+    fn flush_emit_edit(&mut self, now: bool) {
+        let Some(e) = &self.emit_edit else { return };
+        if e.written {
+            if self.reload_job.is_none() && !self.materials_dirty_files {
+                self.emit_edit = None;
+            }
+            return;
+        }
+        if !now && e.changed_at.elapsed() < EMIT_EDIT_DELAY {
+            return;
+        }
+        let (part, material) = (e.part.clone(), e.material.clone());
+        if self.selected.as_ref().is_some_and(|s| s.reference == e.reference) {
+            self.assign_material(&part, &material, false);
+        }
+        match &mut self.emit_edit {
+            Some(e) if self.material_error.is_empty() => e.written = true,
+            _ => self.emit_edit = None,
+        }
+    }
+
     /// 選んだ部品の欄：部位ごとの材質と、決まった段階。材質を選ぶと設定ファイルに書いて描き直す
     fn selection_panel(&mut self, ui: &mut egui::Ui) {
         ui.strong("選んだ部品");
@@ -1110,14 +1216,18 @@ impl App {
             ui.weak("部品をクリックすると、材質を変えられる");
             return;
         };
-        let fp = self.prep.board.footprints.iter().find(|f| f.reference == sel.reference);
+        let mut deselect = false;
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(&sel.reference).strong().color(egui::Color32::from_rgb(255, 170, 40)));
-            if ui.small_button("選択を外す").clicked() {
-                self.selected = None;
-                self.outline = None;
-            }
+            deselect = ui.small_button("選択を外す").clicked();
         });
+        if deselect {
+            self.flush_emit_edit(true);
+            self.emit_edit = None;
+            self.selected = None;
+            self.outline = None;
+        }
+        let fp = self.prep.board.footprints.iter().find(|f| f.reference == sel.reference);
         // 長い名前はパネルの幅で切り詰める（カーソルを乗せると全体が出る）
         let lib_id = fp.map(|f| f.lib_id.clone()).unwrap_or_default();
         ui.add(egui::Label::new(egui::RichText::new(&lib_id).weak()).truncate()).on_hover_text(&lib_id);
@@ -1137,7 +1247,7 @@ impl App {
                 for m in missing {
                     ui.weak(format!("{}\n→ {}（{}）", m.spec, m.resolved, m.reason));
                 }
-                ui.weak("見つける場所は board.toml の [paths] model_search_dirs で足せる");
+                ui.weak("見つける場所は、基板の設定ファイル <名前>.krbr の [paths] model_search_dirs で足せる");
             }
             return;
         };
@@ -1157,8 +1267,8 @@ impl App {
             })
             .unwrap_or_default();
         ui.horizontal(|ui| {
-            ui.radio_value(&mut self.assign_scope, 0, "この部品").on_hover_text("この基板のこの部品だけ（<名前>.krbr\\overrides.toml の部品番号）");
-            ui.radio_value(&mut self.assign_scope, 1, "このモデル").on_hover_text("この基板で同じ 3D モデルを使う部品すべて（overrides.toml のモデル）");
+            ui.radio_value(&mut self.assign_scope, 0, "この部品").on_hover_text("この基板のこの部品だけ（基板の設定ファイル <名前>.krbr の [ref.<部品番号>]）");
+            ui.radio_value(&mut self.assign_scope, 1, "このモデル").on_hover_text("この基板で同じ 3D モデルを使う部品すべて（<名前>.krbr の [[model]]）");
             ui.radio_value(&mut self.assign_scope, 2, "全基板").on_hover_text("同じ 3D モデルを使うすべての基板（%APPDATA%\\krbr\\model_map.toml）");
         });
         // 書き込む先より優先される上書きがあると、書いても見た目は変わらない
@@ -1184,22 +1294,50 @@ impl App {
             chosen
         };
         let pattern_tip = "表面の模様（細かな凹凸と粗さのむら）。外すと、なめらかな面になる（材質名に +smooth が付く）";
-        egui::Grid::new("parts").num_columns(3).spacing([8.0, 4.0]).show(ui, |ui| {
+        let emit_tip = "この部位を光らせる（LED の点灯など）。色と明るさは下の行で変える（材質名に +emit=#rrggbb,<cd/m²> が付く）";
+        // 発光の色・明るさを編集中なら、その値を表示に使う（書き込んで組み直しが終わるまで）
+        let pending = self.emit_edit.as_ref().filter(|e| e.reference == sel.reference).map(|e| (e.part.clone(), e.material.clone()));
+        // 色・明るさの変更：(部位, 材質)。止まってから書き込む
+        let mut emit_changes: Vec<(String, String)> = Vec::new();
+        egui::Grid::new("parts").num_columns(4).spacing([8.0, 4.0]).show(ui, |ui| {
             for (i, r) in rows.iter().enumerate() {
                 let key = r.part_keys.split(' ').next().unwrap_or("").to_string();
-                let (base, smooth) = split_variant(&r.material);
+                let material = match &pending {
+                    Some((part, m)) if *part == key => m.clone(),
+                    _ => r.material.clone(),
+                };
+                let (base, smooth, emission) = parse_variant(&material);
                 // 表示では "kicad:" を省く（カーソルを乗せると全体が出る）
                 let shown = if key.is_empty() { "（全体）".to_string() } else { key.strip_prefix("kicad:").unwrap_or(&key).to_string() };
                 ui.label(shown).on_hover_text(format!("{}\n決まった段階: {}", r.part_keys, r.source));
-                // 材質を選び直しても、模様のあり・なしは保つ
+                // 材質を選び直しても、模様のあり・なしと発光は保つ
                 if let Some(m) = combo(ui, format!("part{i}"), base, base) {
-                    actions.push((key.clone(), with_smooth(&m, smooth), false));
+                    actions.push((key.clone(), with_emission(&with_smooth(&m, smooth), emission), false));
                 }
                 let mut pattern = !smooth;
                 if ui.checkbox(&mut pattern, "模様").on_hover_text(pattern_tip).changed() {
-                    actions.push((key.clone(), with_smooth(&r.material, !pattern), false));
+                    actions.push((key.clone(), with_smooth(&material, !pattern), false));
+                }
+                let mut emit = emission.is_some();
+                if ui.checkbox(&mut emit, "発光").on_hover_text(emit_tip).changed() {
+                    let e = emit.then(|| Emission { srgb: emission_color_of_part(&r.part_keys), luminance: DEFAULT_EMISSION_LUMINANCE });
+                    actions.push((key.clone(), with_emission(&material, e), false));
                 }
                 ui.end_row();
+                if let Some(e) = emission {
+                    ui.label("");
+                    let mut srgb = e.srgb;
+                    let mut luminance = e.luminance;
+                    let mut changed = ui.color_edit_button_srgb(&mut srgb).on_hover_text("発光の色").changed();
+                    let speed = (luminance * 0.01).max(1.0);
+                    let drag = egui::DragValue::new(&mut luminance).range(0.0..=1.0e6).speed(speed).max_decimals(0).suffix(" cd/m²");
+                    changed |= ui.add(drag).on_hover_text("発光の明るさ（輝度）。ドラッグか入力で変える。露出をかけて画面の白（1）の何倍になるかが、グローのしきい値を超えるとにじむ（5000 で露出 0.7 EV なら約 8 倍）。上げるほど芯が白っぽくなる").changed();
+                    ui.label("");
+                    ui.end_row();
+                    if changed {
+                        emit_changes.push((key.clone(), with_emission(&material, Some(Emission { srgb, luminance: luminance.round() }))));
+                    }
+                }
             }
             let all_smooth = !rows.is_empty() && rows.iter().all(|r| split_variant(&r.material).1);
             ui.label("全部位");
@@ -1213,8 +1351,16 @@ impl App {
                     actions.push((key, with_smooth(&r.material, !pattern), false));
                 }
             }
+            ui.label("");
             ui.end_row();
         });
+        for (part, material) in emit_changes {
+            // 別の部位の編集が残っていれば先に書く
+            if self.emit_edit.as_ref().is_some_and(|e| e.part != part || e.reference != sel.reference) {
+                self.flush_emit_edit(true);
+            }
+            self.emit_edit = Some(EmitEdit { reference: sel.reference.clone(), part, material, changed_at: Instant::now(), written: false });
+        }
         // 決まった段階（部位ごとに違えば、部位の名前にカーソルを乗せると出る）
         let mut sources: Vec<&str> = rows.iter().map(|r| r.source.as_str()).collect();
         sources.dedup();
@@ -1228,6 +1374,13 @@ impl App {
         }
         if !self.material_error.is_empty() {
             ui.colored_label(egui::Color32::from_rgb(255, 102, 102), &self.material_error);
+        }
+        if !actions.is_empty() {
+            // 同じ部位の編集中の発光の値は、表示に使っていたので actions の材質名に入っている。ほかの部位のものは先に書く
+            if self.emit_edit.as_ref().is_some_and(|e| !actions.iter().any(|(p, _, _)| *p == e.part)) {
+                self.flush_emit_edit(true);
+            }
+            self.emit_edit = None;
         }
         for (part, m, clear) in actions {
             self.assign_material(&part, &m, clear);
@@ -1346,12 +1499,52 @@ impl App {
         self.open_dialog = Some(rx);
     }
 
+    /// 基板の設定ファイルの置き場所を変え、この基板のファイルを今すぐ移す（ほかの基板のものは次に開いたときに移る）
+    fn set_settings_location(&mut self, loc: board_file::Location) {
+        if let Err(e) = board_file::set_location(loc) {
+            warn!("board settings location: {e}");
+            self.last_update = format!("置き場所を変えられなかった：{e}");
+            return;
+        }
+        let file = board_file::resolve(&self.prep.board.file);
+        info!("board settings location: {:?} ({})", loc, file.display());
+        self.last_update = if file.is_file() { format!("基板の設定ファイルの置き場所を変えた：{}", file.display()) } else { format!("基板の設定ファイルの置き場所を変えた（この基板はまだ無い。書くときに {} に作る）", file.display()) };
+    }
+
+    /// 「名前を付けて保存」のダイアログを別スレッドで開く（その間も描画を続ける）。最初は基板のフォルダ
+    fn start_save_dialog(&mut self, format: SaveFormat) {
+        if self.save_dialog.is_some() {
+            return;
+        }
+        let ext = format.extension();
+        let (title, filter) = match format {
+            SaveFormat::Png => ("PNG として保存", "PNG 画像 (*.png)"),
+            SaveFormat::Exr => ("EXR として保存", "OpenEXR（リニア） (*.exr)"),
+        };
+        let mut dlg = rfd::FileDialog::new().set_title(title).add_filter(filter, &[ext]).set_file_name(format!("{}.{ext}", self.stem));
+        if let Some(dir) = self.prep.board.file.parent().filter(|d| d.is_dir()) {
+            dlg = dlg.set_directory(dir);
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            // 拡張子を付けずに名前を入れたときは付ける
+            let _ = tx.send(dlg.save_file().map(|p| if p.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext)) { p } else { p.with_extension(ext) }));
+        });
+        self.save_dialog = Some((format, rx));
+    }
+
     /// ウィンドウ上端のメニュー
     /// メニューの下のボタン列（レンダリングの一時停止）
     fn tool_bar(&mut self, root: &mut egui::Ui) {
+        // 最大 spp に達したら、止めるものが無いので「完了」にして押せなくする（視点などを変えて累積をやり直すと元に戻る）
+        let done = self.gpu.as_ref().is_some_and(|g| g.prog.samples() >= self.st.max_spp);
         let st = &mut self.st;
         egui::Panel::top("toolbar").show(root, |ui| {
             ui.horizontal(|ui| {
+                if done {
+                    ui.add_enabled(false, egui::Button::new("✔ 完了")).on_disabled_hover_text("最大 spp に達したので、描き終えて止まっている。続けて描くなら、設定パネルで最大 spp を上げる");
+                    return;
+                }
                 let label = if st.paused { "▶ 再開" } else { "■ 一時停止" };
                 let tip = "レンダリングを一時停止する（P）。サンプルを積み足さないので GPU の負荷がほぼ無くなり、操作が軽くなる。\nカメラを動かしたときは 1 サンプルだけ描いて止まる";
                 if ui.add(egui::Button::new(label).selected(st.paused)).on_hover_text(tip).clicked() {
@@ -1435,8 +1628,35 @@ impl App {
         egui::Panel::top("menu").show(root, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("ファイル", |ui| {
-                    if ui.add(egui::Button::new("画像を保存").shortcut_text("S")).clicked() {
+                    if ui.add(egui::Button::new("画像を保存").shortcut_text("S")).on_hover_text("決まった場所（out\\）に、番号を付けて PNG と EXR を保存する").clicked() {
                         st.save_requested = true;
+                        ui.close();
+                    }
+                    if ui.button("PNG として保存...").on_hover_text("場所と名前を選んで保存する（露出・グロー・トーンマッピング済み）").clicked() {
+                        st.save_as_requested = Some(SaveFormat::Png);
+                        ui.close();
+                    }
+                    if ui.button("EXR として保存...").on_hover_text("場所と名前を選んで保存する（リニアの放射輝度。露出・グローはかけない）").clicked() {
+                        st.save_as_requested = Some(SaveFormat::Exr);
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.menu_button("基板の設定ファイルの置き場所", |ui| {
+                        let now = board_file::location();
+                        let choices = [
+                            (board_file::Location::NextToBoard, "基板の横（<名前>.krbr）", "KiCad の基板と同じフォルダに置く。基板と一緒に持ち運べる"),
+                            (board_file::Location::ConfigDir, "全体設定のフォルダ（%APPDATA%\\krbr\\boards）", "KiCad のフォルダにファイルを増やさない"),
+                        ];
+                        for (loc, label, tip) in choices {
+                            if ui.add(egui::Button::new(label).selected(now == loc)).on_hover_text(tip).clicked() {
+                                st.settings_location_requested = Some(loc);
+                                ui.close();
+                            }
+                        }
+                        ui.weak("すべての基板に効く。ほかの基板のファイルは、次に開いたときに移す");
+                    });
+                    if ui.button("基板の設定ファイルを表示").on_hover_text("この基板の <名前>.krbr をエクスプローラーで表示する（まだ無ければ、置き場所のフォルダを開く）").clicked() {
+                        st.reveal_settings_requested = true;
                         ui.close();
                     }
                     ui.separator();
@@ -1586,7 +1806,29 @@ impl App {
         }
         self.apply_reload()?;
         self.poll_silk();
+        self.flush_emit_edit(false);
         self.start_reload_if_needed();
+        if let Some(f) = self.st.save_as_requested.take() {
+            self.start_save_dialog(f);
+        }
+        if let Some(loc) = self.st.settings_location_requested.take() {
+            self.set_settings_location(loc);
+        }
+        if std::mem::take(&mut self.st.reveal_settings_requested) {
+            krbr_core::platform::reveal_in_file_manager(&board_file::resolve(&self.prep.board.file));
+        }
+        if let Some((f, rx)) = &self.save_dialog {
+            match rx.try_recv() {
+                Ok(picked) => {
+                    if let Some(p) = picked {
+                        self.save_as_target = Some((*f, p));
+                    }
+                    self.save_dialog = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.save_dialog = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
         if let Some(rx) = &self.open_dialog {
             match rx.try_recv() {
                 Ok(picked) => {
@@ -1689,6 +1931,10 @@ impl App {
             self.st.display = fit_rect(vp, rw, rh);
         }
         self.fit_window();
+        if let Some(p) = self.vo.test_save_as.as_ref().filter(|_| self.vo.test_frames > 0 && self.frames + 2 == self.vo.test_frames) {
+            let format = if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exr")) { SaveFormat::Exr } else { SaveFormat::Png };
+            self.save_as_target = Some((format, p.clone()));
+        }
         if self.vo.test_pick.is_some() && !self.test_pick_done && self.frames >= 5 {
             self.test_pick_done = true;
             let (x, y) = self.vo.test_pick.unwrap();
@@ -1843,10 +2089,10 @@ impl App {
             // 結果を元の画像と強さで混ぜる（軽いので毎フレーム。強さのスライダーがすぐ効く）
             g.denoiser.as_ref().unwrap().record_output(cmd, self.st.denoise_strength);
             let t = g.tone_denoised.as_ref().unwrap();
-            t.record(cmd, self.st.exposure, self.st.mode, g.prog.xyz_output());
+            t.record(cmd, self.st.exposure, self.st.mode, g.prog.xyz_output(), &self.st.glow_params());
             t.output()
         } else {
-            g.tone.record(cmd, self.st.exposure, self.st.mode, g.prog.xyz_output());
+            g.tone.record(cmd, self.st.exposure, self.st.mode, g.prog.xyz_output(), &self.st.glow_params());
             g.tone.output()
         };
         let swap_img = g.swap.images[image_index as usize];
@@ -1938,7 +2184,7 @@ impl App {
             let exr = self.out_dir.join(format!("{}_{:03}.exr", self.stem, self.save_index));
             self.save_index += 1;
             let _ = std::fs::create_dir_all(&self.out_dir);
-            match image_io::save_png_tonemapped(&png, &aov.color, self.st.exposure).and_then(|_| image_io::save_exr(&exr, &aov.color)) {
+            match image_io::save_png_tonemapped(&png, &aov.color, self.st.exposure, &self.st.glow_params()).and_then(|_| image_io::save_exr(&exr, &aov.color)) {
                 Ok(()) => {
                     info!("saved {} / {} ({} spp)", png.display(), exr.display(), g.prog.samples());
                     let shown = std::path::absolute(&png).unwrap_or(png.clone());
@@ -1957,12 +2203,40 @@ impl App {
                 }
                 let png = png.with_file_name(format!("{}_{:03}_denoised.png", self.stem, self.save_index - 1));
                 let exr = png.with_extension("exr");
-                match image_io::save_png_tonemapped(&png, &img, self.st.exposure).and_then(|_| image_io::save_exr(&exr, &img)) {
+                match image_io::save_png_tonemapped(&png, &img, self.st.exposure, &self.st.glow_params()).and_then(|_| image_io::save_exr(&exr, &img)) {
                     Ok(()) => {
                         info!("saved {} / {} (denoised, strength {:.2})", png.display(), exr.display(), self.st.denoise_strength);
                         self.last_update.push_str("。ノイズ除去した画像も保存した（_denoised）");
                     }
                     Err(e) => error!("save failed: {}", e),
+                }
+            }
+        }
+
+        if let Some((format, path)) = self.save_as_target.take() {
+            // 表示している画像（ノイズ除去した画像を表示していればそれ）を書く
+            let img = match (show_denoised, g.denoiser.as_ref()) {
+                (true, Some(d)) => {
+                    let mut img = d.read_output();
+                    if g.prog.xyz_output() {
+                        krbr_render::integrator::xyz_to_linear_srgb(&mut img);
+                    }
+                    img
+                }
+                _ => g.prog.readback().color,
+            };
+            let r = match format {
+                SaveFormat::Png => image_io::save_png_tonemapped(&path, &img, self.st.exposure, &self.st.glow_params()),
+                SaveFormat::Exr => image_io::save_exr(&path, &img),
+            };
+            match r {
+                Ok(()) => {
+                    info!("saved {} ({} spp{})", path.display(), g.prog.samples(), if show_denoised { ", denoised" } else { "" });
+                    self.last_update = format!("保存した：{}（{} spp{}）", path.display(), g.prog.samples(), if show_denoised { "、ノイズ除去済み" } else { "" });
+                }
+                Err(e) => {
+                    error!("save failed: {} ({})", e, path.display());
+                    self.last_update = format!("保存できなかった：{e}");
                 }
             }
         }
@@ -2165,6 +2439,9 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         azimuth: cfg.azimuth_deg,
         fov: cfg.fov_deg,
         exposure: cfg.exposure_ev,
+        glow: cfg.glow,
+        glow_threshold: cfg.glow_threshold,
+        glow_spread: cfg.glow_spread,
         env_rotation_deg: cfg.env_rotation_deg,
         env_intensity: cfg.env_intensity,
         bump_intensity: cfg.scene.bump_intensity,
@@ -2176,6 +2453,9 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         mask_choice,
         mask_changed: false,
         save_requested: false,
+        save_as_requested: None,
+        settings_location_requested: None,
+        reveal_settings_requested: false,
         reset_requested: false,
         auto_exposure_requested: false,
         reset_all_requested: false,
@@ -2226,6 +2506,8 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         env_path,
         env_list,
         open_dialog: None,
+        save_dialog: None,
+        save_as_target: None,
         env_job: None,
         env_error: String::new(),
         watcher,
@@ -2242,6 +2524,7 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         assign_scope: 0,
         material_names,
         material_error: String::new(),
+        emit_edit: None,
         test_pick_done: false,
         denoiser_tried: false,
         denoise_error: String::new(),

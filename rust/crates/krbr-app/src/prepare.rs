@@ -30,6 +30,10 @@ pub struct RenderOptions {
     pub azimuth: Option<f64>,
     pub fov: Option<f64>,
     pub exposure: Option<f32>,
+    /// グロー（明るい光のにじみ）：強さ（0 でなし）、しきい値、広がり
+    pub glow: Option<f32>,
+    pub glow_threshold: Option<f32>,
+    pub glow_spread: Option<f32>,
     pub env_intensity: Option<f32>,
     pub env_rotation: Option<f32>,
     pub radiance_clamp: Option<f32>,
@@ -49,7 +53,7 @@ pub struct RenderOptions {
     pub mask_color: String,
     /// kicad-cli で線フォントの文字（シルク）を描かない
     pub no_kicad_cli: bool,
-    /// <名前>.krbr\board.toml と environment.toml のひな形を書く（あるものは上書きしない）
+    /// 基板の設定ファイル <名前>.krbr のひな形を書く（あれば、無い表だけを足す）
     pub init: bool,
     /// ノイズ除去（OIDN）。None ならコマンドの既定（render・view は無効、watch は有効）
     pub denoise: Option<bool>,
@@ -65,7 +69,7 @@ pub struct PreparedScene {
     pub scene: Scene,
     pub env: image_io::ImageF,
     pub dist: krbr_render::EnvDistribution,
-    /// environment.toml の hdr（空なら指定なし）。選んだ環境マップを覚えるときに一緒に残す
+    /// 設定ファイル（<名前>.krbr）の [environment] hdr（空なら指定なし）。選んだ環境マップを覚えるときに一緒に残す
     pub config_hdr: String,
     /// 設定ファイルとコマンドラインだけの設定（覚えたパネルの設定を当てる前）。ビューアの「設定どおり」「すべて既定に戻す」で使う
     pub configured: ProjectConfig,
@@ -109,7 +113,7 @@ fn setup_stroke_silk(board: &Board, cfg: &mut ProjectConfig, o: &RenderOptions, 
     }
     let Some(cli) = find_kicad_cli(&cfg.kicad_cli) else {
         if n > 0 {
-            warn!("kicad-cli not found; {} stroke-font silkscreen text(s) will be missing (set [kicad_cli] path in board.toml)", n);
+            warn!("kicad-cli not found; {} stroke-font silkscreen text(s) will be missing (set [kicad_cli] path in <name>.krbr)", n);
         }
         return None;
     };
@@ -214,6 +218,15 @@ fn apply_command_line(cfg: &mut ProjectConfig, o: &RenderOptions) {
     if let Some(v) = o.exposure {
         cfg.exposure_ev = v;
     }
+    if let Some(v) = o.glow {
+        cfg.glow = v.max(0.0);
+    }
+    if let Some(v) = o.glow_threshold {
+        cfg.glow_threshold = v.max(0.0);
+    }
+    if let Some(v) = o.glow_spread {
+        cfg.glow_spread = v.clamp(0.0, 1.0);
+    }
     if let Some(v) = o.env_intensity {
         cfg.env_intensity = v;
     }
@@ -273,14 +286,14 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
     }
     apply_command_line(&mut cfg, o);
     debug!("solder mask: {}", { let m = remember::mask_spec(&cfg.scene); if m.is_empty() { "stackup / default".to_string() } else { m } });
-    // 環境マップ：--hdr、この基板で最後に使ったもの、environment.toml、内蔵のスタジオ、の順
+    // 環境マップ：--hdr、この基板で最後に使ったもの、設定ファイルの [environment] hdr、内蔵のスタジオ、の順
     let config_hdr = cfg.hdr.clone();
     let from_cli = !o.hdr.is_empty();
     if from_cli {
         cfg.hdr = o.hdr.clone();
     } else if let Some(r) = remember::remembered_hdr(&board.file).filter(|_| !o.ignore_remembered) {
         if r.config_hdr != config_hdr {
-            info!("environment.toml changed since the last run; using its environment map");
+            info!("[environment] hdr in the board's settings changed since the last run; using it");
         } else if is_builtin(&r.hdr) || Path::new(&r.hdr).is_file() {
             info!("environment: last used for this board");
             cfg.hdr = r.hdr;
@@ -406,7 +419,7 @@ pub fn cmd_render(o: &RenderOptions) -> anyhow::Result<()> {
         }
     };
     let png = out_dir.join(format!("{stem}.png"));
-    report(image_io::save_png_tonemapped(&png, &result.color, cfg.exposure_ev), &png);
+    report(image_io::save_png_tonemapped(&png, &result.color, cfg.exposure_ev, &glow_params(&cfg)), &png);
     let exr = out_dir.join(format!("{stem}.exr"));
     report(image_io::save_exr(&exr, &result.color), &exr);
     let alb = out_dir.join(format!("{stem}_albedo.exr"));
@@ -415,7 +428,7 @@ pub fn cmd_render(o: &RenderOptions) -> anyhow::Result<()> {
     report(image_io::save_exr(&nrm, &result.normal), &nrm);
     if let Some(d) = &result.denoised {
         let png = out_dir.join(format!("{stem}_denoised.png"));
-        report(image_io::save_png_tonemapped(&png, d, cfg.exposure_ev), &png);
+        report(image_io::save_png_tonemapped(&png, d, cfg.exposure_ev, &glow_params(&cfg)), &png);
         let exr = out_dir.join(format!("{stem}_denoised.exr"));
         report(image_io::save_exr(&exr, d), &exr);
     }
@@ -454,4 +467,9 @@ fn write_missing_report(scene: &Scene, out_dir: &Path) {
     json += "]\n";
     let _ = std::fs::write(out_dir.join("missing_models.json"), json);
     let _ = std::fs::write(out_dir.join("missing_models.txt"), txt);
+}
+
+/// 設定のグロー
+pub fn glow_params(cfg: &ProjectConfig) -> krbr_render::glow::GlowParams {
+    krbr_render::glow::GlowParams { strength: cfg.glow, threshold: cfg.glow_threshold, spread: cfg.glow_spread }
 }

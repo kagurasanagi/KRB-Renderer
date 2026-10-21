@@ -12,3 +12,4 @@ krbr-model = { path = "../krbr-model" }
 krbr-geom = { path = "../krbr-geom" }
 glam.workspace = true
 toml = "0.8"
+toml_edit = "0.22"

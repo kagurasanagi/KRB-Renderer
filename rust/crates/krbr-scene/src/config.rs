@@ -1,4 +1,4 @@
-//! プロジェクト設定（<プロジェクト名>.krbr/board.toml, environment.toml）。C++ 版と同じファイル・同じ項目
+//! プロジェクト設定（基板の設定ファイル <名前>.krbr。crate::board_file）。項目は C++ 版の board.toml / environment.toml と同じ
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use crate::scene::SceneOptions;
 
 #[derive(Debug, Clone)]
 pub struct ProjectConfig {
-    // board.toml
+    // 基板の設定（[board] [relief] [surface] [placeholder] [paths] [kicad_cli]）
     pub scene: SceneOptions,
     /// ${VAR} の追加・上書き
     pub path_vars: BTreeMap<String, String>,
@@ -21,7 +21,7 @@ pub struct ProjectConfig {
     /// 空なら自動検出
     pub kicad_cli: String,
 
-    // environment.toml
+    // 照明・カメラ・レンダリングの設定（[environment] [camera] [render] [lens]）
     pub hdr: String,
     pub env_intensity: f32,
     pub env_rotation_deg: f32,
@@ -34,6 +34,10 @@ pub struct ProjectConfig {
     pub spp: u32,
     pub max_depth: u32,
     pub exposure_ev: f32,
+    /// グロー（明るい光のにじみ。krbr_render::glow）：強さ（0 でなし）、しきい値（露出後の RGB の最大。1 が画面の白）、広がり（0..1）
+    pub glow: f32,
+    pub glow_threshold: f32,
+    pub glow_spread: f32,
     /// 間接光だけに効く上限（ホタル対策）
     pub radiance_clamp: f32,
     /// 分光モード（代表波長方式、4 波長）
@@ -66,6 +70,9 @@ impl Default for ProjectConfig {
             spp: 64,
             max_depth: 8,
             exposure_ev: 0.7,
+            glow: 1.0,
+            glow_threshold: 4.0,
+            glow_spread: 0.7,
             radiance_clamp: 10.0,
             spectral: false,
             integrator: "pt".into(),
@@ -74,11 +81,6 @@ impl Default for ProjectConfig {
             loaded_files: Vec::new(),
         }
     }
-}
-
-pub fn project_config_dir(pcb: &Path) -> PathBuf {
-    let stem = pcb.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    pcb.parent().unwrap_or(Path::new(".")).join(format!("{stem}.krbr"))
 }
 
 /// レジストの色の指定（プリセット名 "jlcpcb-purple" など、または "r,g,b"）を SceneOptions に反映する
@@ -173,17 +175,6 @@ fn color(t: &toml::Table, path: &[&str], dst: &mut Vec3, set: Option<&mut bool>)
     }
 }
 
-fn parse_file(p: &Path) -> Option<toml::Table> {
-    let text = std::fs::read_to_string(p).ok()?;
-    match toml::from_str::<toml::Table>(&text) {
-        Ok(t) => Some(t),
-        Err(e) => {
-            krbr_core::warn!("{}: {} - ignored", p.display(), e.message());
-            None
-        }
-    }
-}
-
 fn resolve_rel(dir: &Path, s: &str) -> PathBuf {
     let p = PathBuf::from(s);
     if p.is_relative() {
@@ -193,35 +184,25 @@ fn resolve_rel(dir: &Path, s: &str) -> PathBuf {
     }
 }
 
-/// 既定値に、見つかった設定ファイルの内容を重ねる。失敗したファイルは警告して無視
-/// `--init`：<名前>.krbr\board.toml と environment.toml のひな形を書く（あるものは上書きしない。C++ 版と同じ）
+/// `--init`：基板の設定ファイル <名前>.krbr のひな形を書く（既にあれば、無い表だけを足す）
 pub fn write_default_configs(pcb: &Path) {
-    let dir = project_config_dir(pcb);
-    for (name, text) in [("board.toml", crate::config_templates::BOARD_TOML), ("environment.toml", crate::config_templates::ENVIRONMENT_TOML)] {
-        let p = dir.join(name);
-        if p.exists() {
-            krbr_core::info!("--init: keeping existing {}", p.display());
-            continue;
-        }
-        match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&p, text)) {
-            Ok(()) => krbr_core::info!("--init: wrote {}", p.display()),
-            Err(e) => krbr_core::warn!("--init: cannot write {}: {}", p.display(), e),
-        }
-    }
+    crate::board_file::init(pcb);
 }
 
+/// 既定値に、基板の設定ファイル <名前>.krbr（crate::board_file）の内容を重ねる。読めなければ警告して既定値
 pub fn load_project_config(pcb: &Path) -> ProjectConfig {
     let mut c = ProjectConfig::default();
-    let dir = project_config_dir(pcb);
-    let board_toml = dir.join("board.toml");
-    if let Some(t) = parse_file(&board_toml) {
-        c.loaded_files.push(board_toml);
+    // 中の相対パスは基板のフォルダから
+    let base = crate::board_file::base_dir(pcb);
+    let (file, table) = crate::board_file::read(pcb);
+    if let Some(t) = table {
+        c.loaded_files.push(file.clone());
         let o = &mut c.scene;
         string(&t, &["board", "finish"], &mut o.finish);
         match get(&t, &["board", "mask_color"]) {
             Some(Value::String(name)) => {
                 if let Err(e) = apply_mask_color_spec(o, name) {
-                    krbr_core::warn!("board.toml mask_color: {}", e);
+                    krbr_core::warn!("{}: mask_color: {}", file.display(), e);
                 }
             }
             _ => color(&t, &["board", "mask_color"], &mut o.mask_color, Some(&mut o.mask_color_set)),
@@ -235,7 +216,7 @@ pub fn load_project_config(pcb: &Path) -> ProjectConfig {
         boolean(&t, &["board", "include_dnp"], &mut o.include_dnp);
         // 層テクスチャ方式（enabled = false）は廃止した。凹凸は常に形状として作る
         if matches!(get(&t, &["relief", "enabled"]), Some(Value::Boolean(false))) {
-            krbr_core::warn!("board.toml [relief] enabled = false is no longer supported (the layer texture mode was removed); the relief is always built as geometry");
+            krbr_core::warn!("{}: [relief] enabled = false is no longer supported (the layer texture mode was removed); the relief is always built as geometry", file.display());
         }
         if let Some(v) = get(&t, &["relief", "copper_um"]).and_then(as_f64) {
             o.relief_params.copper = v / 1000.0;
@@ -259,19 +240,15 @@ pub fn load_project_config(pcb: &Path) -> ProjectConfig {
         if let Some(Value::Array(dirs)) = get(&t, &["paths", "model_search_dirs"]) {
             for d in dirs {
                 if let Value::String(s) = d {
-                    c.model_search_dirs.push(resolve_rel(dir.parent().unwrap_or(Path::new(".")), s));
+                    c.model_search_dirs.push(resolve_rel(&base, s));
                 }
             }
         }
         boolean(&t, &["kicad_cli", "use_for_text"], &mut c.use_kicad_cli_text);
         string(&t, &["kicad_cli", "path"], &mut c.kicad_cli);
-    }
-    let env_toml = dir.join("environment.toml");
-    if let Some(t) = parse_file(&env_toml) {
-        c.loaded_files.push(env_toml);
         if let Some(Value::String(h)) = get(&t, &["environment", "hdr"]) {
             // "builtin:studio" などの内蔵の環境マップはパスではない
-            c.hdr = if h.starts_with("builtin:") { h.clone() } else { resolve_rel(&dir, h).to_string_lossy().into_owned() };
+            c.hdr = if h.starts_with("builtin:") { h.clone() } else { resolve_rel(&base, h).to_string_lossy().into_owned() };
         }
         num(&t, &["environment", "intensity"], &mut c.env_intensity);
         num(&t, &["environment", "rotation_deg"], &mut c.env_rotation_deg);
@@ -284,6 +261,9 @@ pub fn load_project_config(pcb: &Path) -> ProjectConfig {
         num_u32(&t, &["render", "spp"], &mut c.spp);
         num_u32(&t, &["render", "max_depth"], &mut c.max_depth);
         num(&t, &["render", "exposure_ev"], &mut c.exposure_ev);
+        num(&t, &["render", "glow"], &mut c.glow);
+        num(&t, &["render", "glow_threshold"], &mut c.glow_threshold);
+        num(&t, &["render", "glow_spread"], &mut c.glow_spread);
         num(&t, &["render", "radiance_clamp"], &mut c.radiance_clamp);
         boolean(&t, &["render", "spectral"], &mut c.spectral);
         string(&t, &["render", "integrator"], &mut c.integrator);
@@ -307,7 +287,7 @@ pub fn load_project_config(pcb: &Path) -> ProjectConfig {
         num(&t, &["lens", "lateral_ca"], &mut c.lens.lateral_ca);
         if let Some(Value::String(f)) = get(&t, &["lens", "lens_file"]) {
             if !f.is_empty() {
-                c.lens.lens_file = resolve_rel(&dir, f).to_string_lossy().into_owned();
+                c.lens.lens_file = resolve_rel(&base, f).to_string_lossy().into_owned();
             }
         }
     }
@@ -315,7 +295,7 @@ pub fn load_project_config(pcb: &Path) -> ProjectConfig {
         krbr_core::info!("config: {}", f.display());
     }
     if c.loaded_files.is_empty() {
-        krbr_core::info!("config: no {} found, using defaults", dir.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default());
+        krbr_core::info!("config: no {} found, using defaults", file.display());
     }
     c
 }
@@ -323,21 +303,21 @@ pub fn load_project_config(pcb: &Path) -> ProjectConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board_file::tests::{config_lock, workspace};
 
     #[test]
-    fn init_templates_are_the_defaults_and_never_overwrite() {
-        let dir = std::env::temp_dir().join(format!("krbr_rust_init_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let pcb = dir.join("b.kicad_pcb");
+    fn init_template_is_the_defaults() {
+        let _g = config_lock();
+        let (proj, ws) = workspace("config_init");
+        let pcb = proj.join("b.kicad_pcb");
         write_default_configs(&pcb);
-        let cfg_dir = dir.join("b.krbr");
-        assert!(cfg_dir.join("board.toml").is_file() && cfg_dir.join("environment.toml").is_file());
+        assert!(proj.join("b.krbr").is_file());
         // ひな形の値は既定値と同じ（書いても見た目が変わらない）
         let (c, d) = (load_project_config(&pcb), ProjectConfig::default());
-        assert_eq!(c.loaded_files.len(), 2);
+        assert_eq!(c.loaded_files.len(), 1);
         assert_eq!((c.width, c.height, c.spp, c.max_depth), (d.width, d.height, d.spp, d.max_depth));
         assert_eq!((c.exposure_ev, c.radiance_clamp, c.env_intensity), (d.exposure_ev, d.radiance_clamp, d.env_intensity));
+        assert_eq!((c.glow, c.glow_threshold, c.glow_spread), (d.glow, d.glow_threshold, d.glow_spread));
         assert_eq!((c.elevation_deg, c.azimuth_deg, c.fov_deg, c.margin), (d.elevation_deg, d.azimuth_deg, d.fov_deg, d.margin));
         assert_eq!((c.integrator.as_str(), c.spectral, c.hdr.as_str()), (d.integrator.as_str(), d.spectral, ""));
         assert_eq!((c.lens.model, c.lens.f_number, c.lens.focal_length_mm), (d.lens.model, d.lens.f_number, d.lens.focal_length_mm));
@@ -345,30 +325,31 @@ mod tests {
         assert_eq!((c.scene.placeholder_height, c.scene.placeholder_color), (d.scene.placeholder_height, d.scene.placeholder_color));
         assert_eq!(c.scene.relief_params.via_dimple, d.scene.relief_params.via_dimple);
         assert_eq!(c.use_kicad_cli_text, d.use_kicad_cli_text);
-        // 既にあるファイルは上書きしない
-        std::fs::write(cfg_dir.join("board.toml"), "[surface]\nbump_intensity = 0.5\n").unwrap();
-        write_default_configs(&pcb);
-        assert_eq!(std::fs::read_to_string(cfg_dir.join("board.toml")).unwrap(), "[surface]\nbump_intensity = 0.5\n");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]
-    fn reads_both_files() {
-        let dir = std::env::temp_dir().join("krbr_rust_config_test");
-        let cfg_dir = dir.join("board.krbr");
-        std::fs::create_dir_all(&cfg_dir).unwrap();
-        std::fs::write(cfg_dir.join("board.toml"), "[board]\nmask_color = \"jlcpcb-white\"\nmask_scatter = 0.5\n[relief]\nvia_dimple_um = 30\n[paths]\nvars = { X = \"y\" }\n").unwrap();
-        std::fs::write(cfg_dir.join("environment.toml"), "[environment]\nhdr = \"../studio.exr\"\n[render]\nspp = 16\nwidth = 640\n[lens]\nmodel = \"thin\"\nblades = 6\n").unwrap();
-        let c = load_project_config(&dir.join("board.kicad_pcb"));
+    fn reads_board_and_environment_sections_and_paths_are_from_the_board_folder() {
+        let _g = config_lock();
+        let (proj, ws) = workspace("config_read");
+        std::fs::write(
+            proj.join("board.krbr"),
+            "[board]\nmask_color = \"jlcpcb-white\"\nmask_scatter = 0.5\n[relief]\nvia_dimple_um = 30\n[paths]\nvars = { X = \"y\" }\nmodel_search_dirs = [\"models\"]\n\
+             [environment]\nhdr = \"hdr/studio.exr\"\n[render]\nspp = 16\nwidth = 640\n[lens]\nmodel = \"thin\"\nblades = 6\n",
+        )
+        .unwrap();
+        let c = load_project_config(&proj.join("board.kicad_pcb"));
         assert_eq!(c.scene.mask_preset, "jlcpcb-white");
         assert_eq!(c.scene.mask_scatter, 0.5); // プリセットの後の指定が勝つ
         assert_eq!(c.scene.silk_color, Vec3::new(0.08, 0.08, 0.08));
         assert!((c.scene.relief_params.via_dimple - 0.03).abs() < 1e-9);
         assert_eq!(c.path_vars["X"], "y");
-        assert!(c.hdr.ends_with("studio.exr"));
+        assert_eq!(PathBuf::from(&c.hdr), proj.join("hdr/studio.exr"));
+        assert_eq!(c.model_search_dirs, vec![proj.join("models")]);
         assert_eq!((c.spp, c.width, c.height), (16, 640, 1080));
         assert_eq!(c.lens.model, LensModel::Thin);
         assert_eq!(c.lens.blades, 6);
-        assert_eq!(c.loaded_files.len(), 2);
+        assert_eq!(c.loaded_files, vec![proj.join("board.krbr")]);
+        let _ = std::fs::remove_dir_all(&ws);
     }
 }

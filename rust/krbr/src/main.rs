@@ -98,11 +98,11 @@ enum MaterialCmd {
         #[arg(long = "ref", default_value = "")]
         reference: String,
     },
-    /// assign a material per reference (project overrides.toml) or per 3D model (project, or --global)
+    /// assign a material per reference (the board's <name>.krbr) or per 3D model (<name>.krbr, or --global)
     Set {
         /// .kicad_pcb file
         pcb: PathBuf,
-        /// reference designator (project overrides.toml)
+        /// reference designator (the board's <name>.krbr)
         #[arg(long = "ref", default_value = "")]
         reference: String,
         /// 3D model: path as written in the board, file name, or resolved file
@@ -146,10 +146,11 @@ struct RenderArgs {
     /// .kicad_pcb file
     pcb: PathBuf,
     /// equirectangular environment map (.hdr / .exr, or builtin:studio). Remembered per board;
-    /// if omitted: the one last used for this board, else [environment] hdr in environment.toml, else builtin:studio
+    /// if omitted: the one last used for this board, else [environment] hdr in <name>.krbr, else builtin:studio
     #[arg(long, default_value = "")]
     hdr: String,
-    /// output PNG (render: EXR and AOVs are written next to it; default out/board.png, watch: out/watch.png)
+    /// output PNG (render: EXR and AOVs are written next to it; default out/board.png, watch: out/watch.png,
+    /// view: the images saved with S, default <board folder>\<board name>_000.png)
     #[arg(long, short)]
     out: Option<PathBuf>,
     #[arg(long)]
@@ -178,6 +179,15 @@ struct RenderArgs {
     /// exposure (EV)
     #[arg(long)]
     exposure: Option<f32>,
+    /// glow of bright light such as lit LEDs: strength (0 = off; default 1). Remembered per board
+    #[arg(long)]
+    glow: Option<f32>,
+    /// glow: only light brighter than this glows (max of RGB after exposure, 1 = display white; default 4)
+    #[arg(long)]
+    glow_threshold: Option<f32>,
+    /// glow: how far it spreads (0..1; small = tight around the light; default 0.7)
+    #[arg(long)]
+    glow_spread: Option<f32>,
     #[arg(long)]
     env_intensity: Option<f32>,
     #[arg(long)]
@@ -196,7 +206,7 @@ struct RenderArgs {
     /// do not use kicad-cli for stroke-font silkscreen texts (they will be missing)
     #[arg(long)]
     no_kicad_cli: bool,
-    /// write template <name>.krbr\board.toml and environment.toml (existing files are kept)
+    /// write the template of the board's settings file <name>.krbr (an existing file only gets the missing sections)
     #[arg(long)]
     init: bool,
     /// denoise with OIDN (default: on for watch, off for render/view)
@@ -214,7 +224,7 @@ struct RenderArgs {
     /// spectral rendering (hero wavelengths)
     #[arg(long)]
     spectral: bool,
-    /// RGB rendering (overrides the spectral mode remembered for the board or set in environment.toml)
+    /// RGB rendering (overrides the spectral mode remembered for the board or set in <name>.krbr)
     #[arg(long, conflicts_with = "spectral")]
     rgb: bool,
     /// camera lens: pinhole (default), thin, realistic
@@ -264,6 +274,9 @@ struct ViewArgs {
     /// development: choose this solder mask preset in the panel during the test
     #[arg(long, default_value = "")]
     test_mask: String,
+    /// development: near the end of the test, "save as" to this file (.png or .exr)
+    #[arg(long)]
+    test_save_as: Option<PathBuf>,
     /// development: press "reset all settings" in the menu during the test
     #[arg(long)]
     test_reset_settings: bool,
@@ -302,6 +315,9 @@ impl RenderArgs {
             azimuth: self.azimuth,
             fov: self.fov,
             exposure: self.exposure,
+            glow: self.glow,
+            glow_threshold: self.glow_threshold,
+            glow_spread: self.glow_spread,
             env_intensity: self.env_intensity,
             env_rotation: self.env_rotation,
             radiance_clamp: self.clamp,
@@ -442,7 +458,7 @@ fn cmd_info(pcb: &PathBuf, models: bool) -> anyhow::Result<()> {
     if !models {
         return Ok(());
     }
-    // TODO: board.toml の path_vars / model_search_dirs（設定ファイルの移植後）
+    // TODO: <名前>.krbr の path_vars / model_search_dirs（設定ファイルの移植後）
     let resolver = ModelResolver::new(&board.project_dir, &BTreeMap::new(), &[]);
     let (mut found, mut missing, mut no_model) = (0, 0, 0);
     for fp in &board.footprints {
@@ -532,8 +548,15 @@ fn main() {
         Command::Info { pcb, models } => cmd_info(pcb, *models),
         Command::Render(args) => krbr_app::cmd_render(&args.to_options("out/board.png")),
         Command::View(args) => {
+            let mut common = args.render.to_options("out/board.png");
+            // S で保存する画像は、--out を付けなければ基板のフォルダに <基板の名前>_000.png（.exr）
+            if args.render.out.is_none() {
+                let pcb = std::path::absolute(&args.render.pcb).unwrap_or_else(|_| args.render.pcb.clone());
+                let stem = pcb.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "board".into());
+                common.out = krbr_scene::board_file::base_dir(&pcb).join(format!("{stem}.png"));
+            }
             let vo = krbr_app::ViewOptions {
-                common: args.render.to_options("out/board.png"),
+                common,
                 test_frames: args.test_frames,
                 screenshot: args.screenshot.clone(),
                 hidden: args.hidden,
@@ -543,6 +566,7 @@ fn main() {
                 test_pick: (args.test_pick.len() == 2).then(|| (args.test_pick[0], args.test_pick[1])),
                 test_assign: args.test_assign.clone(),
                 test_mask: args.test_mask.clone(),
+                test_save_as: args.test_save_as.clone(),
                 test_reset_settings: args.test_reset_settings,
                 render_size: args.render_size.clone(),
                 render_ratio: args.render_ratio,

@@ -71,7 +71,7 @@ fn save_updates_the_image_and_rebuilds_only_nearby_tiles() {
     std::fs::create_dir_all(ws.join("proj")).unwrap();
     // 3D モデルのキャッシュと全体設定も空のものにする（裏での分割を確かめるため。環境マップの記憶も書き込まない）
     std::env::set_var("KRBR_CACHE_DIR", ws.join("cache"));
-    std::env::set_var("KRBR_CONFIG_DIR", ws.join("config"));
+    common::use_config_dir(&ws.join("config"));
     let pcb = ws.join("proj").join("board.kicad_pcb");
     std::fs::copy(common::test_board(), &pcb).unwrap();
     let out = ws.join("out").join("watch.png");

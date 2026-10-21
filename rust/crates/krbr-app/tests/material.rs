@@ -62,7 +62,7 @@ fn global_model_material_is_shared_across_projects_and_reference_override_wins()
 
     // プロジェクト A だけ、部品番号で上書き
     let by_ref = MaterialSetOptions { pcb: pcb_a.clone(), reference: reference.clone(), material: "test_blue".into(), ..Default::default() };
-    assert_eq!(set_material(&by_ref).unwrap(), ws.join("projA").join("board.krbr").join("overrides.toml"));
+    assert_eq!(set_material(&by_ref).unwrap(), ws.join("projA").join("board.krbr"));
     let (a, source) = parts_of(&compute_assignments(&pcb_a).unwrap(), &reference);
     assert!(a.values().all(|m| m == "test_blue"), "{a:?}");
     assert_eq!(source, format!("ref {reference} (project)"));
@@ -107,8 +107,8 @@ fn global_model_material_is_shared_across_projects_and_reference_override_wins()
     assert!(set_material(&MaterialSetOptions { global: true, ..by_ref.clone() }).unwrap_err().contains("--global"));
     assert!(set_material(&MaterialSetOptions { model: "no_such_model.step".into(), reference: String::new(), ..by_ref.clone() }).unwrap_err().contains("no 3D model"));
 
-    // 読めない overrides.toml は上書きしない（C++ 版は 1 件だけの内容で上書きしてしまう）
-    let broken = ws.join("projA").join("board.krbr").join("overrides.toml");
+    // 読めない設定ファイルは上書きしない（C++ 版は 1 件だけの内容で上書きしてしまう）
+    let broken = ws.join("projA").join("board.krbr");
     std::fs::write(&broken, "[ref.U1\nmaterial = ").unwrap();
     let err = set_material(&by_ref).unwrap_err();
     assert!(err.contains("not overwriting"), "{err}");

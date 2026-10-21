@@ -55,7 +55,7 @@ def launch(board_file, exe=None):
     flags = 0
     if os.name == "nt":
         flags = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP（コンソールを出さない）
-    # 作業フォルダを基板のフォルダにする（ビューアで S を押したとき、画像は <基板のフォルダ>\out\ に入る）
+    # 作業フォルダを基板のフォルダにする（ビューアで S を押したときの画像は、--out を付けなければ基板のフォルダに入る）
     _viewers[key] = subprocess.Popen([exe, board_file], cwd=os.path.dirname(board_file) or None, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, creationflags=flags, close_fds=True)
     return True, ""
 
