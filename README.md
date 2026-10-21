@@ -67,6 +67,15 @@ krbr render board.kicad_pcb --hdr studio.exr --spp 256 --width 1920 --height 108
 
 - 1 行目：状態（レンダリング中 / 完了 / 一時停止中）、積んだサンプル数と進み具合、**経過時間**（今の累積を始めてからレンダリングにかかった時間。一時停止の間と完了後は数えず、視点などを変えて累積をやり直すと 0 から）、**1 サンプルあたりの平均**（経過時間 ÷ サンプル数と、GPU がサンプルを描いた時間だけの平均。完了後は変わらない）、残りの予想時間
 - 2 行目：積分器と色の計算、描画の解像度と表示の倍率、露出、GPU の名前と方式（ray query / ray tracing pipeline）、読み直し・kicad-cli・3D モデルの分割の状態と、最後の更新の知らせ
+**表示の言語**（いまは英語と日本語）は、次の順で決めます。訳の無い言語なら英語で表示します。
+
+1. `--lang ja` か、環境変数 `KRBR_LANG`
+2. メニューの「表示」→「言語」で選んだもの（`%APPDATA%\krbr\state.toml` に覚える。「自動」で 3 以降に戻る）
+3. KiCad で選んだ言語（`kicad_common.json` の `system.language`。KiCad が「Default」なら次へ）
+4. OS の言語
+
+ログとコマンドラインの説明は英語です。KiCad のプラグインのボタンとメッセージは、KiCad の表示の言語に合わせます。翻訳は `rust/crates/krbr-app/i18n/<言語>/krbr-app.ftl`（[Fluent](https://projectfluent.org/) の形式、英語が基準）で、exe に埋め込みます。言語を足すときは、英語のファイルを写して訳し、`krbr-app/src/i18n.rs` の `LANGUAGES` に加えます。
+
 開発用に、非表示のウィンドウで描いて終了するテストモードがあります（`--test-frames N --screenshot path [--test-orbit 度]`）。画面には出ず、フォーカスも奪いません。
 
 ### 保存の監視と差分更新

@@ -82,23 +82,8 @@ fn detect_install_vars(vars: &mut BTreeMap<String, String>) {
 
 /// %APPDATA%/kicad/<ver>/kicad_common.json の environment.vars を読む（読み取りのみ）
 fn read_kicad_common(vars: &mut BTreeMap<String, String>) {
-    let base = if cfg!(windows) {
-        std::env::var("APPDATA").ok().map(|a| PathBuf::from(a).join("kicad"))
-    } else {
-        std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config").join("kicad"))
-    };
-    let Some(base) = base else { return };
-    if !is_dir(&base) {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(&base) else { return };
-    let mut files: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.path().join("kicad_common.json"))
-        .filter(|p| is_file(p))
-        .collect();
-    files.sort(); // 新しい版を後に読んで優先
+    // 新しい版を後に読んで優先
+    let files = crate::settings::kicad_common_files();
     for f in files {
         let Ok(text) = std::fs::read_to_string(&f) else { continue };
         match serde_json::from_str::<serde_json::Value>(&text) {

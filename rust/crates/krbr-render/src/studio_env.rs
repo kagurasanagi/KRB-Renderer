@@ -17,7 +17,7 @@ pub fn is_builtin(spec: &str) -> bool {
 /// 一覧や表示に使う名前（ファイルならファイル名）
 pub fn environment_label(spec: &str) -> String {
     if spec == STUDIO {
-        return "スタジオ（内蔵）".into();
+        return "Studio (built-in)".into();
     }
     Path::new(spec).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| spec.to_string())
 }
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn labels() {
-        assert_eq!(environment_label(STUDIO), "スタジオ（内蔵）");
+        assert_eq!(environment_label(STUDIO), "Studio (built-in)");
         assert_eq!(environment_label("C:/hdr/a.exr"), "a.exr");
         assert!(load_environment_map("builtin:nope").is_err());
     }

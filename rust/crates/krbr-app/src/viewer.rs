@@ -27,6 +27,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use crate::fl;
+use crate::i18n;
 use crate::kicad_cli::{plot_stroke_silk, SilkPlot};
 use crate::material_cmd::{clear_material, set_material, MaterialSetOptions};
 use crate::selection::{Outline, Selected};
@@ -68,18 +70,36 @@ pub struct ViewOptions {
     pub render_size: String,
     /// レンダリングの比率（レンダリングの解像度 ÷ 表示の大きさ）。None なら覚えたもの
     pub render_ratio: Option<f32>,
+    /// 表示の言語（--lang。"ja" など）。None なら環境変数 KRBR_LANG、メニューで選んだもの、KiCad、OS の順
+    pub language: Option<String>,
 }
 
-/// 描画のサイズの候補（表示名, 幅, 高さ）
-const SIZE_PRESETS: [(&str, u32, u32); 7] = [
-    ("1280×720（HD）", 1280, 720),
-    ("1920×1080（フル HD）", 1920, 1080),
-    ("2560×1440（WQHD）", 2560, 1440),
-    ("3840×2160（4K）", 3840, 2160),
-    ("1080×1080（正方形）", 1080, 1080),
-    ("1080×1350（4:5）", 1080, 1350),
-    ("1200×800（3:2）", 1200, 800),
-];
+/// 描画のサイズの候補（幅, 高さ）
+const SIZE_PRESETS: [(u32, u32); 7] = [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160), (1080, 1080), (1080, 1350), (1200, 800)];
+
+/// 描画のサイズの表示名（"1920×1080（フル HD）" など）
+fn size_label(w: u32, h: u32) -> String {
+    let name = match (w, h) {
+        (1280, 720) => "HD".to_string(),
+        (1920, 1080) => fl!("size-full-hd"),
+        (2560, 1440) => "WQHD".to_string(),
+        (3840, 2160) => "4K".to_string(),
+        (1080, 1080) => fl!("size-square"),
+        (1080, 1350) => "4:5".to_string(),
+        (1200, 800) => "3:2".to_string(),
+        _ => return format!("{w}×{h}"),
+    };
+    fl!("size-preset", size = format!("{w}×{h}"), name = name)
+}
+
+/// 環境マップの表示名（内蔵のスタジオは翻訳した名前、ほかはファイル名）
+fn env_label(spec: &str) -> String {
+    if spec == STUDIO {
+        fl!("env-studio")
+    } else {
+        environment_label(spec)
+    }
+}
 
 /// レンダリングの比率の候補（レンダリングの解像度 ÷ 表示の大きさ）
 const RATIOS: [f32; 5] = [0.25, 0.5, 1.0, 1.5, 2.0];
@@ -226,6 +246,8 @@ struct ViewState {
     render_ratio: f32,
     /// 決まったサイズに合わせてウィンドウの大きさを変える
     fit_window_requested: bool,
+    /// メニューで表示の言語を選んだ（Some(None)：自動）
+    language_requested: Option<Option<String>>,
     tan_half_fov_y: f32,
 }
 
@@ -319,16 +341,28 @@ fn auto_exposure(img: &ImageF) -> f32 {
     (0.18f64 / avg).log2().clamp(-6.0, 6.0) as f32
 }
 
-/// 日本語を表示できる Windows のフォント（無ければ egui の既定のフォント）
-fn install_fonts(ctx: &egui::Context) {
+/// 漢字・かなを表示できる Windows のフォント（読んだものを使い回す。無ければ None）
+fn cjk_font() -> Option<&'static [u8]> {
+    static FONT: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
+    FONT.get_or_init(|| {
+        ["C:/Windows/Fonts/YuGothM.ttc", "C:/Windows/Fonts/meiryo.ttc", "C:/Windows/Fonts/msgothic.ttc", "C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/malgun.ttf"].iter().find_map(|f| std::fs::read(f).ok())
+    })
+    .as_deref()
+}
+
+/// 表示の言語に合わせたフォント：日本語なら日本語のフォントを先に（英字も同じ書体に）、ほかは egui の既定のフォントを先にして、
+/// 漢字・かなは日本語のフォントで出す（ファイル名や部品の名前に含まれることがある）
+fn install_fonts(ctx: &egui::Context, lang: &str) {
     let mut fonts = egui::FontDefinitions::default();
-    for f in ["C:/Windows/Fonts/YuGothM.ttc", "C:/Windows/Fonts/meiryo.ttc", "C:/Windows/Fonts/msgothic.ttc"] {
-        if let Ok(bytes) = std::fs::read(f) {
-            fonts.font_data.insert("jp".into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
-            fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(0, "jp".into());
-            fonts.families.entry(egui::FontFamily::Monospace).or_default().push("jp".into());
-            break;
+    if let Some(bytes) = cjk_font() {
+        fonts.font_data.insert("cjk".into(), std::sync::Arc::new(egui::FontData::from_static(bytes)));
+        let proportional = fonts.families.entry(egui::FontFamily::Proportional).or_default();
+        if lang == "ja" {
+            proportional.insert(0, "cjk".into());
+        } else {
+            proportional.push("cjk".into());
         }
+        fonts.families.entry(egui::FontFamily::Monospace).or_default().push("cjk".into());
     }
     ctx.set_fonts(fonts);
 }
@@ -444,6 +478,9 @@ struct App {
     fit_frames: u32,
     /// 次に読み終えた環境マップを覚えない（「すべて既定に戻す」で設定ファイルのものに戻したとき）
     env_no_remember: bool,
+    /// 表示の言語（決まった言語タグ）と、メニューで選んだもの（None：自動）
+    language: String,
+    language_choice: Option<String>,
     out_dir: PathBuf,
     stem: String,
     rc: i32,
@@ -466,33 +503,33 @@ const TARGET_FRAME_MS: f64 = 10.0; // 60fps（16.7 ms）に収まるよう、表
 
 fn ratio_label(r: f32) -> String {
     let what = if r < 1.0 {
-        "粗く速い"
+        fl!("ratio-coarse")
     } else if r > 1.0 {
-        "細かく描いて縮小"
+        fl!("ratio-fine")
     } else {
-        "等倍"
+        fl!("ratio-native")
     };
-    format!("×{r}（{what}）")
+    fl!("ratio-label", ratio = r.to_string(), what = what)
 }
 
 /// 設定パネルの「表示」の欄：描画のサイズとレンダリングの比率
 fn size_controls(ui: &mut egui::Ui, st: &mut ViewState) {
     let current = match st.size_mode {
-        None => "ウィンドウに合わせる".to_string(),
-        Some((w, h)) => SIZE_PRESETS.iter().find(|p| (p.1, p.2) == (w, h)).map(|p| p.0.to_string()).unwrap_or(format!("{w}×{h}")),
+        None => fl!("size-fit-window"),
+        Some((w, h)) => size_label(w, h),
     };
     egui::ComboBox::from_id_salt("render_size").width(200.0).selected_text(current).show_ui(ui, |ui| {
-        if ui.selectable_label(st.size_mode.is_none(), "ウィンドウに合わせる").clicked() {
+        if ui.selectable_label(st.size_mode.is_none(), fl!("size-fit-window")).clicked() {
             st.size_mode = None;
         }
-        for (name, w, h) in SIZE_PRESETS {
-            if ui.selectable_label(st.size_mode == Some((w, h)), name).clicked() && st.size_mode != Some((w, h)) {
+        for (w, h) in SIZE_PRESETS {
+            if ui.selectable_label(st.size_mode == Some((w, h)), size_label(w, h)).clicked() && st.size_mode != Some((w, h)) {
                 st.size_mode = Some((w, h));
                 st.fit_window_requested = true;
             }
         }
     });
-    ui.weak("描画のサイズ（決まったサイズでは、ウィンドウの大きさを合わせる）");
+    ui.weak(fl!("size-hint"));
     egui::ComboBox::from_id_salt("render_ratio").width(200.0).selected_text(ratio_label(st.render_ratio)).show_ui(ui, |ui| {
         for r in RATIOS {
             if ui.selectable_label(st.render_ratio == r, ratio_label(r)).clicked() && st.render_ratio != r {
@@ -501,7 +538,7 @@ fn size_controls(ui: &mut egui::Ui, st: &mut ViewState) {
             }
         }
     });
-    ui.weak("レンダリングの比率（レンダリングの解像度 ÷ 表示の大きさ）");
+    ui.weak(fl!("ratio-hint"));
 }
 
 fn display_mode_name(m: DisplayMode) -> &'static str {
@@ -523,7 +560,7 @@ fn display_mode_of(name: &str) -> DisplayMode {
 /// 経過時間の表示：1 分未満は「12.3 秒」、それ以上は「m:ss」「h:mm:ss」
 fn format_duration(secs: f64) -> String {
     if secs < 60.0 {
-        return format!("{secs:.1} 秒");
+        return fl!("duration-seconds", seconds = format!("{secs:.1}"));
     }
     let t = secs.round() as u64;
     if t < 3600 {
@@ -596,7 +633,7 @@ impl App {
                 krbr_core::debug!("fit window: monitor {}x{}, inner {}x{}, outer {}x{}, 3D view {}x{}", m.size().width, m.size().height, inner.width, inner.height, outer.width, outer.height, vp.w, vp.h);
                 if !fits(self.st.render_ratio) {
                     let r = RATIOS.iter().copied().find(|&r| r > self.st.render_ratio && fits(r)).unwrap_or(*RATIOS.last().unwrap());
-                    self.last_update = format!("{}×{} は画面に入らないので、レンダリングの比率を ×{} にした（表示 {:.0}%）", w, h, r, 100.0 / r);
+                    self.last_update = fl!("fit-too-large", size = format!("{w}×{h}"), ratio = r.to_string(), percent = format!("{:.0}", 100.0 / r));
                     self.st.render_ratio = r;
                 }
             }
@@ -708,7 +745,7 @@ impl App {
         }
         // 戻した値は覚えない（忘れた状態のままにする。次に変えたときから、また覚える）
         self.view_rebase = true;
-        self.last_update = "設定をすべて既定に戻した".into();
+        self.last_update = fl!("reset-all-done");
         info!("panel settings reset to the configuration files");
     }
 
@@ -820,7 +857,7 @@ impl App {
             swap.extent.height,
             self.st.max_spp
         );
-        install_fonts(&self.egui_ctx);
+        install_fonts(&self.egui_ctx, &self.language);
         self.egui_state = Some(EguiState::new(self.egui_ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, None));
         self.gpu = Some(Gpu { ctx, gpu, swap, prog, tone, denoiser: None, tone_denoised: None, egui_renderer, cmd, acquired, fence, timestamps, ts_period_ms });
         self.window = Some(window);
@@ -832,78 +869,78 @@ impl App {
 
         let st = &mut self.st;
         ui.separator();
-        ui.strong("環境マップ");
+        ui.strong(fl!("panel-environment"));
         let mut chosen: Option<String> = None;
         let mut open_dialog = false;
         ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("hdr").width(220.0).selected_text(environment_label(&self.env_path)).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("hdr").width(220.0).selected_text(env_label(&self.env_path)).show_ui(ui, |ui| {
                 for (gi, group) in self.env_list.iter().enumerate() {
                     if gi > 0 {
                         ui.separator();
                     }
                     for p in group {
-                        let r = ui.selectable_label(same_env(p, &self.env_path), environment_label(p));
-                        let r = if is_builtin(p) { r.on_hover_text("灰色の撮影ブースと大きなソフトボックス") } else { r.on_hover_text(p) };
+                        let r = ui.selectable_label(same_env(p, &self.env_path), env_label(p));
+                        let r = if is_builtin(p) { r.on_hover_text(fl!("env-studio-tip")) } else { r.on_hover_text(p) };
                         if r.clicked() {
                             chosen = Some(p.clone());
                         }
                     }
                 }
             });
-            if ui.add_enabled(self.open_dialog.is_none(), egui::Button::new("開く...")).on_hover_text(".hdr / .exr を選ぶ（ウィンドウへのドラッグ＆ドロップでも可）").clicked() {
+            if ui.add_enabled(self.open_dialog.is_none(), egui::Button::new(fl!("env-open"))).on_hover_text(fl!("env-open-tip")).clicked() {
                 open_dialog = true;
             }
         });
-        ui.weak("選んだものは、この基板の次回の表示にも使う");
+        ui.weak(fl!("env-remember-hint"));
         if let Some((p, _)) = &self.env_job {
-            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), format!("読み込み中: {p}"));
+            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), fl!("env-loading", path = p.as_str()));
         }
         if !self.env_error.is_empty() {
             ui.colored_label(egui::Color32::from_rgb(255, 102, 102), &self.env_error);
         }
-        if ui.add(egui::Slider::new(&mut st.env_intensity, 0.05..=8.0).logarithmic(true).text("強さ")).changed() {
+        if ui.add(egui::Slider::new(&mut st.env_intensity, 0.05..=8.0).logarithmic(true).text(fl!("env-intensity"))).changed() {
             st.dirty = true;
         }
-        if ui.add(egui::Slider::new(&mut st.env_rotation_deg, -180.0..=180.0).suffix("°").text("回転")).changed() {
+        if ui.add(egui::Slider::new(&mut st.env_rotation_deg, -180.0..=180.0).suffix("°").text(fl!("env-rotation"))).changed() {
             st.dirty = true;
         }
 
         ui.separator();
-        ui.strong("露出");
+        ui.strong(fl!("panel-exposure"));
         ui.horizontal(|ui| {
             ui.add(egui::Slider::new(&mut st.exposure, -6.0..=6.0).text("EV"));
-            if ui.button("自動").clicked() {
+            if ui.button(fl!("exposure-auto")).clicked() {
                 st.auto_exposure_requested = true;
             }
             if ui.button("0").clicked() {
                 st.exposure = 0.0;
             }
         });
-        ui.add(egui::Slider::new(&mut st.glow, 0.0..=4.0).text("グロー"))
-            .on_hover_text("点灯した LED など、とても明るい光が周りへにじむ強さ（0 でなし）。保存する画像にも入る");
+        ui.add(egui::Slider::new(&mut st.glow, 0.0..=4.0).text(fl!("glow")))
+            .on_hover_text(fl!("glow-tip"));
         if st.glow > 0.0 {
-            ui.add(egui::Slider::new(&mut st.glow_threshold, 0.5..=20.0).logarithmic(true).text("しきい値"))
-                .on_hover_text("これより明るい光だけがにじむ（露出をかけた後の RGB の最大。1 が画面の白）。白い基板や部品までにじむときは上げる");
-            ui.add(egui::Slider::new(&mut st.glow_spread, 0.0..=1.0).text("広がり"))
-                .on_hover_text("にじみの広がり。小さいと光のすぐ近くに締まり、1 で画面の大きさ近くまで薄く広がる");
+            ui.add(egui::Slider::new(&mut st.glow_threshold, 0.5..=20.0).logarithmic(true).text(fl!("glow-threshold")))
+                .on_hover_text(fl!("glow-threshold-tip"));
+            ui.add(egui::Slider::new(&mut st.glow_spread, 0.0..=1.0).text(fl!("glow-spread")))
+                .on_hover_text(fl!("glow-spread-tip"));
         }
         {
             let on_cpu = self.gpu.as_ref().and_then(|g| g.denoiser.as_ref()).is_some_and(|d| d.device_name() == "CPU");
             ui.horizontal(|ui| {
-                ui.checkbox(&mut st.denoise, "ノイズ除去 (OIDN)");
+                ui.checkbox(&mut st.denoise, fl!("denoise"));
                 if let Some(d) = self.gpu.as_ref().and_then(|g| g.denoiser.as_ref()) {
                     ui.weak(format!("{}, {:.0} ms", d.device_name(), self.last_denoise_ms));
-                    if on_cpu && ui.button("今かける (D)").clicked() {
+                    if on_cpu && ui.button(fl!("denoise-now")).clicked() {
                         st.denoise_requested = true;
                     }
                 } else if self.denoiser_tried && st.denoise {
-                    ui.weak("使用できません");
+                    ui.weak(fl!("denoise-unavailable"));
                 }
             });
             if st.denoise {
-                ui.add(egui::Slider::new(&mut st.denoise_strength, 0.0..=1.0).text("強さ")).on_hover_text("元の画像と混ぜる割合（1 で OIDN の結果そのまま。下げると細部やざらつきが少し残る）");
+                ui.add(egui::Slider::new(&mut st.denoise_strength, 0.0..=1.0).text(fl!("denoise-strength"))).on_hover_text(fl!("denoise-strength-tip"));
                 if on_cpu {
-                    ui.weak("CPU のため、収束時と D キーのときだけかけます");
+                    ui.weak(fl!("denoise-cpu-hint"));
                 }
                 if !self.denoise_error.is_empty() {
                     ui.colored_label(egui::Color32::from_rgb(255, 102, 102), &self.denoise_error);
@@ -912,7 +949,7 @@ impl App {
         }
 
         ui.separator();
-        ui.strong("積分器");
+        ui.strong(fl!("panel-integrator"));
         let integrators = ["pt", "bdpt", "vcm"];
         let mut cur = integrators.iter().position(|i| *i == self.prep.cfg.integrator).unwrap_or(0);
         ui.horizontal(|ui| {
@@ -925,43 +962,43 @@ impl App {
             st.integrator_changed = true;
         }
         ui.weak(match cur {
-            0 => "単方向（速い）",
-            1 => "双方向（光源側の経路とつなぐ）",
-            _ => "双方向＋近傍のまとめ（透明な物体越しの集光模様も収束）",
+            0 => fl!("integrator-pt-hint"),
+            1 => fl!("integrator-bdpt-hint"),
+            _ => fl!("integrator-vcm-hint"),
         });
 
         ui.separator();
-        ui.strong("レンズ");
+        ui.strong(fl!("panel-lens"));
         {
             let l = &mut self.prep.cfg.lens;
             let mut ch = false;
             ui.horizontal(|ui| {
-                ch |= ui.radio_value(&mut l.model, LensModel::Pinhole, "ピンホール").changed();
-                ch |= ui.radio_value(&mut l.model, LensModel::Thin, "薄レンズ").changed();
-                ch |= ui.radio_value(&mut l.model, LensModel::Realistic, "実レンズ").changed();
+                ch |= ui.radio_value(&mut l.model, LensModel::Pinhole, fl!("lens-pinhole")).changed();
+                ch |= ui.radio_value(&mut l.model, LensModel::Thin, fl!("lens-thin")).changed();
+                ch |= ui.radio_value(&mut l.model, LensModel::Realistic, fl!("lens-realistic")).changed();
             });
             if l.model != LensModel::Pinhole {
-                ch |= ui.add(egui::Slider::new(&mut l.f_number, 0.7..=22.0).logarithmic(true).text("F 値")).changed();
+                ch |= ui.add(egui::Slider::new(&mut l.f_number, 0.7..=22.0).logarithmic(true).text(fl!("lens-f-number"))).changed();
                 let mut focus = if l.focus_distance_mm > 0.0 { l.focus_distance_mm } else { st.distance };
-                if ui.add(egui::Slider::new(&mut focus, 5.0..=5000.0).logarithmic(true).text("ピント (mm)")).changed() {
+                if ui.add(egui::Slider::new(&mut focus, 5.0..=5000.0).logarithmic(true).text(fl!("lens-focus"))).changed() {
                     l.focus_distance_mm = focus;
                     ch = true;
                 }
-                ui.weak("Ctrl + クリック：その点にピントを合わせる");
+                ui.weak(fl!("lens-focus-hint"));
             }
             if l.model == LensModel::Thin {
-                ch |= ui.add(egui::Slider::new(&mut l.focal_length_mm, 10.0..=300.0).logarithmic(true).text("焦点距離 (mm)")).changed();
-                ch |= ui.add(egui::Slider::new(&mut l.blades, 0..=12).text("羽根の枚数")).changed();
+                ch |= ui.add(egui::Slider::new(&mut l.focal_length_mm, 10.0..=300.0).logarithmic(true).text(fl!("lens-focal-length"))).changed();
+                ch |= ui.add(egui::Slider::new(&mut l.blades, 0..=12).text(fl!("lens-blades"))).changed();
                 if l.blades >= 3 {
-                    ch |= ui.add(egui::Slider::new(&mut l.blade_rotation_deg, 0.0..=360.0).suffix("°").text("羽根の回転")).changed();
-                    ch |= ui.add(egui::Slider::new(&mut l.blade_roundness, 0.0..=1.0).text("羽根の丸み")).changed();
+                    ch |= ui.add(egui::Slider::new(&mut l.blade_rotation_deg, 0.0..=360.0).suffix("°").text(fl!("lens-blade-rotation"))).changed();
+                    ch |= ui.add(egui::Slider::new(&mut l.blade_roundness, 0.0..=1.0).text(fl!("lens-blade-roundness"))).changed();
                 }
-                ch |= ui.checkbox(&mut l.natural_vignetting, "周辺減光 (cos⁴)").changed();
-                ch |= ui.add(egui::Slider::new(&mut l.optical_vignetting, 0.0..=1.0).text("口径食")).changed();
-                ch |= ui.add(egui::Slider::new(&mut l.abbe_number, 0.0..=80.0).text("軸上色収差 (アッベ数)")).changed();
-                ch |= ui.add(egui::Slider::new(&mut l.lateral_ca, 0.0..=0.02).text("倍率色収差")).changed();
+                ch |= ui.checkbox(&mut l.natural_vignetting, fl!("lens-natural-vignetting")).changed();
+                ch |= ui.add(egui::Slider::new(&mut l.optical_vignetting, 0.0..=1.0).text(fl!("lens-optical-vignetting"))).changed();
+                ch |= ui.add(egui::Slider::new(&mut l.abbe_number, 0.0..=80.0).text(fl!("lens-axial-ca"))).changed();
+                ch |= ui.add(egui::Slider::new(&mut l.lateral_ca, 0.0..=0.02).text(fl!("lens-lateral-ca"))).changed();
                 if (l.abbe_number > 0.0 || l.lateral_ca > 0.0) && !st.spectral {
-                    ui.weak("色収差は分光モードで有効");
+                    ui.weak(fl!("lens-ca-hint"));
                 }
             }
             if ch {
@@ -970,11 +1007,11 @@ impl App {
         }
 
         ui.separator();
-        ui.strong("色の計算");
+        ui.strong(fl!("panel-color"));
         let mut spectral = st.spectral;
         ui.horizontal(|ui| {
             ui.radio_value(&mut spectral, false, "RGB");
-            ui.radio_value(&mut spectral, true, "分光（4 波長）");
+            ui.radio_value(&mut spectral, true, fl!("color-spectral"));
         });
         if spectral != st.spectral {
             st.spectral = spectral;
@@ -982,66 +1019,67 @@ impl App {
         }
 
         ui.separator();
-        ui.strong("表面");
-        if ui.add(egui::Slider::new(&mut st.bump_intensity, 0.0..=2.0).text("凹凸の強さ")).changed() {
+        ui.strong(fl!("panel-surface"));
+        if ui.add(egui::Slider::new(&mut st.bump_intensity, 0.0..=2.0).text(fl!("bump-intensity"))).changed() {
             st.materials_dirty = true;
         }
         {
             let presets = mask_presets();
-            let current = st.mask_choice.map(|i| presets[i].name).unwrap_or("設定どおり");
+            let current = st.mask_choice.map(|i| presets[i].name.to_string()).unwrap_or_else(|| fl!("mask-as-configured"));
             egui::ComboBox::from_id_salt("mask").width(200.0).selected_text(current).show_ui(ui, |ui| {
-                if ui.selectable_label(st.mask_choice.is_none(), "設定どおり").clicked() && st.mask_choice.is_some() {
+                if ui.selectable_label(st.mask_choice.is_none(), fl!("mask-as-configured")).clicked() && st.mask_choice.is_some() {
                     st.mask_choice = None;
                     st.mask_changed = true;
                 }
                 for (i, p) in presets.iter().enumerate() {
                     let sel = st.mask_choice == Some(i);
-                    if ui.selectable_label(sel, p.name).on_hover_text(p.note).clicked() && !sel {
+                    let note = i18n::get(&format!("mask-note-{}", p.name)).unwrap_or_else(|| p.note.to_string());
+                    if ui.selectable_label(sel, p.name).on_hover_text(note).clicked() && !sel {
                         st.mask_choice = Some(i);
                         st.mask_changed = true;
                     }
                 }
             });
-            ui.weak("レジストの色（プリセット）");
+            ui.weak(fl!("mask-hint"));
         }
 
         ui.separator();
-        ui.strong("表示");
+        ui.strong(fl!("panel-display"));
         size_controls(ui, st);
         ui.horizontal(|ui| {
-            ui.radio_value(&mut st.mode, DisplayMode::Beauty, "画像");
-            ui.radio_value(&mut st.mode, DisplayMode::Albedo, "アルベド");
-            ui.radio_value(&mut st.mode, DisplayMode::Normal, "法線");
+            ui.radio_value(&mut st.mode, DisplayMode::Beauty, fl!("mode-image"));
+            ui.radio_value(&mut st.mode, DisplayMode::Albedo, fl!("mode-albedo"));
+            ui.radio_value(&mut st.mode, DisplayMode::Normal, fl!("mode-normal"));
         });
         {
             let mut e = 4u32;
             while (1u32 << e) < st.max_spp && e < 16 {
                 e += 1;
             }
-            if ui.add(egui::Slider::new(&mut e, 4..=16).custom_formatter(|v, _| format!("2^{} = {}", v as u32, 1u32 << (v as u32))).text("最大 spp")).changed() {
+            if ui.add(egui::Slider::new(&mut e, 4..=16).custom_formatter(|v, _| format!("2^{} = {}", v as u32, 1u32 << (v as u32))).text(fl!("max-spp"))).changed() {
                 st.max_spp = 1 << e;
             }
         }
 
         ui.separator();
-        ui.strong("カメラ");
+        ui.strong(fl!("panel-camera"));
         let mut fov = st.fov as f32;
-        if ui.add(egui::Slider::new(&mut fov, 5.0..=90.0).suffix("°").text("画角")).changed() {
+        if ui.add(egui::Slider::new(&mut fov, 5.0..=90.0).suffix("°").text(fl!("camera-fov"))).changed() {
             st.fov = fov as f64;
             st.dirty = true;
         }
-        ui.label(format!("仰角 {:.0}°  方位 {:.0}°", st.elevation, st.azimuth.rem_euclid(360.0)));
+        ui.label(fl!("camera-angles", elevation = format!("{:.0}", st.elevation), azimuth = format!("{:.0}", st.azimuth.rem_euclid(360.0))));
         ui.horizontal(|ui| {
-            if ui.button("視点を戻す (R)").clicked() {
+            if ui.button(fl!("camera-reset")).clicked() {
                 st.reset_requested = true;
             }
-            if ui.button("保存 (S)").clicked() {
+            if ui.button(fl!("camera-save")).clicked() {
                 st.save_requested = true;
             }
         });
         ui.separator();
-        ui.weak("左ドラッグ: 回転  右ドラッグ: 移動  ホイール: 拡大  クリック: 部品を選ぶ");
-        ui.weak("F1 / Tab: このパネルの表示切り替え");
+        ui.weak(fl!("panel-help-mouse"));
+        ui.weak(fl!("panel-help-toggle"));
         if let Some(p) = chosen {
             self.start_env_load(p);
         }
@@ -1169,16 +1207,21 @@ impl App {
             material: material.to_string(),
             global: scope == 2,
         };
-        let r = if clear { clear_material(&o).map(|f| f.map(|f| (f, "上書きを消した".to_string()))) } else { set_material(&o).map(|f| Some((f, format!("{} にした", material)))) };
+        let r = if clear { clear_material(&o) } else { set_material(&o).map(Some) };
         match r {
-            Ok(Some((file, what))) => {
-                let target = if part.is_empty() { format!("{} の全部位", sel.reference) } else { format!("{} の {}", sel.reference, part) };
-                self.last_update = format!("{target}を{what}（{}）", file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default());
+            Ok(Some(file)) => {
+                let (reference, name) = (sel.reference.as_str(), file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default());
+                self.last_update = match (clear, part.is_empty()) {
+                    (false, true) => fl!("material-set-all", reference = reference, material = material, file = name),
+                    (false, false) => fl!("material-set-part", reference = reference, part = part, material = material, file = name),
+                    (true, true) => fl!("material-cleared-all", reference = reference, file = name),
+                    (true, false) => fl!("material-cleared-part", reference = reference, part = part, file = name),
+                };
                 info!("material: {} {} -> {} ({})", sel.reference, if part.is_empty() { "*" } else { part }, if clear { "(cleared)" } else { material }, file.display());
                 self.material_error.clear();
                 self.materials_dirty_files = true;
             }
-            Ok(None) => self.material_error = "消す上書きが無い（規則どおりになっている）".into(),
+            Ok(None) => self.material_error = fl!("material-nothing-to-clear"),
             Err(e) => {
                 warn!("material: {e}");
                 self.material_error = e;
@@ -1211,15 +1254,15 @@ impl App {
 
     /// 選んだ部品の欄：部位ごとの材質と、決まった段階。材質を選ぶと設定ファイルに書いて描き直す
     fn selection_panel(&mut self, ui: &mut egui::Ui) {
-        ui.strong("選んだ部品");
+        ui.strong(fl!("sel-title"));
         let Some(sel) = self.selected.clone() else {
-            ui.weak("部品をクリックすると、材質を変えられる");
+            ui.weak(fl!("sel-none-hint"));
             return;
         };
         let mut deselect = false;
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(&sel.reference).strong().color(egui::Color32::from_rgb(255, 170, 40)));
-            deselect = ui.small_button("選択を外す").clicked();
+            deselect = ui.small_button(fl!("sel-deselect")).clicked();
         });
         if deselect {
             self.flush_emit_edit(true);
@@ -1235,19 +1278,19 @@ impl App {
             return;
         }
         if self.prep.cfg.lens.model == LensModel::Realistic {
-            ui.weak("実レンズでは輪郭線を表示しない");
+            ui.weak(fl!("sel-no-outline"));
         }
         let Some(mi) = sel.model else {
             // 代わりの箱：3D モデルが無い理由
             let missing: Vec<_> = self.prep.scene.missing.iter().filter(|m| m.reference == sel.reference).collect();
             if missing.is_empty() {
-                ui.colored_label(egui::Color32::from_rgb(255, 204, 77), "3D モデルを分割中（終わるまで箱で表示）");
+                ui.colored_label(egui::Color32::from_rgb(255, 204, 77), fl!("sel-meshing"));
             } else {
-                ui.colored_label(egui::Color32::from_rgb(255, 204, 77), "3D モデルが無いので、代わりの箱で表示している（材質は変えられない）");
+                ui.colored_label(egui::Color32::from_rgb(255, 204, 77), fl!("sel-missing"));
                 for m in missing {
-                    ui.weak(format!("{}\n→ {}（{}）", m.spec, m.resolved, m.reason));
+                    ui.weak(fl!("sel-missing-model", spec = m.spec.as_str(), resolved = m.resolved.as_str(), reason = m.reason.as_str()));
                 }
-                ui.weak("見つける場所は、基板の設定ファイル <名前>.krbr の [paths] model_search_dirs で足せる");
+                ui.weak(fl!("sel-missing-hint"));
             }
             return;
         };
@@ -1267,22 +1310,22 @@ impl App {
             })
             .unwrap_or_default();
         ui.horizontal(|ui| {
-            ui.radio_value(&mut self.assign_scope, 0, "この部品").on_hover_text("この基板のこの部品だけ（基板の設定ファイル <名前>.krbr の [ref.<部品番号>]）");
-            ui.radio_value(&mut self.assign_scope, 1, "このモデル").on_hover_text("この基板で同じ 3D モデルを使う部品すべて（<名前>.krbr の [[model]]）");
-            ui.radio_value(&mut self.assign_scope, 2, "全基板").on_hover_text("同じ 3D モデルを使うすべての基板（%APPDATA%\\krbr\\model_map.toml）");
+            ui.radio_value(&mut self.assign_scope, 0, fl!("scope-part")).on_hover_text(fl!("scope-part-tip"));
+            ui.radio_value(&mut self.assign_scope, 1, fl!("scope-model")).on_hover_text(fl!("scope-model-tip"));
+            ui.radio_value(&mut self.assign_scope, 2, fl!("scope-all-boards")).on_hover_text(fl!("scope-all-boards-tip"));
         });
         // 書き込む先より優先される上書きがあると、書いても見た目は変わらない
         let shadowed_by_ref = self.assign_scope >= 1 && rows.iter().any(|r| r.source.starts_with("ref "));
         let shadowed_by_project = self.assign_scope == 2 && rows.iter().any(|r| r.source == "model (project)");
         if shadowed_by_ref {
-            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), "この部品には部品番号の上書きがあり、そちらが優先される（「この部品」で上書きを消すと反映される）");
+            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), fl!("sel-shadowed-ref"));
         } else if shadowed_by_project {
-            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), "このプロジェクトにモデルの設定があり、そちらが優先される（「このモデル」で上書きを消すと反映される）");
+            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), fl!("sel-shadowed-project"));
         }
         // 書き込むもの：(部位（空なら全部位）, 材質, 上書きを消すか)
         let mut actions: Vec<(String, String, bool)> = Vec::new();
         let names = self.material_names.clone();
-        let combo = |ui: &mut egui::Ui, id: String, current: &str, label: &str| -> Option<String> {
+        let combo = |ui: &mut egui::Ui, id: String, current: &str, label: String| -> Option<String> {
             let mut chosen = None;
             egui::ComboBox::from_id_salt(id).width(105.0).selected_text(label).show_ui(ui, |ui| {
                 for n in &names {
@@ -1293,8 +1336,7 @@ impl App {
             });
             chosen
         };
-        let pattern_tip = "表面の模様（細かな凹凸と粗さのむら）。外すと、なめらかな面になる（材質名に +smooth が付く）";
-        let emit_tip = "この部位を光らせる（LED の点灯など）。色と明るさは下の行で変える（材質名に +emit=#rrggbb,<cd/m²> が付く）";
+        let (pattern_tip, emit_tip) = (fl!("part-pattern-tip"), fl!("part-emit-tip"));
         // 発光の色・明るさを編集中なら、その値を表示に使う（書き込んで組み直しが終わるまで）
         let pending = self.emit_edit.as_ref().filter(|e| e.reference == sel.reference).map(|e| (e.part.clone(), e.material.clone()));
         // 色・明るさの変更：(部位, 材質)。止まってから書き込む
@@ -1308,18 +1350,18 @@ impl App {
                 };
                 let (base, smooth, emission) = parse_variant(&material);
                 // 表示では "kicad:" を省く（カーソルを乗せると全体が出る）
-                let shown = if key.is_empty() { "（全体）".to_string() } else { key.strip_prefix("kicad:").unwrap_or(&key).to_string() };
-                ui.label(shown).on_hover_text(format!("{}\n決まった段階: {}", r.part_keys, r.source));
+                let shown = if key.is_empty() { fl!("part-whole") } else { key.strip_prefix("kicad:").unwrap_or(&key).to_string() };
+                ui.label(shown).on_hover_text(fl!("part-source-tip", keys = r.part_keys.as_str(), source = r.source.as_str()));
                 // 材質を選び直しても、模様のあり・なしと発光は保つ
-                if let Some(m) = combo(ui, format!("part{i}"), base, base) {
+                if let Some(m) = combo(ui, format!("part{i}"), base, base.to_string()) {
                     actions.push((key.clone(), with_emission(&with_smooth(&m, smooth), emission), false));
                 }
                 let mut pattern = !smooth;
-                if ui.checkbox(&mut pattern, "模様").on_hover_text(pattern_tip).changed() {
+                if ui.checkbox(&mut pattern, fl!("part-pattern")).on_hover_text(&pattern_tip).changed() {
                     actions.push((key.clone(), with_smooth(&material, !pattern), false));
                 }
                 let mut emit = emission.is_some();
-                if ui.checkbox(&mut emit, "発光").on_hover_text(emit_tip).changed() {
+                if ui.checkbox(&mut emit, fl!("part-emit")).on_hover_text(&emit_tip).changed() {
                     let e = emit.then(|| Emission { srgb: emission_color_of_part(&r.part_keys), luminance: DEFAULT_EMISSION_LUMINANCE });
                     actions.push((key.clone(), with_emission(&material, e), false));
                 }
@@ -1328,10 +1370,10 @@ impl App {
                     ui.label("");
                     let mut srgb = e.srgb;
                     let mut luminance = e.luminance;
-                    let mut changed = ui.color_edit_button_srgb(&mut srgb).on_hover_text("発光の色").changed();
+                    let mut changed = ui.color_edit_button_srgb(&mut srgb).on_hover_text(fl!("emit-color-tip")).changed();
                     let speed = (luminance * 0.01).max(1.0);
                     let drag = egui::DragValue::new(&mut luminance).range(0.0..=1.0e6).speed(speed).max_decimals(0).suffix(" cd/m²");
-                    changed |= ui.add(drag).on_hover_text("発光の明るさ（輝度）。ドラッグか入力で変える。露出をかけて画面の白（1）の何倍になるかが、グローのしきい値を超えるとにじむ（5000 で露出 0.7 EV なら約 8 倍）。上げるほど芯が白っぽくなる").changed();
+                    changed |= ui.add(drag).on_hover_text(fl!("emit-luminance-tip")).changed();
                     ui.label("");
                     ui.end_row();
                     if changed {
@@ -1340,12 +1382,12 @@ impl App {
                 }
             }
             let all_smooth = !rows.is_empty() && rows.iter().all(|r| split_variant(&r.material).1);
-            ui.label("全部位");
-            if let Some(m) = combo(ui, "all".into(), "", "まとめて選ぶ") {
+            ui.label(fl!("parts-all"));
+            if let Some(m) = combo(ui, "all".into(), "", fl!("parts-choose-all")) {
                 actions.push((String::new(), with_smooth(&m, all_smooth), false));
             }
             let mut pattern = !all_smooth;
-            if ui.checkbox(&mut pattern, "模様").on_hover_text("全部位の表面の模様をまとめて切り替える").changed() {
+            if ui.checkbox(&mut pattern, fl!("part-pattern")).on_hover_text(fl!("parts-pattern-all-tip")).changed() {
                 for r in &rows {
                     let key = r.part_keys.split(' ').next().unwrap_or("").to_string();
                     actions.push((key, with_smooth(&r.material, !pattern), false));
@@ -1365,11 +1407,11 @@ impl App {
         let mut sources: Vec<&str> = rows.iter().map(|r| r.source.as_str()).collect();
         sources.dedup();
         if let [one] = sources.as_slice() {
-            ui.weak(format!("決まった段階: {one}"));
+            ui.weak(fl!("sel-source", source = one.to_string()));
         } else if !sources.is_empty() {
-            ui.weak("決まった段階は部位ごとに違う（部位の名前にカーソルを乗せると出る）");
+            ui.weak(fl!("sel-source-varies"));
         }
-        if ui.button("上書きを消す（規則どおりに戻す）").on_hover_text("選んだ書き込み先の、この部品（モデル）の設定を消す").clicked() {
+        if ui.button(fl!("sel-clear-override")).on_hover_text(fl!("sel-clear-override-tip")).clicked() {
             actions.push((String::new(), String::new(), true));
         }
         if !self.material_error.is_empty() {
@@ -1430,7 +1472,7 @@ impl App {
                 self.reload_job = None;
                 self.watcher = None;
                 error!("board reload thread failed; watching stopped");
-                self.last_update = "読み直しに失敗したので、保存の監視を止めた".into();
+                self.last_update = fl!("reload-thread-failed");
                 return Ok(());
             }
         };
@@ -1442,7 +1484,7 @@ impl App {
         match d.result {
             Err(e) => {
                 warn!("reload {}: {} (keeping the previous board; waiting for the next save)", self.prep.board.file.display(), e);
-                self.last_update = format!("読み直せなかった（次の保存を待つ）: {e}");
+                self.last_update = fl!("reload-error", error = e);
             }
             Ok((board, mut scene, stats)) => {
                 if let Some(b) = board {
@@ -1463,19 +1505,30 @@ impl App {
                 self.st.dirty = true;
                 let pending = self.prep.scene.pending_models;
                 if d.saved {
-                    let since = d.saved_at.and_then(|t| t.elapsed().ok()).map(|e| format!("、保存から {:.2} 秒", e.as_secs_f64())).unwrap_or_default();
+                    let since = d.saved_at.and_then(|t| t.elapsed().ok()).map(|e| fl!("reload-since", seconds = format!("{:.2}", e.as_secs_f64()))).unwrap_or_default();
                     let df = &stats.diff;
-                    let full = if df.full { "（全体）" } else { "" };
-                    self.last_update = format!("読み直し：変更 {}・追加 {}・削除 {}{}、タイル {} 枚（解析 {:.0} ms、組み立て {:.0} ms、GPU {:.0} ms{}）", df.changed, df.added, df.removed, full, stats.tiles_rebuilt, stats.parse_ms, stats.build_ms, gpu_ms, since);
+                    let full = if df.full { fl!("reload-full") } else { String::new() };
+                    self.last_update = fl!(
+                        "reload-done",
+                        changed = df.changed.to_string(),
+                        added = df.added.to_string(),
+                        removed = df.removed.to_string(),
+                        full = full,
+                        tiles = stats.tiles_rebuilt.to_string(),
+                        parse = format!("{:.0}", stats.parse_ms),
+                        build = format!("{:.0}", stats.build_ms),
+                        gpu = format!("{gpu_ms:.0}"),
+                        since = since
+                    );
                     let meshing = if pending > 0 { format!(", {pending} model(s) still meshing") } else { String::new() };
                     info!("reload: {} changed, {} added, {} removed{}, {} tile(s) rebuilt; parse {:.0} ms, build {:.0} ms, GPU {:.0} ms{}", df.changed, df.added, df.removed, if df.full { " (full)" } else { "" }, stats.tiles_rebuilt, stats.parse_ms, stats.build_ms, gpu_ms, meshing);
                 } else if d.materials {
                     info!("material assignment updated; scene rebuilt");
                 } else if d.silk {
-                    self.last_update = "線フォントの文字（kicad-cli）を反映した".into();
+                    self.last_update = fl!("silk-applied");
                     info!("stroke-font silkscreen updated; scene rebuilt");
                 } else {
-                    self.last_update = if pending > 0 { format!("3D モデルを反映した（残り {pending}）") } else { "3D モデルをすべて反映した".into() };
+                    self.last_update = if pending > 0 { fl!("models-applied", pending = pending.to_string()) } else { fl!("models-all-applied") };
                     info!("models finished meshing; scene rebuilt ({} pending)", pending);
                 }
             }
@@ -1488,7 +1541,7 @@ impl App {
         if self.open_dialog.is_some() {
             return;
         }
-        let mut dlg = rfd::FileDialog::new().set_title("環境マップを開く").add_filter("環境マップ (*.hdr, *.exr)", &["hdr", "exr"]);
+        let mut dlg = rfd::FileDialog::new().set_title(fl!("dlg-open-env-title")).add_filter(fl!("dlg-env-filter"), &["hdr", "exr"]);
         if let Some(dir) = Path::new(&self.env_path).parent().filter(|d| !is_builtin(&self.env_path) && d.is_dir()) {
             dlg = dlg.set_directory(dir);
         }
@@ -1503,12 +1556,13 @@ impl App {
     fn set_settings_location(&mut self, loc: board_file::Location) {
         if let Err(e) = board_file::set_location(loc) {
             warn!("board settings location: {e}");
-            self.last_update = format!("置き場所を変えられなかった：{e}");
+            self.last_update = fl!("settings-location-failed", error = e.to_string());
             return;
         }
         let file = board_file::resolve(&self.prep.board.file);
         info!("board settings location: {:?} ({})", loc, file.display());
-        self.last_update = if file.is_file() { format!("基板の設定ファイルの置き場所を変えた：{}", file.display()) } else { format!("基板の設定ファイルの置き場所を変えた（この基板はまだ無い。書くときに {} に作る）", file.display()) };
+        let shown = file.display().to_string();
+        self.last_update = if file.is_file() { fl!("settings-location-changed", file = shown) } else { fl!("settings-location-not-yet", file = shown) };
     }
 
     /// 「名前を付けて保存」のダイアログを別スレッドで開く（その間も描画を続ける）。最初は基板のフォルダ
@@ -1518,8 +1572,8 @@ impl App {
         }
         let ext = format.extension();
         let (title, filter) = match format {
-            SaveFormat::Png => ("PNG として保存", "PNG 画像 (*.png)"),
-            SaveFormat::Exr => ("EXR として保存", "OpenEXR（リニア） (*.exr)"),
+            SaveFormat::Png => (fl!("dlg-save-png-title"), fl!("dlg-png-filter")),
+            SaveFormat::Exr => (fl!("dlg-save-exr-title"), fl!("dlg-exr-filter")),
         };
         let mut dlg = rfd::FileDialog::new().set_title(title).add_filter(filter, &[ext]).set_file_name(format!("{}.{ext}", self.stem));
         if let Some(dir) = self.prep.board.file.parent().filter(|d| d.is_dir()) {
@@ -1542,11 +1596,11 @@ impl App {
         egui::Panel::top("toolbar").show(root, |ui| {
             ui.horizontal(|ui| {
                 if done {
-                    ui.add_enabled(false, egui::Button::new("✔ 完了")).on_disabled_hover_text("最大 spp に達したので、描き終えて止まっている。続けて描くなら、設定パネルで最大 spp を上げる");
+                    ui.add_enabled(false, egui::Button::new(fl!("toolbar-done"))).on_disabled_hover_text(fl!("toolbar-done-tip"));
                     return;
                 }
-                let label = if st.paused { "▶ 再開" } else { "■ 一時停止" };
-                let tip = "レンダリングを一時停止する（P）。サンプルを積み足さないので GPU の負荷がほぼ無くなり、操作が軽くなる。\nカメラを動かしたときは 1 サンプルだけ描いて止まる";
+                let label = if st.paused { fl!("toolbar-resume") } else { fl!("toolbar-pause") };
+                let tip = fl!("toolbar-pause-tip");
                 if ui.add(egui::Button::new(label).selected(st.paused)).on_hover_text(tip).clicked() {
                     st.paused = !st.paused;
                 }
@@ -1568,13 +1622,13 @@ impl App {
         let method = if g.ctx.use_rt_pipeline { "ray tracing pipeline" } else { "ray query" };
         let mut notes: Vec<(String, bool)> = Vec::new();
         if self.reload_job.is_some() {
-            notes.push(("基板を読み直し中...".into(), true));
+            notes.push((fl!("status-reloading"), true));
         }
         if self.silk_job.is_some() {
-            notes.push(("線フォントの文字を書き出し中（kicad-cli）...".into(), true));
+            notes.push((fl!("status-silk"), true));
         }
         if self.prep.scene.pending_models > 0 {
-            notes.push((format!("3D モデルを分割中: {}（それまでは箱で表示）", self.prep.scene.pending_models), true));
+            notes.push((fl!("status-meshing", count = self.prep.scene.pending_models.to_string()), true));
         }
         if !self.last_update.is_empty() {
             notes.push((self.last_update.clone(), false));
@@ -1582,35 +1636,35 @@ impl App {
         egui::Panel::bottom("status").show(root, |ui| {
             ui.horizontal_wrapped(|ui| {
                 if st.paused {
-                    ui.colored_label(yellow, "一時停止中");
+                    ui.colored_label(yellow, fl!("status-paused"));
                 } else if done {
-                    ui.colored_label(egui::Color32::from_rgb(120, 200, 120), "完了");
+                    ui.colored_label(egui::Color32::from_rgb(120, 200, 120), fl!("status-done"));
                 } else {
-                    ui.label("レンダリング中");
+                    ui.label(fl!("status-rendering"));
                 }
                 ui.add(egui::ProgressBar::new((samples as f32 / max_spp.max(1) as f32).min(1.0)).desired_width(140.0).text(format!("{samples} / {max_spp} spp")));
                 ui.separator();
-                ui.label(format!("経過 {}", format_duration(self.accum_wall.as_secs_f64())))
-                    .on_hover_text("今の累積を始めてからレンダリングにかかった時間（一時停止の間と完了後は数えない。視点などを変えると 0 から）");
+                ui.label(fl!("status-elapsed", time = format_duration(self.accum_wall.as_secs_f64())))
+                    .on_hover_text(fl!("status-elapsed-tip"));
                 if self.accum_measured > 0 {
-                    ui.label(format!("平均 {:.1} ms/spp（GPU {:.1} ms）", wall_per * 1000.0, self.accum_gpu_ms / measured))
-                        .on_hover_text("1 サンプルあたりの時間：経過時間 ÷ サンプル数（括弧内は GPU がサンプルを描いた時間だけ）");
+                    ui.label(fl!("status-average", wall = format!("{:.1}", wall_per * 1000.0), gpu = format!("{:.1}", self.accum_gpu_ms / measured)))
+                        .on_hover_text(fl!("status-average-tip"));
                     if !done && !st.paused {
-                        ui.label(format!("残り 約 {}", format_duration(wall_per * (max_spp - samples) as f64)));
+                        ui.label(fl!("status-remaining", time = format_duration(wall_per * (max_spp - samples) as f64)));
                     }
                 }
             });
             // 2 行目：描画の条件と、読み直しなどの知らせ（幅が足りなければ折り返す）
             ui.horizontal_wrapped(|ui| {
-                ui.weak(format!("{}・{}", g.prog.integrator_name().to_uppercase(), if st.spectral { "分光" } else { "RGB" }));
+                ui.weak(fl!("status-integrator", integrator = g.prog.integrator_name().to_uppercase(), color = if st.spectral { fl!("status-spectral") } else { "RGB".into() }));
                 ui.separator();
                 let (rw, rh) = (g.prog.targets().width, g.prog.targets().height);
-                ui.weak(format!("描画 {}×{}（表示 {:.0}%）", rw, rh, 100.0 * st.display.w as f64 / rw.max(1) as f64))
-                    .on_hover_text(if st.size_mode.is_some() { "決まったサイズ（メニューの「表示」→「描画のサイズ」）" } else { "ウィンドウに合わせる（3D 表示の領域 × レンダリングの比率）" });
+                ui.weak(fl!("status-render-size", width = rw.to_string(), height = rh.to_string(), percent = format!("{:.0}", 100.0 * st.display.w as f64 / rw.max(1) as f64)))
+                    .on_hover_text(if st.size_mode.is_some() { fl!("status-size-fixed-tip") } else { fl!("status-size-fit-tip") });
                 ui.separator();
                 ui.weak(format!("EV {:+.2}", st.exposure));
                 ui.separator();
-                ui.weak(format!("{}（{}）", info.name, method));
+                ui.weak(fl!("status-gpu", name = info.name.as_str(), method = method));
                 for (text, busy) in &notes {
                     ui.separator();
                     if *busy {
@@ -1624,28 +1678,29 @@ impl App {
     }
 
     fn menu_bar(&mut self, root: &mut egui::Ui) {
+        let language_choice = self.language_choice.clone();
         let st = &mut self.st;
         egui::Panel::top("menu").show(root, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("ファイル", |ui| {
-                    if ui.add(egui::Button::new("画像を保存").shortcut_text("S")).on_hover_text("決まった場所（out\\）に、番号を付けて PNG と EXR を保存する").clicked() {
+                ui.menu_button(fl!("menu-file"), |ui| {
+                    if ui.add(egui::Button::new(fl!("menu-save-image")).shortcut_text("S")).on_hover_text(fl!("menu-save-image-tip")).clicked() {
                         st.save_requested = true;
                         ui.close();
                     }
-                    if ui.button("PNG として保存...").on_hover_text("場所と名前を選んで保存する（露出・グロー・トーンマッピング済み）").clicked() {
+                    if ui.button(fl!("menu-save-png")).on_hover_text(fl!("menu-save-png-tip")).clicked() {
                         st.save_as_requested = Some(SaveFormat::Png);
                         ui.close();
                     }
-                    if ui.button("EXR として保存...").on_hover_text("場所と名前を選んで保存する（リニアの放射輝度。露出・グローはかけない）").clicked() {
+                    if ui.button(fl!("menu-save-exr")).on_hover_text(fl!("menu-save-exr-tip")).clicked() {
                         st.save_as_requested = Some(SaveFormat::Exr);
                         ui.close();
                     }
                     ui.separator();
-                    ui.menu_button("基板の設定ファイルの置き場所", |ui| {
+                    ui.menu_button(fl!("menu-settings-location"), |ui| {
                         let now = board_file::location();
                         let choices = [
-                            (board_file::Location::NextToBoard, "基板の横（<名前>.krbr）", "KiCad の基板と同じフォルダに置く。基板と一緒に持ち運べる"),
-                            (board_file::Location::ConfigDir, "全体設定のフォルダ（%APPDATA%\\krbr\\boards）", "KiCad のフォルダにファイルを増やさない"),
+                            (board_file::Location::NextToBoard, fl!("loc-next-to-board"), fl!("loc-next-to-board-tip")),
+                            (board_file::Location::ConfigDir, fl!("loc-config-dir"), fl!("loc-config-dir-tip")),
                         ];
                         for (loc, label, tip) in choices {
                             if ui.add(egui::Button::new(label).selected(now == loc)).on_hover_text(tip).clicked() {
@@ -1653,42 +1708,42 @@ impl App {
                                 ui.close();
                             }
                         }
-                        ui.weak("すべての基板に効く。ほかの基板のファイルは、次に開いたときに移す");
+                        ui.weak(fl!("loc-hint"));
                     });
-                    if ui.button("基板の設定ファイルを表示").on_hover_text("この基板の <名前>.krbr をエクスプローラーで表示する（まだ無ければ、置き場所のフォルダを開く）").clicked() {
+                    if ui.button(fl!("menu-reveal-settings")).on_hover_text(fl!("menu-reveal-settings-tip")).clicked() {
                         st.reveal_settings_requested = true;
                         ui.close();
                     }
                     ui.separator();
-                    if ui.add(egui::Button::new("終了").shortcut_text("Esc")).clicked() {
+                    if ui.add(egui::Button::new(fl!("menu-quit")).shortcut_text("Esc")).clicked() {
                         st.quit_requested = true;
                         ui.close();
                     }
                 });
-                ui.menu_button("表示", |ui| {
-                    if ui.add(egui::Button::new("設定パネル").selected(st.show_panel).shortcut_text("F1 / Tab")).clicked() {
+                ui.menu_button(fl!("menu-view"), |ui| {
+                    if ui.add(egui::Button::new(fl!("menu-settings-panel")).selected(st.show_panel).shortcut_text("F1 / Tab")).clicked() {
                         st.show_panel = !st.show_panel;
                         ui.close();
                     }
-                    if ui.add(egui::Button::new("レンダリングを一時停止").selected(st.paused).shortcut_text("P")).clicked() {
+                    if ui.add(egui::Button::new(fl!("menu-pause")).selected(st.paused).shortcut_text("P")).clicked() {
                         st.paused = !st.paused;
                         ui.close();
                     }
                     ui.separator();
-                    ui.menu_button("描画のサイズ", |ui| {
-                        if ui.add(egui::Button::new("ウィンドウに合わせる").selected(st.size_mode.is_none())).clicked() {
+                    ui.menu_button(fl!("menu-render-size"), |ui| {
+                        if ui.add(egui::Button::new(fl!("size-fit-window")).selected(st.size_mode.is_none())).clicked() {
                             st.size_mode = None;
                             ui.close();
                         }
-                        for (name, w, h) in SIZE_PRESETS {
-                            if ui.add(egui::Button::new(name).selected(st.size_mode == Some((w, h)))).clicked() {
+                        for (w, h) in SIZE_PRESETS {
+                            if ui.add(egui::Button::new(size_label(w, h)).selected(st.size_mode == Some((w, h)))).clicked() {
                                 st.size_mode = Some((w, h));
                                 st.fit_window_requested = true;
                                 ui.close();
                             }
                         }
                     });
-                    ui.menu_button("レンダリングの比率", |ui| {
+                    ui.menu_button(fl!("menu-render-ratio"), |ui| {
                         for r in RATIOS {
                             if ui.add(egui::Button::new(ratio_label(r)).selected(st.render_ratio == r)).clicked() {
                                 st.render_ratio = r;
@@ -1698,37 +1753,51 @@ impl App {
                         }
                     });
                     ui.separator();
-                    for (mode, name, key) in [(DisplayMode::Beauty, "画像", "1"), (DisplayMode::Albedo, "アルベド", "2"), (DisplayMode::Normal, "法線", "3")] {
+                    for (mode, name, key) in [(DisplayMode::Beauty, fl!("mode-image"), "1"), (DisplayMode::Albedo, fl!("mode-albedo"), "2"), (DisplayMode::Normal, fl!("mode-normal"), "3")] {
                         if ui.add(egui::Button::new(name).selected(st.mode == mode).shortcut_text(key)).clicked() {
                             st.mode = mode;
                             ui.close();
                         }
                     }
                     ui.separator();
-                    if ui.add(egui::Button::new("視点を戻す").shortcut_text("R")).clicked() {
+                    if ui.add(egui::Button::new(fl!("menu-reset-view")).shortcut_text("R")).clicked() {
                         st.reset_requested = true;
                         ui.close();
                     }
-                    if ui.button("露出を自動で合わせる").clicked() {
+                    if ui.button(fl!("menu-auto-exposure")).clicked() {
                         st.auto_exposure_requested = true;
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("設定をすべて既定に戻す").on_hover_text("パネルの設定（環境マップ・露出・積分器・レンズ・色の計算・表面など）を設定ファイルとコマンドラインの値に戻し、この基板について覚えたものを忘れる").clicked() {
+                    if ui.button(fl!("menu-reset-all")).on_hover_text(fl!("menu-reset-all-tip")).clicked() {
                         st.reset_all_requested = true;
                         ui.close();
                     }
-                });
-                ui.menu_button("ヘルプ", |ui| {
-                    ui.label("左ドラッグ: 回転");
-                    ui.label("クリック: 部品を選ぶ（設定パネルで材質を変えられる）");
-                    ui.label("右 / 中ドラッグ: 移動");
-                    ui.label("ホイール: 拡大・縮小");
-                    ui.label("Ctrl + クリック: その点にピントを合わせる");
                     ui.separator();
-                    ui.label("F1 / Tab: 設定パネル    R: 視点を戻す    S: 保存    P: 一時停止");
-                    ui.label("+ / -: 露出    [ / ]: 環境マップの回転    1 / 2 / 3: 画像 / アルベド / 法線");
-                    ui.label("Esc: 終了");
+                    ui.menu_button(fl!("menu-language"), |ui| {
+                        if ui.add(egui::Button::new(fl!("language-auto")).selected(language_choice.is_none())).on_hover_text(fl!("language-auto-tip")).clicked() {
+                            st.language_requested = Some(None);
+                            ui.close();
+                        }
+                        ui.separator();
+                        for (tag, name) in i18n::LANGUAGES {
+                            if ui.add(egui::Button::new(*name).selected(language_choice.as_deref() == Some(*tag))).clicked() {
+                                st.language_requested = Some(Some(tag.to_string()));
+                                ui.close();
+                            }
+                        }
+                    });
+                });
+                ui.menu_button(fl!("menu-help"), |ui| {
+                    ui.label(fl!("help-rotate"));
+                    ui.label(fl!("help-select"));
+                    ui.label(fl!("help-pan"));
+                    ui.label(fl!("help-zoom"));
+                    ui.label(fl!("help-focus"));
+                    ui.separator();
+                    ui.label(fl!("help-keys"));
+                    ui.label(fl!("help-keys-2"));
+                    ui.label(fl!("help-quit"));
                 });
             });
         });
@@ -1739,9 +1808,9 @@ impl App {
         let mut close = false;
         let shown = egui::Panel::right("settings").resizable(true).default_size(self.panel_width).size_range(300.0..=640.0).show(root, |ui| {
             ui.horizontal(|ui| {
-                ui.strong("設定");
+                ui.strong(fl!("panel-settings"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if close_button(ui).on_hover_text("閉じる（メニューの「表示」や F1 / Tab で再表示）").clicked() {
+                    if close_button(ui).on_hover_text(fl!("panel-close-tip")).clicked() {
                         close = true;
                     }
                 });
@@ -1810,6 +1879,14 @@ impl App {
         self.start_reload_if_needed();
         if let Some(f) = self.st.save_as_requested.take() {
             self.start_save_dialog(f);
+        }
+        if let Some(choice) = self.st.language_requested.take() {
+            // メニューで選んだものは --lang より優先する（覚えて、次からも使う）
+            remember::remember_ui_language(choice.as_deref());
+            self.language = i18n::select(None, choice.as_deref());
+            self.language_choice = choice;
+            install_fonts(&self.egui_ctx, &self.language);
+            info!("language: {}", self.language);
         }
         if let Some(loc) = self.st.settings_location_requested.take() {
             self.set_settings_location(loc);
@@ -1959,7 +2036,7 @@ impl App {
                 if self.prep.cfg.lens.model == LensModel::Pinhole {
                     self.prep.cfg.lens.model = LensModel::Thin;
                 }
-                self.last_update = format!("ピントを {:.1} mm に合わせた", self.prep.cfg.lens.focus_distance_mm);
+                self.last_update = fl!("focus-set", mm = format!("{:.1}", self.prep.cfg.lens.focus_distance_mm));
                 self.st.dirty = true;
             }
         }
@@ -2188,11 +2265,11 @@ impl App {
                 Ok(()) => {
                     info!("saved {} / {} ({} spp)", png.display(), exr.display(), g.prog.samples());
                     let shown = std::path::absolute(&png).unwrap_or(png.clone());
-                    self.last_update = format!("保存した：{}（.exr も、{} spp）", shown.display(), g.prog.samples());
+                    self.last_update = fl!("saved", path = shown.display().to_string(), spp = g.prog.samples().to_string());
                 }
                 Err(e) => {
                     error!("save failed: {}", e);
-                    self.last_update = format!("保存できなかった：{e}");
+                    self.last_update = fl!("save-failed", error = e.to_string());
                 }
             }
             // ノイズ除去した画像を表示しているなら、それも書く（表示と同じ強さで混ぜたもの）
@@ -2206,7 +2283,7 @@ impl App {
                 match image_io::save_png_tonemapped(&png, &img, self.st.exposure, &self.st.glow_params()).and_then(|_| image_io::save_exr(&exr, &img)) {
                     Ok(()) => {
                         info!("saved {} / {} (denoised, strength {:.2})", png.display(), exr.display(), self.st.denoise_strength);
-                        self.last_update.push_str("。ノイズ除去した画像も保存した（_denoised）");
+                        self.last_update.push_str(&fl!("saved-denoised-too"));
                     }
                     Err(e) => error!("save failed: {}", e),
                 }
@@ -2232,11 +2309,11 @@ impl App {
             match r {
                 Ok(()) => {
                     info!("saved {} ({} spp{})", path.display(), g.prog.samples(), if show_denoised { ", denoised" } else { "" });
-                    self.last_update = format!("保存した：{}（{} spp{}）", path.display(), g.prog.samples(), if show_denoised { "、ノイズ除去済み" } else { "" });
+                    self.last_update = fl!("saved-as", path = path.display().to_string(), spp = g.prog.samples().to_string(), denoised = if show_denoised { fl!("saved-as-denoised") } else { String::new() });
                 }
                 Err(e) => {
                     error!("save failed: {} ({})", e, path.display());
-                    self.last_update = format!("保存できなかった：{e}");
+                    self.last_update = fl!("save-failed", error = e.to_string());
                 }
             }
         }
@@ -2307,7 +2384,7 @@ impl ApplicationHandler for App {
                 if is_env_file(&path) {
                     self.start_env_load(path.to_string_lossy().into_owned());
                 } else {
-                    self.last_update = format!("環境マップ（.hdr / .exr）ではない: {}", path.display());
+                    self.last_update = fl!("env-not-an-environment", path = path.display().to_string());
                 }
             }
             WindowEvent::ModifiersChanged(m) => self.st.ctrl = m.state().control_key(),
@@ -2480,8 +2557,11 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         size_mode,
         render_ratio,
         fit_window_requested: size_mode.is_some(),
+        language_requested: None,
         tan_half_fov_y: 0.27,
     };
+    let language_choice = remember::ui_language();
+    let language = i18n::select(vo.language.as_deref(), language_choice.as_deref());
     let out_png = vo.common.out.clone();
     let out_dir = out_png.parent().filter(|p| !p.as_os_str().is_empty()).map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
     let stem = out_png.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "view".into());
@@ -2556,6 +2636,8 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         panel_width: win.panel_width.unwrap_or(340.0),
         fit_frames: 0,
         env_no_remember: false,
+        language,
+        language_choice,
         out_dir,
         stem,
         rc: 0,

@@ -1,6 +1,7 @@
 //! コマンドの実装：シーンの準備（`prepare`）、オフライン描画（`render`）、リアルタイム表示（`viewer`）、保存の監視（`watch`）
 
 pub mod bench;
+pub mod i18n;
 pub mod kicad_cli;
 pub mod kicad_plugin;
 pub mod material_cmd;

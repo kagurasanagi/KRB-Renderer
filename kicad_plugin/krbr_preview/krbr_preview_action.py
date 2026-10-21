@@ -1,4 +1,4 @@
-# KiCad の PCB エディタのツールバーに「KRB Render でプレビュー」を出す Action Plugin（KiCad 9 / 10）。
+# KiCad の PCB エディタのツールバーに「KRB Render でプレビュー」（英語では Preview in KRB Render）を出す Action Plugin（KiCad 9 / 10）。
 # 押すと、開いている基板のファイルを krbr（Rust 版のビューア）で開く。ビューアは保存を監視しているので、
 # KiCad で保存するたびに描き直される。
 # インストール：krbr kicad-plugin install（このフォルダと krbr.exe の場所を KiCad のユーザーフォルダへ書く）
@@ -16,6 +16,39 @@ except ImportError:  # KiCad の外（テスト）では wx が無いことが�
 _HERE = os.path.dirname(os.path.abspath(__file__))
 # 開いたビューア（基板のパス → プロセス）。同じ基板を二重に開かない
 _viewers = {}
+
+
+# 表示の文（KiCad の表示の言語に合わせる。訳の無い言語は英語）
+_TEXTS = {
+    "en": {
+        "name": "Preview in KRB Render",
+        "description": "Show the open board in KRB Render (a physically based renderer). It is redrawn every time you save.",
+        "not_saved": "The board has not been saved yet. Save it once, then press the button again.",
+        "no_exe": "krbr.exe was not found. Reinstall with krbr kicad-plugin install, or set its location in the KRBR_EXE environment variable.",
+        "already_open": "A viewer for this board is already open. It is redrawn whenever you save in KiCad.",
+    },
+    "ja": {
+        "name": "KRB Render でプレビュー",
+        "description": "開いている基板を KRB Render（物理ベースのレンダラー）で表示します。保存するたびに描き直します。",
+        "not_saved": "基板がまだ保存されていません。いったん保存してから押してください。",
+        "no_exe": "krbr.exe が見つかりません。krbr kicad-plugin install でインストールし直すか、環境変数 KRBR_EXE に場所を設定してください。",
+        "already_open": "この基板のビューアはもう開いています。KiCad で保存すると、そちらが描き直されます。",
+    },
+}
+
+
+def _language():
+    """KiCad の表示の言語（"ja" など）。KiCad の中では wx のロケールが KiCad で選んだ言語になっている"""
+    try:
+        loc = wx.GetLocale() if wx is not None else None
+        name = loc.GetCanonicalName() if loc is not None else ""
+    except Exception:
+        name = ""
+    return name.split("_")[0].lower()
+
+
+def _text(key):
+    return _TEXTS.get(_language(), _TEXTS["en"])[key]
 
 
 def _message(text, title="KRB Render"):
@@ -43,14 +76,14 @@ def find_krbr():
 def launch(board_file, exe=None):
     """基板のファイルをビューアで開く。戻り値は (開いたか, 伝えること)"""
     if not board_file:
-        return False, "基板がまだ保存されていません。いったん保存してから押してください。"
+        return False, _text("not_saved")
     exe = exe or find_krbr()
     if not exe:
-        return False, "krbr.exe が見つかりません。krbr kicad-plugin install でインストールし直すか、環境変数 KRBR_EXE に場所を設定してください。"
+        return False, _text("no_exe")
     key = os.path.normcase(os.path.abspath(board_file))
     p = _viewers.get(key)
     if p is not None and p.poll() is None:
-        return False, "この基板のビューアはもう開いています。KiCad で保存すると、そちらが描き直されます。"
+        return False, _text("already_open")
     log = open(os.path.join(tempfile.gettempdir(), "krbr_preview.log"), "w", encoding="utf-8", errors="replace")
     flags = 0
     if os.name == "nt":
@@ -62,9 +95,9 @@ def launch(board_file, exe=None):
 
 class KrbrPreview(pcbnew.ActionPlugin):
     def defaults(self):
-        self.name = "KRB Render でプレビュー"
+        self.name = _text("name")
         self.category = "Render"
-        self.description = "開いている基板を KRB Render（物理ベースのレンダラー）で表示します。保存するたびに描き直します。"
+        self.description = _text("description")
         self.show_toolbar_button = True
         self.icon_file_name = os.path.join(_HERE, "krbr_preview.png")
         self.dark_icon_file_name = self.icon_file_name

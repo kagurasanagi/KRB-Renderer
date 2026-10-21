@@ -434,9 +434,48 @@ pub fn remember_window(w: &WindowState) {
     save(&file, &t);
 }
 
+// ---------------------------------------------------------------- 表示の言語（基板によらず 1 つ）
+
+fn ui_language_in(t: &Table) -> Option<String> {
+    t.get("ui")?.get("language")?.as_str().filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+fn remember_ui_language_in(t: &mut Table, lang: Option<&str>) {
+    let ui = t.entry("ui").or_insert_with(|| Value::Table(Table::new()));
+    if let Some(ui) = ui.as_table_mut() {
+        match lang {
+            Some(l) => ui.insert("language".into(), Value::String(l.into())),
+            None => ui.remove("language"),
+        };
+    }
+}
+
+/// ビューアのメニューで選んだ表示の言語（state.toml の [ui] language）。None なら自動（KiCad、OS の順）
+pub fn ui_language() -> Option<String> {
+    ui_language_in(&load(&state_file()))
+}
+
+/// 表示の言語を覚える（None：自動に戻す）
+pub fn remember_ui_language(lang: Option<&str>) {
+    let file = state_file();
+    let mut t = load(&file);
+    remember_ui_language_in(&mut t, lang);
+    save(&file, &t);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ui_language_round_trip() {
+        let mut t = Table::new();
+        assert_eq!(ui_language_in(&t), None);
+        remember_ui_language_in(&mut t, Some("ja"));
+        assert_eq!(ui_language_in(&t).as_deref(), Some("ja"));
+        remember_ui_language_in(&mut t, None);
+        assert_eq!(ui_language_in(&t), None);
+    }
 
     #[test]
     fn remembers_hdr_and_recent() {

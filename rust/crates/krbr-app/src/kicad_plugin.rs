@@ -58,7 +58,7 @@ pub fn cmd_install(dir: Option<&Path>) -> anyhow::Result<()> {
         let d = install_into(&t, &exe)?;
         info!("installed the KiCad plugin into {} (krbr: {})", d.display(), exe.display());
     }
-    info!("restart KiCad, or in the PCB editor use Tools > External Plugins > Refresh Plugins; the toolbar gets a 'KRB Render でプレビュー' button");
+    info!("restart KiCad, or in the PCB editor use Tools > External Plugins > Refresh Plugins; the toolbar gets a 'Preview in KRB Render' button");
     Ok(())
 }
 

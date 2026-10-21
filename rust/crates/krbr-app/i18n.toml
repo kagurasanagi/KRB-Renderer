@@ -1,0 +1,5 @@
+# 表示の言語（i18n-embed / Fluent）。英語が基準で、訳の無い文は英語で出す
+fallback_language = "en"
+
+[fluent]
+assets_dir = "i18n"

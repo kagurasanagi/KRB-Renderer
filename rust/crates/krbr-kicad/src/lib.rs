@@ -4,6 +4,7 @@
 pub mod board;
 pub mod parser;
 pub mod resolver;
+pub mod settings;
 pub mod sexpr;
 pub mod stroke_silk;
 

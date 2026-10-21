@@ -9,7 +9,7 @@ use krbr_core::{info, log};
 use krbr_kicad::{load_board, ModelResolver};
 
 #[derive(Parser)]
-#[command(name = "krbr", about = "KRB-Renderer: KiCad 連携 物理ベース レンダラー")]
+#[command(name = "krbr", about = "KRB-Renderer: a physically based renderer for KiCad boards")]
 struct Cli {
     /// debug ログも出す
     #[arg(short, long, global = true)]
@@ -49,7 +49,7 @@ enum Command {
         #[command(subcommand)]
         cmd: MaskCmd,
     },
-    /// KiCad plugin: a "KRB Render でプレビュー" button on the PCB editor toolbar
+    /// KiCad plugin: a "Preview in KRB Render" button on the PCB editor toolbar
     KicadPlugin {
         #[command(subcommand)]
         cmd: KicadPluginCmd,
@@ -289,6 +289,10 @@ struct ViewArgs {
     /// open with rendering paused (P or the toolbar button resumes); for weak GPUs
     #[arg(long)]
     paused: bool,
+    /// language of the window, e.g. en, ja (also KRBR_LANG). Default: the one chosen in the View menu,
+    /// else the language chosen in KiCad, else the OS language
+    #[arg(long)]
+    lang: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -571,6 +575,7 @@ fn main() {
                 render_size: args.render_size.clone(),
                 render_ratio: args.render_ratio,
                 paused: args.paused,
+                language: args.lang.clone(),
             };
             krbr_app::run_viewer(vo).map(|rc| {
                 if rc != 0 {

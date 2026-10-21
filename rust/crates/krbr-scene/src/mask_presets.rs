@@ -14,6 +14,7 @@ pub struct MaskPreset {
     pub scatter: f32,
     /// このレジストに合わせたシルクの色（黄・白のレジストでは黒いシルク）
     pub silk_srgb: Vec3,
+    /// 説明（英語。ビューアでは翻訳 mask-note-<name> があればそちら）
     pub note: &'static str,
 }
 
@@ -22,7 +23,7 @@ const K: Vec3 = Vec3::new(0.08, 0.08, 0.08);
 
 // 色は「銅の上で見えるレジストの色」（sRGB）。メーカーの色は写真からの目分量で、実測ではない
 const PRESETS: &[MaskPreset] = &[
-    MaskPreset { name: "green", srgb: Vec3::new(0.05, 0.42, 0.16), roughness: 0.18, scatter: 0.3, silk_srgb: W, note: "KiCad / 一般的な緑" },
+    MaskPreset { name: "green", srgb: Vec3::new(0.05, 0.42, 0.16), roughness: 0.18, scatter: 0.3, silk_srgb: W, note: "KiCad / the common green" },
     MaskPreset { name: "red", srgb: Vec3::new(0.62, 0.07, 0.06), roughness: 0.18, scatter: 0.4, silk_srgb: W, note: "KiCad" },
     MaskPreset { name: "blue", srgb: Vec3::new(0.05, 0.18, 0.52), roughness: 0.18, scatter: 0.4, silk_srgb: W, note: "KiCad" },
     MaskPreset { name: "yellow", srgb: Vec3::new(0.80, 0.68, 0.10), roughness: 0.18, scatter: 0.5, silk_srgb: K, note: "KiCad" },
@@ -30,13 +31,13 @@ const PRESETS: &[MaskPreset] = &[
     MaskPreset { name: "black", srgb: Vec3::new(0.04, 0.04, 0.04), roughness: 0.18, scatter: 0.7, silk_srgb: W, note: "KiCad" },
     MaskPreset { name: "white", srgb: Vec3::new(0.90, 0.90, 0.88), roughness: 0.22, scatter: 0.9, silk_srgb: K, note: "KiCad" },
     MaskPreset { name: "matte-black", srgb: Vec3::new(0.05, 0.05, 0.05), roughness: 0.55, scatter: 0.8, silk_srgb: W, note: "KiCad" },
-    MaskPreset { name: "jlcpcb-green", srgb: Vec3::new(0.08, 0.40, 0.19), roughness: 0.18, scatter: 0.3, silk_srgb: W, note: "JLCPCB Green：やや明るい緑、光沢" },
-    MaskPreset { name: "jlcpcb-purple", srgb: Vec3::new(0.33, 0.12, 0.46), roughness: 0.18, scatter: 0.4, silk_srgb: W, note: "JLCPCB Purple：青みの紫" },
+    MaskPreset { name: "jlcpcb-green", srgb: Vec3::new(0.08, 0.40, 0.19), roughness: 0.18, scatter: 0.3, silk_srgb: W, note: "JLCPCB Green: a slightly lighter green, glossy" },
+    MaskPreset { name: "jlcpcb-purple", srgb: Vec3::new(0.33, 0.12, 0.46), roughness: 0.18, scatter: 0.4, silk_srgb: W, note: "JLCPCB Purple: a bluish purple" },
     MaskPreset { name: "jlcpcb-red", srgb: Vec3::new(0.60, 0.08, 0.07), roughness: 0.18, scatter: 0.4, silk_srgb: W, note: "JLCPCB Red" },
     MaskPreset { name: "jlcpcb-yellow", srgb: Vec3::new(0.85, 0.70, 0.10), roughness: 0.18, scatter: 0.5, silk_srgb: K, note: "JLCPCB Yellow" },
     MaskPreset { name: "jlcpcb-blue", srgb: Vec3::new(0.05, 0.20, 0.50), roughness: 0.18, scatter: 0.4, silk_srgb: W, note: "JLCPCB Blue" },
-    MaskPreset { name: "jlcpcb-white", srgb: Vec3::new(0.92, 0.92, 0.88), roughness: 0.25, scatter: 0.9, silk_srgb: K, note: "JLCPCB White：ほぼ不透明" },
-    MaskPreset { name: "jlcpcb-black", srgb: Vec3::new(0.06, 0.06, 0.06), roughness: 0.15, scatter: 0.7, silk_srgb: W, note: "JLCPCB Black：光沢の黒" },
+    MaskPreset { name: "jlcpcb-white", srgb: Vec3::new(0.92, 0.92, 0.88), roughness: 0.25, scatter: 0.9, silk_srgb: K, note: "JLCPCB White: nearly opaque" },
+    MaskPreset { name: "jlcpcb-black", srgb: Vec3::new(0.06, 0.06, 0.06), roughness: 0.15, scatter: 0.7, silk_srgb: W, note: "JLCPCB Black: glossy black" },
     MaskPreset { name: "jlcpcb-matte-black", srgb: Vec3::new(0.07, 0.07, 0.07), roughness: 0.55, scatter: 0.8, silk_srgb: W, note: "JLCPCB Matte Black" },
     MaskPreset { name: "jlcpcb-matte-green", srgb: Vec3::new(0.10, 0.38, 0.20), roughness: 0.50, scatter: 0.5, silk_srgb: W, note: "JLCPCB Matte Green" },
 ];
