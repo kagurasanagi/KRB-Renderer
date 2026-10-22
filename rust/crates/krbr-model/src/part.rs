@@ -25,16 +25,8 @@ const KICAD_COLORS: &[(&str, [f32; 3])] = &[
     ("orange_body", [0.809, 0.426, 0.148]),
 ];
 
-pub fn srgb_to_linear(c: Vec3) -> Vec3 {
-    fn f(v: f32) -> f32 {
-        if v <= 0.04045 {
-            v / 12.92
-        } else {
-            ((v + 0.055) / 1.055).powf(2.4)
-        }
-    }
-    Vec3::new(f(c.x), f(c.y), f(c.z))
-}
+/// 変換は crate::color に 1 つだけ置く（以前はここに 0..1 に収めない別の実装があった）
+pub use crate::color::srgb_to_linear;
 
 impl ModelPart {
     pub fn linear_color(&self) -> Vec3 {

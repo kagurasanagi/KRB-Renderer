@@ -11,9 +11,9 @@ use krbr_geom::{build_board_geometry, shapes, tiles::build_relief_tiles, BoardBu
 use krbr_kicad::{rotate_point, Board, Footprint, GrKind, Model3D, ModelResolver};
 use krbr_model::{ModelLibrary, ModelMesh};
 
-use crate::mask_presets::find_mask_preset;
-use crate::material::{srgb_to_linear, BumpPattern, Material, MaterialKind};
-use crate::model_map::{MaterialQuery, MaterialResolver};
+use crate::mask_presets::{find_mask_preset, DEFAULT_MASK_PRESET, SILK_BLACK, SILK_WHITE};
+use crate::material::{parse_hex_rgb, srgb_to_linear, BumpPattern, Material, MaterialKind};
+use crate::model_map::{MaterialQuery, MaterialResolver, MaterialStage};
 
 #[derive(Debug, Clone, Default)]
 pub struct SceneMesh {
@@ -56,9 +56,18 @@ pub struct MaterialAssignment {
     /// 部位のキー（空白区切り）
     pub part_keys: String,
     pub material: String,
+    /// どの段階で決まったか（表示用。MaterialStage::label）
     pub source: String,
 }
 
+impl MaterialAssignment {
+    /// どの段階で決まったか。段階で処理を分けるときは source の文字列の先頭を見ずにこれを使う
+    pub fn stage(&self) -> Option<MaterialStage> {
+        MaterialStage::from_label(&self.source)
+    }
+}
+
+/// 基板の材質の番号（Scene::materials の番号）
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BoardMaterialIds {
     pub top: u32,
@@ -74,6 +83,104 @@ pub struct BoardMaterialIds {
     pub mask_on_copper: u32,
 }
 
+impl BoardMaterialIds {
+    /// 基板メッシュ（krbr-geom の BoardMat）の区分の材質。match で網羅するので、krbr-geom で区分を足すとここでコンパイルが止まる
+    pub fn for_board(&self, m: BoardMat) -> u32 {
+        match m {
+            BoardMat::Top => self.top,
+            BoardMat::Bottom => self.bottom,
+            BoardMat::Edge => self.edge,
+            BoardMat::Plated => self.plated,
+        }
+    }
+
+    /// 凹凸メッシュ（krbr-geom の ReliefMat）の区分の材質
+    pub fn for_relief(&self, m: ReliefMat) -> u32 {
+        match m {
+            ReliefMat::Fr4 => self.fr4,
+            ReliefMat::Finish => self.finish,
+            ReliefMat::MaskOnFr4 => self.mask_on_fr4,
+            ReliefMat::MaskOnCopper => self.mask_on_copper,
+            ReliefMat::Silk => self.silk,
+        }
+    }
+}
+
+/// krbr-geom がメッシュの tri_material に入れた区分の番号を enum に戻す。区分を足したら for_board / for_relief と一緒にここにも足す。
+/// 知らない番号は krbr-geom との食い違い（プログラムの誤り）なので、黙って別の材質に丸めずに止める
+fn board_mat_of(id: u32) -> BoardMat {
+    const ALL: [BoardMat; 4] = [BoardMat::Top, BoardMat::Bottom, BoardMat::Edge, BoardMat::Plated];
+    ALL.into_iter().find(|m| *m as u32 == id).unwrap_or_else(|| panic!("unknown BoardMat {id} in the board mesh"))
+}
+
+fn relief_mat_of(id: u32) -> ReliefMat {
+    const ALL: [ReliefMat; 5] = [ReliefMat::Fr4, ReliefMat::Finish, ReliefMat::MaskOnFr4, ReliefMat::MaskOnCopper, ReliefMat::Silk];
+    ALL.into_iter().find(|m| *m as u32 == id).unwrap_or_else(|| panic!("unknown ReliefMat {id} in a relief tile"))
+}
+
+/// 銅の表面処理。設定（[board] finish）では大小を区別しない名前で、"auto" なら KiCad の stackup の copper_finish に従う
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Finish {
+    Auto,
+    /// 無電解ニッケル金（金色）
+    Enig,
+    /// はんだレベラー（銀色）。浸漬銀・浸漬錫など銀色に見える処理もこれで表す
+    Hasl,
+    /// 水溶性プリフラックス（銅の色のまま、つやが少し落ちる）
+    Osp,
+    /// 表面処理なし（銅のまま）。設定で選んだときだけ（stackup の "None" は ENIG として扱う。from_kicad）
+    None,
+}
+
+impl Finish {
+    pub const ALL: [Finish; 5] = [Finish::Auto, Finish::Enig, Finish::Hasl, Finish::Osp, Finish::None];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Finish::Auto => "auto",
+            Finish::Enig => "ENIG",
+            Finish::Hasl => "HASL",
+            Finish::Osp => "OSP",
+            Finish::None => "none",
+        }
+    }
+
+    /// KiCad の stackup の copper_finish（大小を区別しない）。知らない値なら None。
+    /// 見た目で分ける：金色は ENIG、銀色（はんだ・錫・銀・ニッケル）は HASL、プリフラックスは OSP。
+    /// 指定なし（"Not specified" / "User defined" / 空）と "None" は既定の ENIG。"None" は KiCad の stackup の既定値で、
+    /// 表面処理を選んでいない基板のほとんどがこの値なので、銅のままにはしない（銅のままにするなら設定で finish = "none"）
+    pub fn from_kicad(copper_finish: &str) -> Option<Finish> {
+        const TABLE: &[(&str, Finish)] = &[
+            ("", Finish::Enig),
+            ("not specified", Finish::Enig),
+            ("user defined", Finish::Enig),
+            ("none", Finish::Enig),
+            ("enig", Finish::Enig),
+            ("enepig", Finish::Enig),
+            ("hard gold", Finish::Enig),
+            ("immersion gold", Finish::Enig),
+            ("hal snpb", Finish::Hasl),
+            ("hal lead-free", Finish::Hasl),
+            ("hasl", Finish::Hasl),
+            ("immersion tin", Finish::Hasl),
+            ("immersion silver", Finish::Hasl),
+            ("immersion nickel", Finish::Hasl),
+            ("osp", Finish::Osp),
+            ("ht_osp", Finish::Osp),
+        ];
+        let key = copper_finish.trim().to_lowercase();
+        TABLE.iter().find(|(k, _)| *k == key).map(|(_, f)| *f)
+    }
+}
+
+impl std::str::FromStr for Finish {
+    type Err = String;
+    /// 設定の名前（auto / ENIG / HASL / OSP / none。大小を区別しない）。知らない名前は Err
+    fn from_str(s: &str) -> Result<Self, String> {
+        Self::ALL.into_iter().find(|f| f.as_str().eq_ignore_ascii_case(s.trim())).ok_or_else(|| format!("unknown finish '{s}' (auto / ENIG / HASL / OSP / none)"))
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MissingModel {
     pub reference: String,
@@ -86,7 +193,7 @@ pub struct MissingModel {
     pub reason: String,
 }
 
-/// レジストの厚み t(x) のモデル（mm）。shaders/pathtrace.comp の maskThickness と対応
+/// レジストの厚み t(x) のモデル（mm）。shaders/scene.glsl の maskThickness と対応
 #[derive(Debug, Clone, Copy)]
 pub struct MaskModel {
     pub on_copper: f32,
@@ -101,9 +208,17 @@ pub struct MaskModel {
     pub copper: f32,
 }
 
+impl MaskModel {
+    /// 厚み（銅、銅の上・基材の上のレジスト）は凹凸の形状と同じ値を使う。縁の形（流れ・たまり）はここで決める
+    pub fn from_relief(rp: &ReliefParams) -> Self {
+        let on_copper = rp.mask_on_copper as f32;
+        Self { on_copper, on_substrate: rp.mask_on_substrate as f32, at_edge: 0.004f32.min(on_copper), falloff: 0.06, pool: 0.010, pool_falloff: 0.05, copper: rp.copper as f32 }
+    }
+}
+
 impl Default for MaskModel {
     fn default() -> Self {
-        Self { on_copper: 0.012, on_substrate: 0.025, at_edge: 0.004, falloff: 0.06, pool: 0.010, pool_falloff: 0.05, copper: 0.035 }
+        Self::from_relief(&ReliefParams::default())
     }
 }
 
@@ -162,14 +277,16 @@ pub struct SceneOptions {
 
 impl Default for SceneOptions {
     fn default() -> Self {
+        // レジストの既定は緑のプリセットの値（同じ値を 2 か所に持たない）。mask_preset は空（設定で選んだのではない）
+        let mask = find_mask_preset(DEFAULT_MASK_PRESET).expect("the default mask preset exists");
         Self {
-            finish: "auto".into(),
-            mask_color: Vec3::new(0.05, 0.42, 0.16),
+            finish: Finish::Auto.as_str().into(),
+            mask_color: mask.srgb,
             mask_color_set: false,
             mask_preset: String::new(),
-            mask_roughness: 0.18,
-            mask_scatter: 0.3,
-            silk_color: Vec3::new(0.93, 0.93, 0.90),
+            mask_roughness: mask.roughness,
+            mask_scatter: mask.scatter,
+            silk_color: mask.silk_srgb,
             silk_color_set: false,
             fr4_color: Vec3::new(0.62, 0.58, 0.42),
             placeholder_height: 0.0,
@@ -200,20 +317,21 @@ fn add_material(s: &mut Scene, m: Material) -> u32 {
     (s.materials.len() - 1) as u32
 }
 
-/// KiCad の stackup の色名（"Green" など。プリセットと同じ表）または "#RRGGBBAA"
+/// KiCad の stackup の色名（"Green" など。プリセットと同じ表）または "#RRGGBB" / "#RRGGBBAA"（不透明度は使わない）
 fn stackup_color(name: &str, fallback: Vec3) -> Vec3 {
     if let Some(p) = find_mask_preset(name) {
         return p.srgb;
     }
-    if name.len() >= 7 && name.starts_with('#') {
-        let hex = |i: usize| u8::from_str_radix(&name[i..i + 2], 16).map(|v| v as f32 / 255.0);
-        if let (Ok(r), Ok(g), Ok(b)) = (hex(1), hex(3), hex(5)) {
-            return Vec3::new(r, g, b);
-        }
+    // 16 進の数字（ASCII）かを先に確かめる。以前はバイト位置で切り出していて、# の後ろが多バイト文字だと panic した
+    let hex = name.strip_prefix('#').filter(|h| h.len() == 6 || h.len() == 8).filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()));
+    if let Some(rgb) = hex.and_then(|h| parse_hex_rgb(&h[..6])) {
+        return Vec3::from_array(rgb.map(|v| v as f32 / 255.0));
     }
     fallback
 }
 
+/// レジストの色：設定（色かプリセット）> stackup の表面のレジストの色 > 既定。
+/// 裏面のレジストも同じ材質（board_mats.mask は 1 つ）なので、stackup の裏面の色（mask_color_back）は使わない
 fn resolved_mask_color(board: &Board, o: &SceneOptions) -> Vec3 {
     if o.mask_color_set {
         o.mask_color
@@ -222,17 +340,39 @@ fn resolved_mask_color(board: &Board, o: &SceneOptions) -> Vec3 {
     }
 }
 
+/// シルクの色：設定 > レジストのプリセットに合わせた色（黄・白なら黒）> stackup の表面のシルクの色 > 既定（白）。
+/// レジストと同じく、設定で選んだものを stackup より優先する。裏面も同じ材質
+fn resolved_silk_color(board: &Board, o: &SceneOptions) -> Vec3 {
+    if o.silk_color_set || !o.mask_preset.is_empty() {
+        return o.silk_color;
+    }
+    // KiCad のシルクの色名の白・黒は、レジストの表ではなくシルクの色で写す
+    match board.stackup.silk_color_front.trim().to_lowercase().as_str() {
+        "white" => SILK_WHITE,
+        "black" => SILK_BLACK,
+        name => stackup_color(name, o.silk_color),
+    }
+}
+
+/// 銅の色（リニア）
+const COPPER_BASE_COLOR: Vec3 = Vec3::new(0.955, 0.638, 0.538);
+/// 銅の平均反射率：COPPER_BASE_COLOR の 3 成分の平均（約 0.71）を丸めた値。
+/// 設定のレジストの色は「銅の上で見えるレジストの色」なので、これで割ってコートの透過色にする（銅で反射して見える色が設定の色に近づく）
+const COPPER_MEAN_REFLECTANCE: f32 = 0.7;
+/// レジストの顔料自身が散らす光の色：設定の色にこの割合を掛ける。目分量の値（測定や文献の値ではない）
+const MASK_PIGMENT_ALBEDO_SCALE: f32 = 0.6;
+
 fn make_mask_material(mask_srgb: Vec3, roughness: f32, scatter: f32) -> Material {
     Material {
         name: "solder_mask".into(),
         // コートとして使う：coat_color がレジストを通る光の色、base_* は顔料自身の散乱
         coat_weight: 1.0,
-        // 設定の色は「銅の上で見えるレジストの色」とし、銅の平均反射率（約 0.7）で割って透過色にする
-        coat_color: (srgb_to_linear(mask_srgb) / 0.7).min(Vec3::ONE),
+        coat_color: (srgb_to_linear(mask_srgb) / COPPER_MEAN_REFLECTANCE).min(Vec3::ONE),
         coat_roughness: roughness,
         coat_ior: 1.5,
-        base_color: srgb_to_linear(mask_srgb) * 0.6,
-        base_weight: scatter, // シェーダではこの値を「散乱を選ぶ確率」として使う
+        base_color: srgb_to_linear(mask_srgb) * MASK_PIGMENT_ALBEDO_SCALE,
+        // OpenPBR の base_weight を「顔料が光を散らす確率」に流用する（この材質だけ。shaders/scene.glsl のレジストの処理と対応）
+        base_weight: scatter,
         specular_roughness: 0.5,
         bump_pattern: BumpPattern::Noise, // 塗膜のゆず肌
         bump_strength: 0.006,
@@ -277,7 +417,7 @@ fn setup_board_materials(s: &mut Scene, board: &Board, o: &SceneOptions) {
 
     let copper = Material {
         name: "copper".into(),
-        base_color: Vec3::new(0.955, 0.638, 0.538),
+        base_color: COPPER_BASE_COLOR,
         base_metalness: 1.0,
         specular_roughness: 0.25,
         bump_pattern: BumpPattern::Noise,
@@ -288,19 +428,9 @@ fn setup_board_materials(s: &mut Scene, board: &Board, o: &SceneOptions) {
     };
 
     // 表面処理：設定 > stackup の copper_finish > ENIG
-    let mut finish = o.finish.clone();
-    if finish == "auto" {
-        let f = &board.stackup.copper_finish;
-        finish = if f.contains("HAL") || f.contains("HASL") || f.contains("Silver") {
-            "HASL".into()
-        } else if f.contains("OSP") {
-            "OSP".into()
-        } else {
-            "ENIG".into()
-        };
-    }
-    let fin = match finish.as_str() {
-        "HASL" => Material {
+    let finish = resolved_finish(board, o);
+    let fin = match finish {
+        Finish::Hasl => Material {
             name: "finish_HASL".into(),
             base_metalness: 1.0,
             bump_pattern: BumpPattern::Noise,
@@ -311,9 +441,10 @@ fn setup_board_materials(s: &mut Scene, board: &Board, o: &SceneOptions) {
             roughness_variation: 0.2,
             ..Default::default()
         },
-        "OSP" => Material { name: "finish_OSP".into(), specular_roughness: 0.3, ..copper.clone() },
-        _ => Material {
-            name: format!("finish_{finish}"),
+        Finish::Osp => Material { name: "finish_OSP".into(), specular_roughness: 0.3, ..copper.clone() },
+        Finish::None => Material { name: "finish_none".into(), ..copper.clone() },
+        Finish::Enig | Finish::Auto => Material {
+            name: "finish_ENIG".into(),
             base_metalness: 1.0,
             bump_pattern: BumpPattern::Noise,
             // 無電解ニッケル金：細かい粒状感
@@ -328,7 +459,7 @@ fn setup_board_materials(s: &mut Scene, board: &Board, o: &SceneOptions) {
 
     let mask_srgb = resolved_mask_color(board, o);
     let mask = make_mask_material(mask_srgb, o.mask_roughness, o.mask_scatter);
-    let silk = make_silk_material(o.silk_color);
+    let silk = make_silk_material(resolved_silk_color(board, o));
 
     s.board_mats.top = add_material(s, top);
     s.board_mats.bottom = add_material(s, bottom);
@@ -345,12 +476,28 @@ fn setup_board_materials(s: &mut Scene, board: &Board, o: &SceneOptions) {
     s.board_mats.mask_on_copper = add_material(s, masked_cu);
     krbr_core::info!(
         "board materials: finish {}, mask sRGB ({:.2}, {:.2}, {:.2}){}",
-        finish,
+        finish.as_str(),
         mask_srgb.x,
         mask_srgb.y,
         mask_srgb.z,
         if o.mask_preset.is_empty() { String::new() } else { format!(" [{}]", o.mask_preset) }
     );
+}
+
+/// 表面処理：設定（auto 以外）> stackup の copper_finish > ENIG。知らない名前は警告して auto / ENIG として扱う
+fn resolved_finish(board: &Board, o: &SceneOptions) -> Finish {
+    let f = o.finish.parse::<Finish>().unwrap_or_else(|e| {
+        krbr_core::warn!("finish: {e}; using auto");
+        Finish::Auto
+    });
+    if f != Finish::Auto {
+        return f;
+    }
+    let k = &board.stackup.copper_finish;
+    Finish::from_kicad(k).unwrap_or_else(|| {
+        krbr_core::warn!("unknown copper finish '{k}' in the stackup; using ENIG");
+        Finish::Enig
+    })
 }
 
 /// レジストとシルクの材質だけを設定に合わせて作り直す（ビューアでの色の切り替え用）
@@ -360,7 +507,7 @@ pub fn update_mask_material(s: &mut Scene, board: &Board, o: &SceneOptions) {
         return;
     }
     s.materials[mi] = make_mask_material(resolved_mask_color(board, o), o.mask_roughness, o.mask_scatter);
-    s.materials[si] = make_silk_material(o.silk_color);
+    s.materials[si] = make_silk_material(resolved_silk_color(board, o));
 }
 
 /// KiCad の 3D ビューアと同じ並びで部品・モデルの変換を作る（KiCad 3D 座標、mm、Z 上向き）
@@ -501,7 +648,6 @@ fn footprint_local_box(board: &Board, fp_index: usize) -> Option<(Vec2, Vec2)> {
     bounds(&pts).map(|(lo, hi)| (lo - Vec2::splat(0.1), hi + Vec2::splat(0.1)))
 }
 
-/// 代替の箱を置く行列：部品の向きに回し、基板の表（裏）の面の上（下）に置く
 /// 代替の箱の高さ（mm）：設定（> 0）があればそれ。無ければ面積が大きいほど高く（√面積 × 0.25、0.3〜5 mm）。
 /// 0603 の抵抗くらいで 0.3、5 x 4 mm の IC で約 1.1、10 x 10 mm で 2.5、20 x 20 mm 以上で 5
 pub fn placeholder_height_for(fixed: f64, lo: Vec2, hi: Vec2) -> f64 {
@@ -512,6 +658,7 @@ pub fn placeholder_height_for(fixed: f64, lo: Vec2, hi: Vec2) -> f64 {
     (0.25 * area.sqrt()).clamp(0.3, 5.0)
 }
 
+/// 代替の箱を置く行列：部品の向きに回し、基板の表（裏）の面の上（下）に置く
 fn placeholder_matrix(fp: &Footprint, lo: Vec2, hi: Vec2, height: f64, thickness: f64, center: Vec2) -> Mat4 {
     let ex = rotate_point(Vec2::X, fp.angle_deg);
     let ez = rotate_point(Vec2::Y, fp.angle_deg);
@@ -552,15 +699,11 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
     }
     let bo = BoardBuildOptions { core_half: rp.core_half(board.stackup.thickness), caps: false };
     s.board = build_board_geometry(board, &bo);
-    s.mask.on_copper = rp.mask_on_copper as f32;
-    s.mask.on_substrate = rp.mask_on_substrate as f32;
-    s.mask.copper = rp.copper as f32;
-    s.mask.at_edge = s.mask.at_edge.min(s.mask.on_copper);
+    s.mask = MaskModel::from_relief(&rp);
     {
         let mut bm = SceneMesh { name: "board".into(), mesh: s.board.mesh.clone() };
-        let remap = [s.board_mats.top, s.board_mats.bottom, s.board_mats.edge, s.board_mats.plated];
         for m in &mut bm.mesh.tri_material {
-            *m = remap[(*m as usize).min(3)];
+            *m = s.board_mats.for_board(board_mat_of(*m));
         }
         s.meshes.push(bm);
         s.instances.push(Instance { mesh: 0, xform: Mat4::IDENTITY, material_base: 0, owner: InstanceOwner::Board });
@@ -574,7 +717,6 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
             None => &mut local,
         };
         build_relief_tiles(cache, board, &s.board, &rp, &opts.layer_art);
-        let rmap = [s.board_mats.fr4, s.board_mats.finish, s.board_mats.mask_on_fr4, s.board_mats.mask_on_copper, s.board_mats.silk];
         for side in 0..2 {
             for t in 0..cache.count() {
                 let m = &cache.tiles[side][t];
@@ -583,7 +725,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
                 }
                 let mut mesh = m.clone();
                 for id in &mut mesh.tri_material {
-                    *id = rmap[(*id as usize).min(4)];
+                    *id = s.board_mats.for_relief(relief_mat_of(*id));
                 }
                 let id = s.meshes.len() as u32;
                 s.meshes.push(SceneMesh { name: format!("relief_{}_{}", if side == 0 { "front" } else { "back" }, t), mesh });
@@ -600,8 +742,6 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
                 (side, [x0, y0, x1, y1])
             })
             .collect();
-        let _ = ReliefMat::Fr4; // 材質の番号は rmap で写した
-        let _ = BoardMat::Top;
     }
 
     // 代替表示の箱：縁を面取りした透明な水晶（石英：nd 1.544、アッベ数 70）
@@ -762,7 +902,6 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
     s
 }
 
-/// シーン中の三角形との最初の交点までの距離（Ctrl + クリックでピントを合わせる用）。Möller–Trumbore
 /// 光線が最初に当たったもの
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pick {
@@ -774,11 +913,12 @@ pub struct Pick {
     pub part: u32,
 }
 
-/// 光線と全三角形の交差（CPU。ピント合わせ・部品の選択の 1 回ごとに使う程度の速さ）
+/// シーン中の三角形との最初の交点までの距離（Ctrl + クリックでピントを合わせる用）
 pub fn raycast(s: &Scene, origin: Vec3, dir: Vec3) -> Option<f32> {
     raycast_pick(s, origin, dir).map(|p| p.t)
 }
 
+/// 光線と全三角形の交差（CPU、Möller–Trumbore。ピント合わせ・部品の選択の 1 回ごとに使う程度の速さ）
 pub fn raycast_pick(s: &Scene, origin: Vec3, dir: Vec3) -> Option<Pick> {
     let mut best: Option<Pick> = None;
     for (ii, i) in s.instances.iter().enumerate() {
@@ -886,6 +1026,58 @@ mod tests {
         assert_eq!(raycast(&s, Vec3::new(0.0, 0.0, 50.0), Vec3::NEG_Z), Some(p.t));
         // 外れる光線
         assert!(raycast_pick(&s, Vec3::new(5.0, 0.0, 50.0), Vec3::NEG_Z).is_none());
+    }
+
+    #[test]
+    fn finish_names_and_kicad_values() {
+        for f in Finish::ALL {
+            assert_eq!(f.as_str().parse::<Finish>(), Ok(f));
+        }
+        assert_eq!("hasl".parse::<Finish>(), Ok(Finish::Hasl)); // 大小を区別しない
+        assert!("gold".parse::<Finish>().is_err());
+        assert_eq!(Finish::from_kicad("HAL lead-free"), Some(Finish::Hasl));
+        assert_eq!(Finish::from_kicad("Immersion silver"), Some(Finish::Hasl));
+        assert_eq!(Finish::from_kicad("Immersion tin"), Some(Finish::Hasl)); // 以前は金になっていた
+        assert_eq!(Finish::from_kicad("None"), Some(Finish::Enig)); // KiCad の既定値。選んでいないのと同じ扱い
+        assert_eq!(Finish::from_kicad("HT_OSP"), Some(Finish::Osp));
+        assert_eq!(Finish::from_kicad("ENEPIG"), Some(Finish::Enig));
+        assert_eq!(Finish::from_kicad(""), Some(Finish::Enig));
+        assert_eq!(Finish::from_kicad("Something new"), None);
+    }
+
+    #[test]
+    fn stackup_colors() {
+        let fb = Vec3::splat(0.5);
+        assert_eq!(stackup_color("#FF000080", fb), Vec3::new(1.0, 0.0, 0.0));
+        assert_eq!(stackup_color("#00FF00", fb), Vec3::new(0.0, 1.0, 0.0));
+        assert_eq!(stackup_color("Green", fb), find_mask_preset("green").unwrap().srgb);
+        // 多バイト文字・16 進でない文字・長さの違いは使わない（以前は多バイト文字で panic した）
+        for bad in ["#あいう", "#ab\u{3042}cdef", "#GG0000", "#12345", "Not specified"] {
+            assert_eq!(stackup_color(bad, fb), fb, "{bad}");
+        }
+    }
+
+    #[test]
+    fn geometry_categories_map_to_board_materials() {
+        let ids = BoardMaterialIds { top: 1, bottom: 2, edge: 3, plated: 4, fr4: 5, finish: 6, mask_on_fr4: 7, mask_on_copper: 8, silk: 9, ..Default::default() };
+        let board: Vec<u32> = (0..4).map(|i| ids.for_board(board_mat_of(i))).collect();
+        assert_eq!(board, vec![1, 2, 3, 4]);
+        let relief: Vec<u32> = (0..5).map(|i| ids.for_relief(relief_mat_of(i))).collect();
+        assert_eq!(relief, vec![5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown ReliefMat")]
+    fn unknown_geometry_category_is_an_error() {
+        relief_mat_of(5);
+    }
+
+    #[test]
+    fn mask_model_follows_the_relief_thickness() {
+        let rp = ReliefParams::default();
+        let m = MaskModel::default();
+        assert_eq!((m.on_copper, m.on_substrate, m.copper), (rp.mask_on_copper as f32, rp.mask_on_substrate as f32, rp.copper as f32));
+        assert!(m.at_edge <= m.on_copper);
     }
 
     #[test]

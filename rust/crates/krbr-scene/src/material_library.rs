@@ -5,7 +5,7 @@ use std::path::Path;
 
 use glam::Vec3;
 
-use crate::material::{srgb_to_linear, Material};
+use crate::material::{parse_hex_rgb, srgb_to_linear, Material};
 use crate::material_io::read_material;
 
 /// 材質名の後ろに付けると、表面の模様（凹凸と粗さのむら）を無くした版になる（例 "plastic+smooth"）。Rust 版だけの書き方
@@ -29,13 +29,9 @@ impl Emission {
     /// "#rrggbb,<cd/m²>"（# は省略可）
     pub fn parse(s: &str) -> Option<Self> {
         let (color, lum) = s.split_once(',')?;
-        let hex = color.trim().trim_start_matches('#');
-        if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-            return None;
-        }
-        let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+        let srgb = parse_hex_rgb(color.trim().trim_start_matches('#'))?;
         let luminance: f32 = lum.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v >= 0.0)?;
-        Some(Self { srgb: [byte(0)?, byte(2)?, byte(4)?], luminance })
+        Some(Self { srgb, luminance })
     }
 
     pub fn suffix(&self) -> String {
@@ -47,6 +43,14 @@ impl Emission {
     pub fn linear_color(&self) -> Vec3 {
         srgb_to_linear(Vec3::new(self.srgb[0] as f32, self.srgb[1] as f32, self.srgb[2] as f32) / 255.0)
     }
+}
+
+/// 材質名の変種の書き方の誤り（"+emit=" の後ろが "#rrggbb,<cd/m²>" になっていない）の説明。誤りが無ければ None。
+/// parse_variant は誤った指定を名前の一部とみなす（ライブラリに無い名前になる）ので、見つからなかったときの警告に使う
+pub fn variant_error(name: &str) -> Option<String> {
+    let (base, _, _) = parse_variant(name);
+    let (_, spec) = base.rsplit_once(EMIT_PREFIX)?;
+    Some(format!("malformed '{EMIT_PREFIX}{spec}' (expected {EMIT_PREFIX}#rrggbb,<cd/m²>)"))
 }
 
 /// 材質名を（ライブラリの材質名, 模様なしか, 発光）に分ける。後ろに付いた "+smooth" と "+emit=..." を外す
@@ -226,18 +230,11 @@ impl MaterialLibrary {
                 Some(existing) => existing.clone(),
                 None => Material { name: name.clone(), base_color_from_model: true, ..Default::default() }, // base_color が無ければモデルの色
             };
-            let mut unknown = Vec::new();
-            read_material(t, &mut m, &mut unknown);
-            if t.contains_key("base_color") {
-                m.base_color_from_model = false;
-            }
-            if let Some(toml::Value::Table(k)) = t.get("krbr") {
-                if let Some(toml::Value::Boolean(v)) = k.get("base_color_from_model") {
-                    m.base_color_from_model = *v;
-                }
-            }
-            for u in unknown {
-                krbr_core::warn!("{}: material '{}': unknown parameter '{}'", source, name, u);
+            // base_color を書いたかどうかと [krbr] base_color_from_model の扱いは read_material の中で決める
+            let mut problems = Vec::new();
+            read_material(t, &mut m, &mut problems);
+            for p in problems {
+                krbr_core::warn!("{}: material '{}': {}", source, name, p);
             }
             self.materials.insert(name.clone(), m);
             self.sources.insert(name.clone(), source.to_string());
@@ -315,9 +312,12 @@ mod tests {
             assert_eq!((base, smooth, e), ("plastic", true, Some(Emission { srgb: [255, 128, 0], luminance: 5000.0 })));
         }
         // 書き方の誤りは材質名の一部とみなす（ライブラリに無いので見つからない）
-        for bad in ["plastic+emit=#ff80,5000", "plastic+emit=#ff8000", "plastic+emit=#ff8000,-1", "plastic+emit=#gg8000,1"] {
+        for bad in ["plastic+emit=#ff80,5000", "plastic+emit=#ff8000", "plastic+emit=#ff8000,-1", "plastic+emit=#gg8000,1", "plastic+emit=#ffあ000,1"] {
             assert!(lib.find_variant(bad).is_none(), "{bad}");
+            assert!(variant_error(bad).is_some(), "{bad}"); // 「ライブラリに無い」ではなく書き方の誤りとして知らせる
         }
+        assert_eq!(variant_error("plastic+smooth+emit=#ff8000,5000"), None);
+        assert_eq!(variant_error("no_such"), None);
         // 組み立てと付け替え
         let e = Emission { srgb: [0x20, 0xff, 0x40], luminance: 2500.0 };
         assert_eq!(variant_name("plastic", true, Some(e)), "plastic+smooth+emit=#20ff40,2500");

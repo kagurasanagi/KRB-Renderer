@@ -18,8 +18,15 @@ pub struct MaskPreset {
     pub note: &'static str,
 }
 
-const W: Vec3 = Vec3::new(0.93, 0.93, 0.90);
-const K: Vec3 = Vec3::new(0.08, 0.08, 0.08);
+/// 白いシルク（sRGB）。シルクの既定の色
+pub const SILK_WHITE: Vec3 = Vec3::new(0.93, 0.93, 0.90);
+/// 黒いシルク（sRGB）。黄・白のレジストに合わせる
+pub const SILK_BLACK: Vec3 = Vec3::new(0.08, 0.08, 0.08);
+const W: Vec3 = SILK_WHITE;
+const K: Vec3 = SILK_BLACK;
+
+/// レジストの既定（色・粗さ・散乱・シルクの色）に使うプリセット。SceneOptions::default はこの値を使う
+pub const DEFAULT_MASK_PRESET: &str = "green";
 
 // 色は「銅の上で見えるレジストの色」（sRGB）。メーカーの色は写真からの目分量で、実測ではない
 const PRESETS: &[MaskPreset] = &[

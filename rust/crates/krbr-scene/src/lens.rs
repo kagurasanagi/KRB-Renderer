@@ -14,6 +14,27 @@ pub enum LensModel {
     Realistic = 2,
 }
 
+impl LensModel {
+    pub const ALL: [LensModel; 3] = [LensModel::Pinhole, LensModel::Thin, LensModel::Realistic];
+
+    /// 設定ファイル（[lens] model）・コマンドライン（--lens）での名前
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LensModel::Pinhole => "pinhole",
+            LensModel::Thin => "thin",
+            LensModel::Realistic => "realistic",
+        }
+    }
+}
+
+impl std::str::FromStr for LensModel {
+    type Err = String;
+    /// 名前（pinhole / thin / realistic）から。知らない名前は Err（打ち間違いを黙って pinhole にしない）
+    fn from_str(s: &str) -> Result<Self, String> {
+        Self::ALL.into_iter().find(|m| m.as_str() == s).ok_or_else(|| format!("unknown lens model '{s}' (pinhole / thin / realistic)"))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LensParams {
     pub model: LensModel,
@@ -68,6 +89,11 @@ pub struct LensSurface {
     pub aperture: f32,
 }
 
+/// 近軸光線の高さ（前の面の有効半径に対する割合）。近軸近似が成り立つほど小さく、追跡の丸め誤差に埋もれない程度に大きくする
+const PARAXIAL_FRACTION: f64 = 0.05;
+/// 焦点距離が求まらないときに返す値（mm）。load で検証するので、届くのは手で組んだ LensSystem だけ
+const FALLBACK_FOCAL_LENGTH_MM: f32 = 50.0;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LensSystem {
     pub surfaces: Vec<LensSurface>,
@@ -96,21 +122,39 @@ impl LensSystem {
         }
     }
 
+    /// pbrt 形式のレンズデータを読む。1 行に 4 つの数（# から後ろはコメント）。数にならない欄や数の個数の違う行は、
+    /// 列がずれた面を作らないよう行番号つきのエラーにする。焦点距離が求まらないレンズもエラー
     pub fn load(p: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(p).map_err(|_| format!("cannot open {}", p.display()))?;
-        let mut out = Self { surfaces: Vec::new(), name: p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default() };
-        for line in text.lines() {
+        Self::parse(&text, &p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()).map_err(|e| format!("{}: {e}", p.display()))
+    }
+
+    /// load の本体（name はファイル名）
+    pub fn parse(text: &str, name: &str) -> Result<Self, String> {
+        let mut out = Self { surfaces: Vec::new(), name: name.to_string() };
+        for (n, line) in text.lines().enumerate() {
             let line = line.split('#').next().unwrap_or("");
-            let v: Vec<f32> = line.split_whitespace().filter_map(|t| t.parse().ok()).collect();
-            if v.len() < 4 {
+            if line.trim().is_empty() {
                 continue;
+            }
+            let v: Vec<f32> = line.split_whitespace().map(|t| t.parse().map_err(|_| format!("line {}: '{t}' is not a number", n + 1))).collect::<Result<_, _>>()?;
+            if v.len() != 4 {
+                return Err(format!("line {}: expected 4 numbers (radius thickness ior aperture), found {}", n + 1, v.len()));
             }
             out.surfaces.push(LensSurface { radius: v[0], thickness: v[1], ior: if v[2] == 0.0 { 1.0 } else { v[2] }, aperture: v[3] });
         }
         if out.surfaces.len() < 2 {
-            return Err(format!("no lens surfaces in {}", p.display()));
+            return Err("no lens surfaces".into());
+        }
+        if out.try_effective_focal_length().is_none() {
+            return Err("a paraxial ray does not pass through the lens (cannot find the focal length)".into());
         }
         Ok(out)
+    }
+
+    /// 近軸光線を入れる高さ（mm）
+    fn paraxial_height(&self) -> f64 {
+        PARAXIAL_FRACTION * 0.5 * self.surfaces[0].aperture as f64
     }
 
     /// 物体側の頂点を z = 0、フィルム側を負とした各面の頂点の z
@@ -190,8 +234,9 @@ impl LensSystem {
     }
 
     /// 物体側の距離 focus_mm（前の頂点から）にピントを合わせるときの、最後の面からフィルムまでの距離
+    /// 光線が通らない（近すぎてピントが合わない）ときは、最後の面の厚み（設計上のフィルムの位置）を返す
     pub fn film_distance_for(&self, focus_mm: f32) -> f32 {
-        let h = 0.05 * 0.5 * self.surfaces[0].aperture as f64;
+        let h = self.paraxial_height();
         let (mut o, mut d) = if focus_mm <= 0.0 || focus_mm > 1e6 {
             (DVec3::new(h, 0.0, 1.0), DVec3::NEG_Z)
         } else {
@@ -207,21 +252,28 @@ impl LensSystem {
         (z_last - z_image).max(0.1) as f32
     }
 
+    /// 有効焦点距離（mm）。求まらなければ FALLBACK_FOCAL_LENGTH_MM（load で検証するので、届くのは手で組んだレンズだけ）
     pub fn effective_focal_length(&self) -> f32 {
-        let h = 0.05 * 0.5 * self.surfaces[0].aperture as f64;
+        self.try_effective_focal_length().unwrap_or(FALLBACK_FOCAL_LENGTH_MM)
+    }
+
+    /// 有効焦点距離（mm）。軸に平行な近軸光線が通らない・曲がらないなら None
+    pub fn try_effective_focal_length(&self) -> Option<f32> {
+        let h = self.paraxial_height();
         let (mut o, mut d) = (DVec3::new(h, 0.0, 1.0), DVec3::NEG_Z);
         if !self.trace(&mut o, &mut d, true) || d.x.abs() < 1e-12 {
-            return 50.0;
+            return None;
         }
         let z_principal = o.z + d.z * ((h - o.x) / d.x);
         let z_focus = o.z + d.z * (-o.x / d.x);
-        (z_principal - z_focus).abs() as f32
+        Some((z_principal - z_focus).abs() as f32)
     }
 
-    /// 設計上の F 値（焦点距離 / 入射瞳の直径）。入射瞳は、物体側から軸に平行に入れた光線が絞りで通る高さから求める
+    /// 設計上の F 値（焦点距離 / 入射瞳の直径）。入射瞳は、物体側から軸に平行に入れた光線が絞りで通る高さから求める。
+    /// 絞りの面（radius 0）が無い・光線が絞りまで届かないなら 0（stopped_down はそのとき絞らない）
     pub fn nominal_f_number(&self) -> f32 {
         let Some(stop) = self.surfaces.iter().rposition(|s| s.radius == 0.0) else { return 0.0 };
-        let h = 0.05 * 0.5 * self.surfaces[0].aperture as f64;
+        let h = self.paraxial_height();
         let (mut o, mut d) = (DVec3::new(h, 0.0, 1.0), DVec3::NEG_Z);
         let zs = self.vertex_z();
         // 絞りの手前まで追跡する（絞りを含めない部分系）
@@ -306,5 +358,36 @@ mod tests {
         let stop = s.surfaces.iter().position(|x| x.radius == 0.0).unwrap();
         assert!((stopped.surfaces[stop].aperture / s.surfaces[stop].aperture - n / 8.0).abs() < 1e-5);
         assert_eq!(s.stopped_down(1.0).surfaces[stop].aperture, s.surfaces[stop].aperture);
+    }
+
+    #[test]
+    fn lens_file_parsing() {
+        // 内蔵のレンズと同じ値を書いたファイルは同じレンズになる
+        let dg = LensSystem::double_gauss50();
+        let text: String = std::iter::once("# radius thickness ior aperture
+
+".to_string())
+            .chain(dg.surfaces.iter().map(|s| format!("{} {} {} {}   # surface
+", s.radius, s.thickness, if s.ior == 1.0 { 0.0 } else { s.ior }, s.aperture)))
+            .collect();
+        assert_eq!(LensSystem::parse(&text, "x").unwrap().surfaces, dg.surfaces);
+        // 数にならない欄・欄の数の違いは行番号つきのエラー（列がずれた面を作らない）
+        let e = LensSystem::parse(&text.replacen("3.76", "3,76", 1), "x").unwrap_err();
+        assert!(e.contains("line 3"), "{e}");
+        let e = LensSystem::parse(&text.replacen(" 3.76", "", 1), "x").unwrap_err();
+        assert!(e.contains("line 3") && e.contains("found 3"), "{e}");
+        // 光が通らないレンズ（開口が 0）
+        assert!(LensSystem::parse("10 1 1.5 0
+-10 1 0 0
+", "x").is_err());
+    }
+
+    #[test]
+    fn lens_model_names() {
+        for m in LensModel::ALL {
+            assert_eq!(m.as_str().parse::<LensModel>(), Ok(m));
+        }
+        assert!("Thin".parse::<LensModel>().is_err());
+        assert!("realistc".parse::<LensModel>().is_err());
     }
 }

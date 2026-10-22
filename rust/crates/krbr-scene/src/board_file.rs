@@ -219,11 +219,19 @@ pub fn edit(pcb: &Path, f: impl FnOnce(&mut DocumentMut)) -> Result<PathBuf, Str
 /// TOML のファイルを、コメントと並びを残したまま書き換える（無ければ new_text から作る）。
 /// 既にあって書式の誤りで読めないときは、触らずにエラーにする
 pub fn edit_toml(file: &Path, new_text: &str, f: impl FnOnce(&mut DocumentMut)) -> Result<(), String> {
+    try_edit_toml(file, new_text, |doc| {
+        f(doc);
+        Ok(())
+    })
+}
+
+/// edit_toml の、書き換えが失敗しうる版：f が Err を返したらファイルを書かずにそのエラーを返す
+pub fn try_edit_toml(file: &Path, new_text: &str, f: impl FnOnce(&mut DocumentMut) -> Result<(), String>) -> Result<(), String> {
     let mut doc: DocumentMut = match std::fs::read_to_string(file) {
         Ok(s) => s.parse().map_err(|e| format!("cannot read {} ({e}); not overwriting it - fix or remove the file first", file.display()))?,
         Err(_) => new_text.parse().map_err(|e| format!("template: {e}"))?,
     };
-    f(&mut doc);
+    f(&mut doc).map_err(|e| format!("{}: {e}; not written", file.display()))?;
     write_atomic(file, &doc.to_string()).map_err(|e| format!("cannot write {}: {e}", file.display()))
 }
 
@@ -237,8 +245,29 @@ fn write_atomic(file: &Path, text: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, file)
 }
 
-/// 最上位の表 keys を src の内容で差し替える（src に無い鍵は消す）。差し替えた表はファイルの最後に置く
+/// 最上位の表 keys を src の内容で差し替える（src に無い鍵は消す）。差し替えた表はファイルの最後に置く。
+/// 新しい内容を作れなかったとき（実際にはまず起きない）は、doc に触らずにエラーを記録する。
+/// 失敗をファイルを書く側に伝えるには try_replace_tables と try_edit_toml を使う
 pub fn replace_tables(doc: &mut DocumentMut, src: &toml::Table, keys: &[&str]) {
+    if let Err(e) = try_replace_tables(doc, src, keys) {
+        krbr_core::error!("{e}");
+    }
+}
+
+/// replace_tables の本体。新しい内容を先に作ってから古い表を消すので、失敗しても doc は元のまま（上書きの内容が消えない）
+pub fn try_replace_tables(doc: &mut DocumentMut, src: &toml::Table, keys: &[&str]) -> Result<(), String> {
+    let mut part = toml::Table::new();
+    for k in keys {
+        if let Some(v) = src.get(*k) {
+            part.insert(k.to_string(), v.clone());
+        }
+    }
+    let src_doc = if part.is_empty() {
+        None
+    } else {
+        let text = toml::to_string(&part).map_err(|e| format!("cannot write the tables [{}]: {e}", keys.join("], [")))?;
+        Some(text.parse::<DocumentMut>().map_err(|e| format!("cannot write the tables [{}]: {e}", keys.join("], [")))?)
+    };
     for k in keys {
         if let Some(item) = doc.remove(k) {
             // 足したときに前に付けた、ファイルの最後のコメントは残す
@@ -249,17 +278,10 @@ pub fn replace_tables(doc: &mut DocumentMut, src: &toml::Table, keys: &[&str]) {
             }
         }
     }
-    let mut part = toml::Table::new();
-    for k in keys {
-        if let Some(v) = src.get(*k) {
-            part.insert(k.to_string(), v.clone());
-        }
+    if let Some(src_doc) = src_doc {
+        append_items(doc, src_doc.iter().map(|(k, i)| (k.to_string(), i.clone())).collect());
     }
-    if part.is_empty() {
-        return;
-    }
-    let Ok(src_doc) = toml::to_string(&part).unwrap_or_default().parse::<DocumentMut>() else { return };
-    append_items(doc, src_doc.iter().map(|(k, i)| (k.to_string(), i.clone())).collect());
+    Ok(())
 }
 
 fn raw(r: &toml_edit::RawString) -> String {

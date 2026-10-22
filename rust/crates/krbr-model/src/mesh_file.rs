@@ -35,8 +35,21 @@ fn bad(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.to_string())
 }
 
+/// 部位の名前の長さの上限（バイト）。壊れたファイルで巨大な確保をしないための歯止め
+const MAX_PART_NAME: usize = 4096;
+/// ヘッダ（"KRBM" + u32[4]）の大きさ
+const HEADER_BYTES: u64 = 4 + 16;
+/// 1 頂点・1 三角形・1 部位（名前を除く）あたりのバイト数
+const VERTEX_BYTES: u64 = 12 + 12;
+const TRIANGLE_BYTES: u64 = 12 + 4;
+const PART_BYTES: u64 = 4 + 20;
+
+/// 読み込む。ヘッダの数がファイルの大きさと合わない、添字が頂点数以上、部位番号が部位数以上なら InvalidData
+/// （キャッシュなら作り直しになる）。ヘッダの数で先に大きな確保をしないよう、ファイルの大きさを先に確かめる
 pub fn read_mesh_file(p: &Path) -> io::Result<ModelMesh> {
-    let mut f = io::BufReader::new(std::fs::File::open(p)?);
+    let file = std::fs::File::open(p)?;
+    let file_len = file.metadata()?.len();
+    let mut f = io::BufReader::new(file);
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
     if &magic != MAGIC {
@@ -46,7 +59,13 @@ pub fn read_mesh_file(p: &Path) -> io::Result<ModelMesh> {
     if hdr[0] != MESH_FILE_VERSION {
         return Err(bad("unsupported .krbm version"));
     }
-    let (nv, nt, nc) = (hdr[1] as usize, hdr[2] as usize, hdr[3] as usize);
+    let (nv, nt, nc) = (hdr[1] as u64, hdr[2] as u64, hdr[3] as u64);
+    // 名前を除いた大きさ（u32 の数から計算するので u64 で溢れない）
+    let min_len = HEADER_BYTES + nv * VERTEX_BYTES + nt * TRIANGLE_BYTES + nc * PART_BYTES;
+    if min_len > file_len {
+        return Err(bad("truncated .krbm file (the header does not match the file size)"));
+    }
+    let (nv, nt, nc) = (nv as usize, nt as usize, nc as usize);
     let mut m = ModelMesh::default();
     m.mesh.positions = vec3s(&read_exact_vec(&mut f, nv * 12)?);
     m.mesh.normals = vec3s(&read_exact_vec(&mut f, nv * 12)?);
@@ -54,12 +73,19 @@ pub fn read_mesh_file(p: &Path) -> io::Result<ModelMesh> {
     m.mesh.tri_material = u32s(&read_exact_vec(&mut f, nt * 4)?);
     for _ in 0..nc {
         let len = u32s(&read_exact_vec(&mut f, 4)?)[0] as usize;
-        if len > 4096 {
+        if len > MAX_PART_NAME {
             return Err(bad("part name too long"));
         }
         let name = String::from_utf8_lossy(&read_exact_vec(&mut f, len)?).into_owned();
         let c = f32s(&read_exact_vec(&mut f, 20)?);
         m.parts.push(ModelPart { name, srgb: Vec3::new(c[0], c[1], c[2]), alpha: c[3], has_color: c[4] != 0.0 });
+    }
+    // 後段（ピック、GPU）は添字を検証せずに使うので、ここで確かめる。変換器は部位の無いメッシュでは三角形も作らない
+    if m.mesh.indices.iter().any(|&i| i as usize >= nv) {
+        return Err(bad("vertex index out of range"));
+    }
+    if m.mesh.tri_material.iter().any(|&t| t as usize >= nc.max(1)) {
+        return Err(bad("part index out of range"));
     }
     Ok(m)
 }
@@ -128,5 +154,23 @@ mod tests {
         assert_eq!(r.parts[1].name, "端子");
         assert!(r.parts[1].has_color && !r.parts[0].has_color);
         assert_eq!(r.parts[1].kicad_color_name(), Some("metal_grey_pins"));
+
+        // 壊れたファイル：ヘッダの数がファイルより大きい（巨大な確保をせずにエラー）、添字が範囲外
+        let bytes = std::fs::read(&p).unwrap();
+        let mut huge = bytes.clone();
+        huge[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(&p, &huge).unwrap();
+        assert_eq!(read_mesh_file(&p).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        let mut bad_index = bytes.clone();
+        let at = (HEADER_BYTES + 3 * VERTEX_BYTES) as usize; // 最初の添字
+        bad_index[at..at + 4].copy_from_slice(&3u32.to_le_bytes());
+        std::fs::write(&p, &bad_index).unwrap();
+        assert_eq!(read_mesh_file(&p).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        let mut bad_part = bytes;
+        let at = (HEADER_BYTES + 3 * VERTEX_BYTES + 12) as usize; // 最初の三角形の部位番号
+        bad_part[at..at + 4].copy_from_slice(&2u32.to_le_bytes());
+        std::fs::write(&p, &bad_part).unwrap();
+        assert_eq!(read_mesh_file(&p).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        let _ = std::fs::remove_file(&p);
     }
 }

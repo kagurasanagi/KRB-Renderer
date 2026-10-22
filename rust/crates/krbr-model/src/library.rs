@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::{c_char, c_double, c_int, CString};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use krbr_core::{to_hex, xxh64};
 
@@ -144,12 +144,29 @@ struct Job {
     path: PathBuf,
     cache_file: Option<PathBuf>,
     file_hash: String,
+    stamp: Option<FileStamp>,
+}
+
+/// ファイルの更新時刻と大きさ。メモした結果は、これが変わったら捨てて読み直す
+type FileStamp = (SystemTime, u64);
+
+fn file_stamp(p: &Path) -> Option<FileStamp> {
+    let m = std::fs::metadata(p).ok()?;
+    Some((m.modified().ok()?, m.len()))
+}
+
+/// メモした結果と、そのときのファイルの状態
+struct Memo {
+    stamp: Option<FileStamp>,
+    result: LoadResult,
 }
 
 #[derive(Default)]
 struct State {
-    memo: HashMap<PathBuf, LoadResult>,
-    queued: BTreeMap<PathBuf, ()>,
+    /// パスごとの結果。失敗も覚える（同じ実行内で同じ失敗を繰り返さない）が、ファイルが変われば捨てる
+    memo: HashMap<PathBuf, Memo>,
+    /// 裏で分割を待っているパスと、そのファイル内容のハッシュ（待っている間はハッシュを計算し直さない）
+    queued: BTreeMap<PathBuf, String>,
     queue: VecDeque<Job>,
     stop: bool,
     completed: usize,
@@ -183,20 +200,25 @@ impl ModelLibrary {
         }
     }
 
-    /// 読み込んで返す（同じ実行内では同じパスを 1 回だけ読む）
+    /// 読み込んで返す（同じ実行内では、ファイルが変わらない限り同じパスを 1 回だけ読む）
     pub fn get(&self, p: &Path) -> LoadResult {
         if !is_step(p) {
-            let res = LoadResult { error: format!("unsupported model format {}", p.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default()), ..Default::default() };
+            // STEP と同じく、先にメモを見る（同じファイルを使う部品が多くても failed は 1 つ）
+            let stamp = file_stamp(p);
             let mut st = self.shared.state.lock().unwrap();
+            if let Some(r) = memo_get(&mut st, p, stamp) {
+                return r;
+            }
+            let res = LoadResult { error: format!("unsupported model format {}", p.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default()), ..Default::default() };
             st.stats.failed += 1;
-            st.memo.insert(p.to_path_buf(), res.clone());
+            st.memo.insert(p.to_path_buf(), Memo { stamp, result: res.clone() });
             return res;
         }
-        let (hit, cache_file, file_hash) = self.lookup(p);
+        let (hit, cache_file, file_hash, stamp) = self.lookup(p);
         if let Some(r) = hit {
             return r;
         }
-        load_now(&self.shared, p, cache_file.as_deref(), &file_hash)
+        load_now(&self.shared, p, cache_file.as_deref(), &file_hash, stamp)
     }
 
     /// キャッシュにあればすぐ返す。無ければ裏で分割を始めて pending を返す（保存の監視中に使う）
@@ -204,15 +226,19 @@ impl ModelLibrary {
         if !is_step(p) {
             return self.get(p);
         }
-        let (hit, cache_file, file_hash) = self.lookup(p);
+        // 待っている間にシーンを作り直しても、ファイル全体を読んでハッシュを計算し直さない
+        if let Some(h) = self.shared.state.lock().unwrap().queued.get(p) {
+            return LoadResult { pending: true, file_hash: h.clone(), ..Default::default() };
+        }
+        let (hit, cache_file, file_hash, stamp) = self.lookup(p);
         if let Some(r) = hit {
             return r;
         }
         // 分割は裏の 1 本のスレッドで順に行う（OCCT の読み込みを並べない）
         let mut st = self.shared.state.lock().unwrap();
         if !st.queued.contains_key(p) {
-            st.queued.insert(p.to_path_buf(), ());
-            st.queue.push_back(Job { path: p.to_path_buf(), cache_file, file_hash: file_hash.clone() });
+            st.queued.insert(p.to_path_buf(), file_hash.clone());
+            st.queue.push_back(Job { path: p.to_path_buf(), cache_file, file_hash: file_hash.clone(), stamp });
             let mut w = self.worker.lock().unwrap();
             if w.is_none() {
                 let shared = Arc::clone(&self.shared);
@@ -236,14 +262,16 @@ impl ModelLibrary {
         self.shared.state.lock().unwrap().queued.len()
     }
 
-    /// メモかディスクのキャッシュにあれば返す。無ければ (None, キャッシュの場所, ハッシュ)
-    fn lookup(&self, p: &Path) -> (Option<LoadResult>, Option<PathBuf>, String) {
-        if let Some(r) = self.shared.state.lock().unwrap().memo.get(p) {
-            return (Some(r.clone()), None, String::new());
+    /// メモかディスクのキャッシュにあれば返す。無ければ (None, キャッシュの場所, ハッシュ, 読む前のファイルの状態)
+    fn lookup(&self, p: &Path) -> (Option<LoadResult>, Option<PathBuf>, String, Option<FileStamp>) {
+        // 状態は内容を読む前に取る（読んでいる間に書き換わったら、次に見たときに読み直す）
+        let stamp = file_stamp(p);
+        if let Some(r) = memo_get(&mut self.shared.state.lock().unwrap(), p, stamp) {
+            return (Some(r), None, String::new(), stamp);
         }
         let file_hash = std::fs::read(p).map(|b| to_hex(xxh64(&b))).unwrap_or_default();
         if !self.use_cache || file_hash.is_empty() {
-            return (None, None, file_hash);
+            return (None, None, file_hash, stamp);
         }
         // キーはファイル内容のハッシュ＋分割パラメータ＋読み込み器（C++ 版と同じ）
         let params = self.shared.params;
@@ -260,12 +288,22 @@ impl ModelLibrary {
                 let res = LoadResult { mesh: Some(Arc::new(m)), from_cache: true, file_hash, ..Default::default() };
                 let mut st = self.shared.state.lock().unwrap();
                 st.stats.cache_hits += 1;
-                st.memo.insert(p.to_path_buf(), res.clone());
-                (Some(res), None, String::new())
+                st.memo.insert(p.to_path_buf(), Memo { stamp, result: res.clone() });
+                (Some(res), None, String::new(), stamp)
             }
-            Err(_) => (None, Some(cache_file), file_hash),
+            Err(_) => (None, Some(cache_file), file_hash, stamp),
         }
     }
+}
+
+/// メモにあり、ファイルがそのときから変わっていなければ返す。変わっていれば捨てる（STEP を差し替えた、一時的な失敗を直した）
+fn memo_get(st: &mut State, p: &Path, stamp: Option<FileStamp>) -> Option<LoadResult> {
+    let m = st.memo.get(p)?;
+    if m.stamp == stamp {
+        return Some(m.result.clone());
+    }
+    st.memo.remove(p);
+    None
 }
 
 impl Drop for ModelLibrary {
@@ -278,7 +316,7 @@ impl Drop for ModelLibrary {
     }
 }
 
-fn load_now(shared: &Shared, p: &Path, cache_file: Option<&Path>, file_hash: &str) -> LoadResult {
+fn load_now(shared: &Shared, p: &Path, cache_file: Option<&Path>, file_hash: &str, stamp: Option<FileStamp>) -> LoadResult {
     let t0 = Instant::now();
     let name = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
     let mut res = LoadResult { file_hash: file_hash.to_string(), ..Default::default() };
@@ -305,7 +343,7 @@ fn load_now(shared: &Shared, p: &Path, cache_file: Option<&Path>, file_hash: &st
     } else {
         st.stats.failed += 1;
     }
-    st.memo.insert(p.to_path_buf(), res.clone());
+    st.memo.insert(p.to_path_buf(), Memo { stamp, result: res.clone() });
     res
 }
 
@@ -322,7 +360,7 @@ fn worker_loop(shared: Arc<Shared>) {
             }
             st.queue.pop_front().unwrap()
         };
-        load_now(&shared, &job.path, job.cache_file.as_deref(), &job.file_hash);
+        load_now(&shared, &job.path, job.cache_file.as_deref(), &job.file_hash, job.stamp);
         let mut st = shared.state.lock().unwrap();
         st.queued.remove(&job.path);
         st.completed += 1;
@@ -340,5 +378,22 @@ mod tests {
         assert_eq!(key, "occt-step|0.010000|0.350000|v3");
         let ph = to_hex(xxh64(key.as_bytes()));
         assert_eq!(ph.len(), 16);
+    }
+
+    #[test]
+    fn memo_counts_a_file_once_and_is_dropped_when_the_file_changes() {
+        let dir = std::env::temp_dir().join(format!("krbr_rust_library_memo_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wrl = dir.join("a.wrl");
+        std::fs::write(&wrl, "#VRML V2.0 utf8\n").unwrap();
+        let lib = ModelLibrary::new(dir.join("cache"), MeshParams::default(), false);
+        for _ in 0..3 {
+            assert!(lib.get(&wrl).mesh.is_none());
+        }
+        assert_eq!(lib.stats().failed, 1); // 同じファイルを使う部品がいくつあっても 1 回
+        std::fs::write(&wrl, "#VRML V2.0 utf8\n# changed\n").unwrap(); // 大きさが変わる
+        assert!(lib.get(&wrl).mesh.is_none());
+        assert_eq!(lib.stats().failed, 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

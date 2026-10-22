@@ -22,6 +22,27 @@ pub enum BumpPattern {
     Weave = 2,
 }
 
+impl BumpPattern {
+    pub const ALL: [BumpPattern; 3] = [BumpPattern::None, BumpPattern::Noise, BumpPattern::Weave];
+
+    /// 材質の TOML（[krbr] bump_pattern）での名前
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BumpPattern::None => "none",
+            BumpPattern::Noise => "noise",
+            BumpPattern::Weave => "weave",
+        }
+    }
+}
+
+impl std::str::FromStr for BumpPattern {
+    type Err = String;
+    /// 名前（none / noise / weave）から。知らない名前は Err（黙って none にしない）
+    fn from_str(s: &str) -> Result<Self, String> {
+        Self::ALL.into_iter().find(|p| p.as_str() == s).ok_or_else(|| format!("unknown bump_pattern '{s}' (none / noise / weave)"))
+    }
+}
+
 /// Sellmeier の分散式 n²(λ) = 1 + Σ B_i λ² / (λ² − C_i)（λ は µm、C_i は µm²）
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sellmeier {
@@ -50,6 +71,8 @@ pub struct Material {
     pub masked_mask: u32,
 
     // ---- OpenPBR Surface（既定値は仕様のとおり）。色はリニア
+    /// 例外：レジストの材質（scene.rs の make_mask_material）では、顔料が光を散らす確率に流用する
+    /// （shaders/scene.glsl のレジストの処理と対応。材質ライブラリの材質では仕様どおりの意味）
     pub base_weight: f32,
     pub base_color: Vec3,
     pub base_diffuse_roughness: f32,
@@ -188,32 +211,8 @@ impl Material {
     }
 }
 
-/// sRGB（表示値）からリニアへ
-pub fn srgb_to_linear_f(c: f32) -> f32 {
-    let c = c.clamp(0.0, 1.0);
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-pub fn srgb_to_linear(c: Vec3) -> Vec3 {
-    Vec3::new(srgb_to_linear_f(c.x), srgb_to_linear_f(c.y), srgb_to_linear_f(c.z))
-}
-
-pub fn linear_to_srgb_f(c: f32) -> f32 {
-    let c = c.clamp(0.0, 1.0);
-    if c <= 0.0031308 {
-        12.92 * c
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    }
-}
-
-pub fn linear_to_srgb(c: Vec3) -> Vec3 {
-    Vec3::new(linear_to_srgb_f(c.x), linear_to_srgb_f(c.y), linear_to_srgb_f(c.z))
-}
+// sRGB とリニアの変換・16 進の色の解析は krbr-model（3D モデルの面の色と共有）に 1 つだけ置く。0..1 に収めてから変換する
+pub use krbr_model::color::{linear_to_srgb, linear_to_srgb_f, parse_hex_rgb, srgb_to_linear, srgb_to_linear_f};
 
 #[cfg(test)]
 mod tests {
@@ -229,6 +228,14 @@ mod tests {
         assert_eq!(no_dispersion.ior_at(400.0), 1.491);
         let plain = Material::default();
         assert_eq!(plain.ior_at(400.0), 1.5);
+    }
+
+    #[test]
+    fn bump_pattern_names() {
+        for p in BumpPattern::ALL {
+            assert_eq!(p.as_str().parse::<BumpPattern>(), Ok(p));
+        }
+        assert!("Noise".parse::<BumpPattern>().is_err());
     }
 
     #[test]

@@ -3,7 +3,8 @@
 
 /// ファイルの先頭の説明
 pub const HEADER: &str = r#"# krbr: この基板の設定。書いていない項目は既定値を使います（コマンドラインの指定が優先されます）
-# 相対パスは基板のフォルダから。色は sRGB の [r, g, b]（0..1）
+# 相対パスは基板のフォルダから。色は sRGB の [r, g, b]（0..1。画面で見る色。材質ライブラリ materials/*.toml の色はリニア）
+# 知らない項目・型の違う値・範囲外の値は、警告してその項目だけ既定値を使います
 #   [board] [relief] [surface] [placeholder] [paths] [kicad_cli]  基板の設定
 #   [environment] [camera] [render] [lens]                         照明・カメラ・レンダリングの設定
 #   [ref.<部品番号>] / [[model]]  材質の上書き（ビューアと krbr material set が書く）
@@ -14,12 +15,12 @@ pub const BOARD_TOML: &str = r#"
 # ---------------------------------------------------------------- 基板の設定
 
 [board]
-finish = "auto"              # auto（stackup の copper_finish に従う）/ ENIG / HASL / OSP
+finish = "auto"              # auto（stackup の copper_finish に従う）/ ENIG / HASL / OSP / none（銅のまま）
 # mask_color = [0.05, 0.42, 0.16]   # 省略時は stackup の色、それも無ければ緑
 # mask_color = "jlcpcb-purple"       # またはプリセット名（色・粗さ・散乱をまとめて設定。krbr mask list で一覧）
 mask_roughness = 0.18
 mask_scatter = 0.3           # レジストの顔料自身が光を散らす割合
-# silk_color = [0.93, 0.93, 0.90]   # 省略時は白。レジストのプリセットが黄・白なら黒
+# silk_color = [0.93, 0.93, 0.90]   # 省略時は、レジストのプリセットを選んだらそれに合わせた色（黄・白なら黒）、無ければ stackup の色、それも無ければ白
 fr4_color = [0.62, 0.58, 0.42]
 clip_silk_by_mask = true     # レジストの開口部ではシルクを印刷しない
 texture_px_per_mm = 50       # 銅・レジストの縁からの距離場の解像度（50 = 20 µm/px）
