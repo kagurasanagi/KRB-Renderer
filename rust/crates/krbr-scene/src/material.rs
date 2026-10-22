@@ -2,14 +2,13 @@
 
 use glam::Vec3;
 
+/// 材質の種別。値は shaders/common.glsl の MAT_* と同じにすること
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum MaterialKind {
     Generic = 0,
-    /// 層テクスチャで材質を決める基板面（凹凸を形状にしない場合）
-    BoardSurface = 1,
     /// レジストの下に別の材質（masked_base）がある面。レジストは masked_mask
-    Masked = 2,
+    Masked = 1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,8 +64,6 @@ impl Sellmeier {
 pub struct Material {
     pub name: String,
     pub kind: MaterialKind,
-    /// BoardSurface 用（0=表, 1=裏）
-    pub board_side: u32,
     pub masked_base: u32,
     pub masked_mask: u32,
 
@@ -141,7 +138,6 @@ impl Default for Material {
         Self {
             name: String::new(),
             kind: MaterialKind::Generic,
-            board_side: 0,
             masked_base: 0,
             masked_mask: 0,
             base_weight: 1.0,

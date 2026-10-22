@@ -9,17 +9,15 @@ use krbr_kicad::{rotate_point, Board, Box2, GrKind, PadType};
 
 use crate::shapes::*;
 
-/// 基板メッシュの三角形ごとの材質区分
+/// 基板メッシュの三角形ごとの材質区分。基板メッシュは側面と穴の内壁だけで、上下の面は銅・レジスト・シルクの厚みの
+/// 形状（relief.rs、ReliefMat）が覆う
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum BoardMat {
-    /// 上面（層テクスチャで材質を決める）
-    Top = 0,
-    Bottom = 1,
     /// 外形の側面・メッキなし穴（FR4 の断面）
-    Edge = 2,
+    Edge = 0,
     /// メッキ穴の内壁
-    Plated = 3,
+    Plated = 1,
 }
 
 /// 2D の外接矩形は krbr-kicad の Box2 に一本化した（以前の名前で使っている所のための別名）
@@ -48,13 +46,11 @@ pub struct BoardGeometry {
 pub struct BoardBuildOptions {
     /// 基材の半分の厚み（<= 0 なら板厚の半分）
     pub core_half: f64,
-    /// 上下面を作る（表面の凹凸を別に作る場合は false）
-    pub caps: bool,
 }
 
 impl Default for BoardBuildOptions {
     fn default() -> Self {
-        Self { core_half: -1.0, caps: true }
+        Self { core_half: -1.0 }
     }
 }
 
@@ -247,14 +243,9 @@ impl Holes {
     }
 }
 
-struct Cap {
-    y: f64,
-    normal_y: f32, // +1: 上向きの面, -1: 下向き
-    mat: u32,
-}
-
-/// 外周＋穴を三角形に分けて、各 cap の高さに面を張る
-fn triangulate_faces(rings: &[Ring], caps: &[Cap], center: Vec2, mesh: &mut Mesh) {
+/// 外周＋穴を三角形に分けて、高さ y に水平な面を張る（up: 上向きの面か）
+fn triangulate_face(rings: &[Ring], y: f64, up: bool, mat: u32, center: Vec2, mesh: &mut Mesh) {
+    let normal_y = if up { 1.0 } else { -1.0 };
     let mut ear = earcut::Earcut::<f64>::new();
     let mut tri: Vec<u32> = Vec::new();
     for ring in rings {
@@ -270,17 +261,15 @@ fn triangulate_faces(rings: &[Ring], caps: &[Cap], center: Vec2, mesh: &mut Mesh
             }
         }
         ear.earcut(flat.iter().cloned(), &hole_indices, &mut tri);
-        for cap in caps {
-            let base = mesh.positions.len() as u32;
-            for v in &flat {
-                mesh.add_vertex(board_to_world(Vec2::new(v[0], v[1]), cap.y, center), Vec3::new(0.0, cap.normal_y, 0.0));
-            }
-            for t in tri.chunks_exact(3) {
-                if cap.normal_y > 0.0 {
-                    mesh.add_triangle(base + t[0], base + t[1], base + t[2], cap.mat);
-                } else {
-                    mesh.add_triangle(base + t[0], base + t[2], base + t[1], cap.mat);
-                }
+        let base = mesh.positions.len() as u32;
+        for v in &flat {
+            mesh.add_vertex(board_to_world(Vec2::new(v[0], v[1]), y, center), Vec3::new(0.0, normal_y, 0.0));
+        }
+        for t in tri.chunks_exact(3) {
+            if up {
+                mesh.add_triangle(base + t[0], base + t[1], base + t[2], mat);
+            } else {
+                mesh.add_triangle(base + t[0], base + t[2], base + t[1], mat);
             }
         }
     }
@@ -354,7 +343,7 @@ pub fn extrude_region(region: &Paths, y_face: f64, y_base: f64, face_up: bool, f
     }
     let united = unite(region, FillRule::NonZero);
     let rings = nest_rings(&united);
-    triangulate_faces(&rings, &[Cap { y: y_face, normal_y: if face_up { 1.0 } else { -1.0 }, mat: face_mat }], center, mesh);
+    triangulate_face(&rings, y_face, face_up, face_mat, center, mesh);
     if (y_face - y_base).abs() < 1e-9 {
         return;
     }
@@ -408,8 +397,8 @@ pub fn build_board_geometry(board: &Board, opts: &BoardBuildOptions) -> BoardGeo
         if !p.drill.present || !matches!(p.kind, PadType::ThruHole | PadType::NpThruHole) {
             continue;
         }
-        let c = p.pos + rotate_point(p.drill.offset, p.angle_deg);
-        holes.add(c, p.angle_deg, p.drill.size, p.drill.oval, p.kind == PadType::ThruHole);
+        // 穴はパッドの位置（ファイルの (at)）に開ける。drill の offset は銅の形だけをずらす（Pad::shape_pos）
+        holes.add(p.pos, p.angle_deg, p.drill.size, p.drill.oval, p.kind == PadType::ThruHole);
         geo.hole_count += 1;
     }
     for v in &board.vias {
@@ -422,15 +411,8 @@ pub fn build_board_geometry(board: &Board, opts: &BoardBuildOptions) -> BoardGeo
     geo.body = subtract(&geo.region, &unite(&holes.paths, FillRule::NonZero));
     let rings = nest_rings(&geo.body);
 
+    // 上下の面は作らない（基材の面は relief.rs の凹凸の形状が ±core_half の高さで覆う）
     let (y_top, y_bot) = (geo.core_half, -geo.core_half);
-    if opts.caps {
-        triangulate_faces(
-            &rings,
-            &[Cap { y: y_top, normal_y: 1.0, mat: BoardMat::Top as u32 }, Cap { y: y_bot, normal_y: -1.0, mat: BoardMat::Bottom as u32 }],
-            geo.center,
-            &mut geo.mesh,
-        );
-    }
     for r in all_rings(&rings) {
         build_walls(r, y_top, y_bot, geo.center, &|p0, p1| holes.wall_mat(p0, p1), &mut geo.mesh);
     }
@@ -551,20 +533,21 @@ mod tests {
         let board = mixed_holes_board();
         let geo = build_board_geometry(&board, &BoardBuildOptions::default());
         let m = &geo.mesh;
-        // 判定を作り直す前（全メッキ穴との距離を 0.02 mm の許容差で調べていたとき）と同じ形
+        // 判定を作り直す前（全メッキ穴との距離を 0.02 mm の許容差で調べていたとき）と同じ形。値は上下の面を作らなくした後の
+        // もの（作っていたときに、上下の面を除いて求めた値と一致することを確かめてある）
         let psum: f64 = m.positions.iter().map(|p| (p.x as f64) * 1.0 + (p.y as f64) * 3.0 + (p.z as f64) * 7.0).sum();
         let isum: u64 = m.indices.iter().enumerate().map(|(k, &i)| (k as u64 % 13 + 1) * i as u64).sum();
-        assert_eq!((m.positions.len(), m.triangle_count(), isum), (7158, 4988, 303325092));
-        assert!((psum - 89399.969666).abs() < 1e-3, "{psum}");
+        assert_eq!((m.positions.len(), m.triangle_count(), isum), (4772, 2386, 119490904));
+        assert!((psum - 59599.979777).abs() < 1e-3, "{psum}");
+        // 上下の面は作らない（法線はすべて水平）
+        assert!(m.normals.iter().all(|n| n.y == 0.0));
 
         // 側壁の四角形（三角形 2 枚）ごとに、上面の辺の中点が、どの穴の縁にあるかで正解を決める
         let to_board = |p: Vec3| Vec2::new(p.x as f64 + geo.center.x, p.z as f64 + geo.center.y);
         let mut plated_walls = 0;
         let mut checked = 0;
         for (t, &mat) in m.tri_material.iter().enumerate() {
-            if mat != BoardMat::Plated as u32 && mat != BoardMat::Edge as u32 {
-                continue;
-            }
+            assert!(mat == BoardMat::Plated as u32 || mat == BoardMat::Edge as u32);
             let tri: Vec<Vec3> = (0..3).map(|k| m.positions[m.indices[3 * t + k] as usize]).collect();
             let top: Vec<Vec2> = tri.iter().filter(|p| p.y > 0.0).map(|&p| to_board(p)).collect();
             if top.len() != 2 {
@@ -581,6 +564,61 @@ mod tests {
             checked += 1;
         }
         assert!(plated_walls > 0 && checked > plated_walls);
+    }
+
+    /// drill の offset（KiCad の PAD::ShapePos）：穴はパッドの位置に開き、銅とレジスト開口は形のずれた位置に置く
+    #[test]
+    fn drill_offset_moves_copper_and_mask_but_not_the_hole() {
+        let mut board = Board::default();
+        let c = [Vec2::new(0.0, 0.0), Vec2::new(20.0, 0.0), Vec2::new(20.0, 10.0), Vec2::new(0.0, 10.0)];
+        for i in 0..4 {
+            board.graphics.push(line(c[i], c[(i + 1) % 4]));
+        }
+        let mut pad = hole_pad(Vec2::new(10.0, 5.0), 90.0, Vec2::splat(0.6), false, PadType::ThruHole);
+        pad.size = Vec2::new(3.0, 1.2);
+        pad.shape = PadShape::Rect;
+        pad.drill.offset = Vec2::new(0.8, 0.0);
+        pad.layers = vec!["*.Cu".into(), "*.Mask".into()];
+        pad.mask_margin = Some(0.1);
+        board.pads.push(pad);
+        // 90° 回したパッドなので、x 方向のずれは画面の上（-y）へ
+        let shape_center = Vec2::new(10.0, 4.2);
+
+        // 穴の内壁（メッキ）の頂点は、パッドの位置を中心に半径 0.3 の円の上
+        let geo = build_board_geometry(&board, &BoardBuildOptions::default());
+        let m = &geo.mesh;
+        let mut wall = 0;
+        for (t, &mat) in m.tri_material.iter().enumerate() {
+            if mat != BoardMat::Plated as u32 {
+                continue;
+            }
+            for k in 0..3 {
+                let p = m.positions[m.indices[3 * t + k] as usize];
+                let q = Vec2::new(p.x as f64 + geo.center.x, p.z as f64 + geo.center.y);
+                assert!(((q - Vec2::new(10.0, 5.0)).length() - 0.3).abs() <= HOLE_EDGE_TOL, "hole vertex {q}");
+                wall += 1;
+            }
+        }
+        assert!(wall > 0);
+
+        // 銅（3 x 1.2 を 90° 回した 1.2 x 3）とレジスト開口（0.1 広い）は、形の中心のまわり
+        let sp = crate::raster::collect_side_paths(&board, krbr_kicad::Side::Front, &crate::LayerArtOptions::default(), None);
+        let bbox = |p: &Paths| {
+            let mut b = Box2::default();
+            for path in p.iter() {
+                for q in path_points(path) {
+                    b.add(q);
+                }
+            }
+            b
+        };
+        let (cu, mask) = (bbox(&sp.copper), bbox(&sp.mask_open));
+        let near = |a: Vec2, b: Vec2| (a - b).length() < 1e-3;
+        assert!(near(cu.lo, shape_center - Vec2::new(0.6, 1.5)) && near(cu.hi, shape_center + Vec2::new(0.6, 1.5)), "{cu:?}");
+        assert!(near(mask.lo, shape_center - Vec2::new(0.7, 1.6)) && near(mask.hi, shape_center + Vec2::new(0.7, 1.6)), "{mask:?}");
+        // タイルの範囲（Pad::extent）も、形と穴を含む
+        let e = board.pads[0].extent(&board.setup);
+        assert!(e.lo.x <= mask.lo.x && e.lo.y <= mask.lo.y && e.hi.x >= mask.hi.x && e.hi.y >= mask.hi.y && e.hi.y >= 5.3, "{e:?}");
     }
 
     #[test]

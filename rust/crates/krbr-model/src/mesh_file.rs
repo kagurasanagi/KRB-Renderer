@@ -1,4 +1,4 @@
-//! `.krbm`：3D モデルの分割結果のファイル形式（C++ の `model/mesh_file.hpp` と同じ）
+//! `.krbm`：3D モデルの分割結果のファイル形式（STEP 変換器 DLL の `step_dll/mesh_file.hpp` と同じ）
 //!   "KRBM" + u32[4]{version, 頂点数, 三角形数, 部位数}
 //!   + 頂点 f32x3[n] + 法線 f32x3[n] + 添字 u32[3t] + 三角形ごとの部位番号 u32[t]
 //!   + 部位ごとに { u32 名前の長さ, 名前(UTF-8), f32[5]{r, g, b, a, 色あり} }
@@ -35,8 +35,9 @@ fn bad(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.to_string())
 }
 
-/// 部位の名前の長さの上限（バイト）。壊れたファイルで巨大な確保をしないための歯止め
-const MAX_PART_NAME: usize = 4096;
+/// 部位の名前の長さの上限（バイト）。壊れたファイルで巨大な確保をしないための歯止め。
+/// step_dll/mesh_file.hpp の kMaxPartNameBytes と同じ値にすること（書き手はどちらもこの長さまで UTF-8 の文字の境界で切り詰める）
+const MAX_PART_NAME_BYTES: usize = 4096;
 /// ヘッダ（"KRBM" + u32[4]）の大きさ
 const HEADER_BYTES: u64 = 4 + 16;
 /// 1 頂点・1 三角形・1 部位（名前を除く）あたりのバイト数
@@ -73,7 +74,7 @@ pub fn read_mesh_file(p: &Path) -> io::Result<ModelMesh> {
     m.mesh.tri_material = u32s(&read_exact_vec(&mut f, nt * 4)?);
     for _ in 0..nc {
         let len = u32s(&read_exact_vec(&mut f, 4)?)[0] as usize;
-        if len > MAX_PART_NAME {
+        if len > MAX_PART_NAME_BYTES {
             return Err(bad("part name too long"));
         }
         let name = String::from_utf8_lossy(&read_exact_vec(&mut f, len)?).into_owned();
@@ -90,6 +91,19 @@ pub fn read_mesh_file(p: &Path) -> io::Result<ModelMesh> {
     Ok(m)
 }
 
+/// max バイト以下になるよう、UTF-8 の文字の境界で切り詰める（C++ の truncateUtf8 と同じ）
+fn truncate_utf8(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// 書く。部位の名前は MAX_PART_NAME_BYTES までに切り詰める（読み手は長すぎる名前を壊れたファイルとして拒否するので）
 pub fn write_mesh_file(p: &Path, m: &ModelMesh) -> io::Result<()> {
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
@@ -118,8 +132,9 @@ pub fn write_mesh_file(p: &Path, m: &ModelMesh) -> io::Result<()> {
             f.write_all(&t.to_le_bytes())?;
         }
         for part in &m.parts {
-            f.write_all(&(part.name.len() as u32).to_le_bytes())?;
-            f.write_all(part.name.as_bytes())?;
+            let name = truncate_utf8(&part.name, MAX_PART_NAME_BYTES);
+            f.write_all(&(name.len() as u32).to_le_bytes())?;
+            f.write_all(name.as_bytes())?;
             for c in [part.srgb.x, part.srgb.y, part.srgb.z, part.alpha, if part.has_color { 1.0 } else { 0.0 }] {
                 f.write_all(&c.to_le_bytes())?;
             }
@@ -172,5 +187,25 @@ mod tests {
         std::fs::write(&p, &bad_part).unwrap();
         assert_eq!(read_mesh_file(&p).unwrap_err().kind(), io::ErrorKind::InvalidData);
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn long_part_names_are_cut_at_a_character_boundary() {
+        // 3 バイトの文字で、上限がちょうど文字の途中に来る長さ
+        let long = "あ".repeat(MAX_PART_NAME_BYTES / 3 + 1);
+        let cut = truncate_utf8(&long, MAX_PART_NAME_BYTES);
+        assert!(cut.len() <= MAX_PART_NAME_BYTES && cut.len() > MAX_PART_NAME_BYTES - 3 && cut.chars().all(|c| c == 'あ'));
+        assert_eq!(truncate_utf8("abc", MAX_PART_NAME_BYTES), "abc");
+
+        let mut m = ModelMesh::default();
+        m.parts.push(ModelPart { name: long.clone(), srgb: Vec3::ZERO, alpha: 1.0, has_color: false });
+        let dir = std::env::temp_dir().join("krbr_rust_meshfile_long_name_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("t.krbm");
+        write_mesh_file(&p, &m).unwrap();
+        // 書いたファイルは読める（以前は上限を超える長さをそのまま書き、読むときに壊れたファイルとされた）
+        let r = read_mesh_file(&p).unwrap();
+        assert_eq!(r.parts[0].name, cut);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

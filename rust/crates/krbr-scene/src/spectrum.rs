@@ -290,7 +290,8 @@ pub fn build_rgb2spec_table() -> Rgb2SpecTable {
             d[i..i + 3].copy_from_slice(&c);
         }
     };
-    let n = (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2) / 2).clamp(1, 12);
+    // 仕事は 3·N² 個の列を取り合うので、スレッドの数に上限は要らない。数はほかの裏の重い処理と同じ決め方にする
+    let n = krbr_core::platform::worker_threads();
     std::thread::scope(|s| {
         for _ in 0..n {
             s.spawn(|| {

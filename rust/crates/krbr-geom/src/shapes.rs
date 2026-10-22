@@ -199,7 +199,8 @@ fn transform_paths(input: &Paths, pos: Vec2, angle_deg: f64) -> Paths {
     )
 }
 
-/// パッドの形（inflate > 0 でレジスト開口などの拡大）
+/// パッドの形（inflate > 0 でレジスト開口などの拡大）。形は穴の位置（p.pos）ではなく、drill の offset だけずらした
+/// p.shape_pos() に置く（KiCad の PAD::ShapePos()）
 pub fn pad_to_paths(p: &Pad, inflate: f64) -> Paths {
     let mut local = if p.shape == PadShape::Custom {
         let mut l = basic_shape(p.custom_anchor, p.size, p);
@@ -213,7 +214,7 @@ pub fn pad_to_paths(p: &Pad, inflate: f64) -> Paths {
     if inflate != 0.0 && !local.is_empty() {
         local = local.inflate(inflate, JoinType::Round, EndType::Polygon, 2.0);
     }
-    transform_paths(&local, p.pos, p.angle_deg)
+    transform_paths(&local, p.shape_pos(), p.angle_deg)
 }
 
 pub fn track_to_paths(t: &Track) -> Paths {

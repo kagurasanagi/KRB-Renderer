@@ -177,27 +177,6 @@ vec3 instanceSeed(uint instance) {
     return vec3(float(h & 1023u), float((h >> 10) & 1023u), float((h >> 20) & 1023u)) * 0.37;
 }
 
-// 基板面（層テクスチャ方式）：R=銅, G=レジスト開口, B=シルク から材質を確率的に選ぶ
-Shade boardShade(vec3 p, uint side, inout Rng rng, out uint detailMat, out uint maskMat) {
-    vec2 uv = vec2((p.x - F.boardMap.x) * F.boardMap.z, (p.z - F.boardMap.y) * F.boardMap.w);
-    vec4 t = textureLod(boardTex, vec3(uv, float(side)), 0.0);
-    float copper = t.r, open = t.g, silk = t.b;
-    maskMat = 0xFFFFFFFFu;
-    if (rnd(rng) < silk) {
-        detailMat = F.boardMats2.x;
-        return shadeFromMaterial(materials[detailMat]);
-    }
-    bool onCopper = rnd(rng) < copper;
-    bool masked = rnd(rng) >= open;
-    if (!masked) {
-        detailMat = onCopper ? F.boardMats.z : F.boardMats.w;
-        return shadeFromMaterial(materials[detailMat]);
-    }
-    detailMat = onCopper ? F.boardMats.y : F.boardMats.w;
-    maskMat = F.boardMats.x;
-    return shadeFromMaterial(materials[detailMat]);
-}
-
 // 下の材質のベースの層（拡散・鏡面・誘電体の透過のローブ）を、レジストの顔料の層 p に置き換える。
 // コートは applyMask が設定し、拡散の透過（基材の中へ入る光）は下の材質のものをそのまま使う
 void replaceBaseLayer(inout Shade s, Shade p) {
@@ -281,9 +260,7 @@ Shade surfaceAt(Hit hit, inout vec3 ns, inout Rng rng) {
     Shade s;
     uint maskMat = 0xFFFFFFFFu;
     uint baseMat = hit.material;
-    if (kind == MAT_BOARD) {
-        s = boardShade(hit.pos, uint(m.params1.z), rng, baseMat, maskMat);
-    } else if (kind == MAT_MASKED) {
+    if (kind == MAT_MASKED) {
         baseMat = uint(m.params1.z);
         maskMat = uint(m.params1.w);
         s = shadeFromMaterial(materials[baseMat]);
@@ -298,7 +275,7 @@ Shade surfaceAt(Hit hit, inout vec3 ns, inout Rng rng) {
         Material base = materials[baseMat];
         if (uint(base.params2.x) == BUMP_WEAVE) addDetail(base, hit.pObj, nObj, seed, 0.05, footprint, d);
         float thickness = 0.0;
-        if (kind == MAT_MASKED && F.maskParams2.w > 0.0 && abs(nObj.y) > 0.5) {
+        if (F.maskParams2.w > 0.0 && abs(nObj.y) > 0.5) {
             // 距離場からレジストの厚みと、縁のなだらかな傾き（法線）を求める
             uint side = nObj.y > 0.0 ? 0u : 1u;
             vec2 sd = boardSdf(hit.pos, side);

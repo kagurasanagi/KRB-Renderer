@@ -80,8 +80,6 @@ pub fn make_frame_ubo(sc: &GpuScene, width: u32, height: u32, fp: &FrameParams, 
         env_params: Vec4::new(fp.env_intensity, fp.env_rotation_rad, fp.radiance_clamp, 0.0),
         dims: UVec4::new(width, height, sc.env_dist_w, sc.env_dist_h),
         counts: UVec4::new(fp.max_depth, fp.rr_start_depth, 0, 0),
-        board_mats: UVec4::new(sc.board_mats.mask, sc.board_mats.copper, sc.board_mats.finish, sc.board_mats.fr4),
-        board_mats2: UVec4::new(sc.board_mats.silk, sc.board_mats.copper, sc.board_mats.fr4, 0),
         mask_params: sc.mask_params,
         mask_params2: sc.mask_params2,
         spectral: Vec4::new(if fp.spectral { 1.0 } else { 0.0 }, 1.0 / spectrum::cmf_y_integral(), 0.0, 0.0),
@@ -108,10 +106,10 @@ pub fn make_frame_ubo(sc: &GpuScene, width: u32, height: u32, fp: &FrameParams, 
     u
 }
 
-/// GPU で描ける実レンズか（面の数が FrameUbo::lens_surfaces に収まる）
+/// GPU で描ける実レンズか（面の数が FrameUbo::lens_surfaces に収まる）。エラーにはファイルの名前を含めない（呼び出し側が付ける）
 fn check_lens_for_gpu(sys: LensSystem) -> Result<LensSystem, String> {
     if sys.surfaces.len() > MAX_LENS_SURFACES {
-        return Err(format!("{} has {} surfaces; the renderer supports at most {}", sys.name, sys.surfaces.len(), MAX_LENS_SURFACES));
+        return Err(format!("{} surfaces; the renderer supports at most {}", sys.surfaces.len(), MAX_LENS_SURFACES));
     }
     Ok(sys)
 }
@@ -127,7 +125,10 @@ fn lens_system_for(file: &str) -> LensSystem {
     let sys = if file.is_empty() {
         fallback()
     } else {
-        match LensSystem::load(std::path::Path::new(file)).and_then(check_lens_for_gpu) {
+        // LensSystem::load のエラーはすでに「パス: line N: ...」の形なので、そのまま出す（パスを重ねない）。
+        // 面の数の検査のエラーは同じ形になるようにパスを付ける
+        let path = std::path::Path::new(file);
+        match LensSystem::load(path).and_then(|s| check_lens_for_gpu(s).map_err(|e| format!("{}: {e}", path.display()))) {
             Ok(s) => s,
             Err(e) => {
                 krbr_core::error!("lens: {}; using {}", e, fallback().name);

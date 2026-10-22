@@ -90,7 +90,9 @@ pub fn luminance(c: Vec3) -> f32 {
     c.dot(Vec3::from_array(LUMINANCE_WEIGHTS))
 }
 
-/// 材質の発光の放射輝度（RGB）。GPU の材質（emission）と発光体の表（build_emitters）の両方がこれを使う
+/// 材質の発光の放射輝度（RGB）。GPU の材質（emission）と発光体の表（build_emitters）の両方がこれを使う。
+/// 単位の換算（EMISSION_SCALE）と輝度の重み（シェーダと共有する LUMINANCE_WEIGHTS）は描画側の約束なので、
+/// 材質を定義する krbr-scene ではなくここに置く（使うのも krbr-render の中だけ）
 pub fn emission_radiance(m: &Material) -> Vec3 {
     m.emission_color * (m.emission_luminance * EMISSION_SCALE)
 }
@@ -108,7 +110,7 @@ pub fn to_gpu(m: &Material, spec: Option<&Rgb2SpecTable>) -> GpuMaterial {
         spec_color: m.specular_color.extend(m.specular_weight),
         params0: Vec4::new(m.base_metalness, m.specular_roughness, m.specular_ior, m.coat_weight),
         coat_color: m.coat_color.extend(m.coat_roughness),
-        params1: Vec4::new(m.coat_ior, m.kind as u32 as f32, if masked { m.masked_base as f32 } else { m.board_side as f32 }, if masked { m.masked_mask as f32 } else { 0.0 }),
+        params1: Vec4::new(m.coat_ior, m.kind as u32 as f32, if masked { m.masked_base as f32 } else { 0.0 }, if masked { m.masked_mask as f32 } else { 0.0 }),
         params2: Vec4::new(m.bump_pattern as u32 as f32, m.bump_strength, m.bump_scale, m.roughness_variation),
         emission: emission.extend(m.geometry_opacity),
         transmission: Vec4::new(m.transmission_weight, m.transmission_dispersion_abbe_number, m.transmission_dispersion_scale, if m.geometry_thin_walled { 1.0 } else { 0.0 }),
@@ -141,8 +143,6 @@ pub struct FrameUbo {
     pub env_params: Vec4,
     pub dims: UVec4,
     pub counts: UVec4,
-    pub board_mats: UVec4,
-    pub board_mats2: UVec4,
     pub mask_params: Vec4,
     pub mask_params2: Vec4,
     pub spectral: Vec4,
@@ -172,7 +172,7 @@ const _: () = assert!(std::mem::size_of::<GpuMaterial>() == 17 * 16);
 const _: () = assert!(std::mem::size_of::<GpuInstanceInfo>() == 64);
 const _: () = assert!(std::mem::size_of::<GpuEmitter>() == 48);
 const _: () = assert!(std::mem::size_of::<GpuLightVertex>() == 96);
-const _: () = assert!(std::mem::size_of::<FrameUbo>() == (24 + MAX_LENS_SURFACES) * 16);
+const _: () = assert!(std::mem::size_of::<FrameUbo>() == (22 + MAX_LENS_SURFACES) * 16);
 const _: () = assert!(std::mem::size_of::<PushConstants>() == 8);
 
 // 安全性：どれも repr(C) で、上の assert により隙間が無い（パディングはフィールドとして明示してある）

@@ -70,8 +70,6 @@ impl MaterialAssignment {
 /// 基板の材質の番号（Scene::materials の番号）
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BoardMaterialIds {
-    pub top: u32,
-    pub bottom: u32,
     pub edge: u32,
     pub plated: u32,
     pub mask: u32,
@@ -87,8 +85,6 @@ impl BoardMaterialIds {
     /// 基板メッシュ（krbr-geom の BoardMat）の区分の材質。match で網羅するので、krbr-geom で区分を足すとここでコンパイルが止まる
     pub fn for_board(&self, m: BoardMat) -> u32 {
         match m {
-            BoardMat::Top => self.top,
-            BoardMat::Bottom => self.bottom,
             BoardMat::Edge => self.edge,
             BoardMat::Plated => self.plated,
         }
@@ -109,7 +105,7 @@ impl BoardMaterialIds {
 /// krbr-geom がメッシュの tri_material に入れた区分の番号を enum に戻す。区分を足したら for_board / for_relief と一緒にここにも足す。
 /// 知らない番号は krbr-geom との食い違い（プログラムの誤り）なので、黙って別の材質に丸めずに止める
 fn board_mat_of(id: u32) -> BoardMat {
-    const ALL: [BoardMat; 4] = [BoardMat::Top, BoardMat::Bottom, BoardMat::Edge, BoardMat::Plated];
+    const ALL: [BoardMat; 2] = [BoardMat::Edge, BoardMat::Plated];
     ALL.into_iter().find(|m| *m as u32 == id).unwrap_or_else(|| panic!("unknown BoardMat {id} in the board mesh"))
 }
 
@@ -396,9 +392,6 @@ fn make_silk_material(silk_srgb: Vec3) -> Material {
 }
 
 fn setup_board_materials(s: &mut Scene, board: &Board, o: &SceneOptions) {
-    let top = Material { name: "board_top".into(), kind: MaterialKind::BoardSurface, board_side: 0, ..Default::default() };
-    let bottom = Material { name: "board_bottom".into(), board_side: 1, ..top.clone() };
-
     let fr4 = Material {
         name: "fr4".into(),
         base_color: srgb_to_linear(o.fr4_color),
@@ -461,8 +454,6 @@ fn setup_board_materials(s: &mut Scene, board: &Board, o: &SceneOptions) {
     let mask = make_mask_material(mask_srgb, o.mask_roughness, o.mask_scatter);
     let silk = make_silk_material(resolved_silk_color(board, o));
 
-    s.board_mats.top = add_material(s, top);
-    s.board_mats.bottom = add_material(s, bottom);
     s.board_mats.fr4 = add_material(s, fr4);
     s.board_mats.edge = s.board_mats.fr4;
     s.board_mats.copper = add_material(s, copper);
@@ -697,7 +688,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
     if opts.relief_copper_from_stackup && board.stackup.copper_thickness > 0.0 {
         rp.copper = board.stackup.copper_thickness;
     }
-    let bo = BoardBuildOptions { core_half: rp.core_half(board.stackup.thickness), caps: false };
+    let bo = BoardBuildOptions { core_half: rp.core_half(board.stackup.thickness) };
     s.board = build_board_geometry(board, &bo);
     s.mask = MaskModel::from_relief(&rp);
     {
@@ -1059,9 +1050,9 @@ mod tests {
 
     #[test]
     fn geometry_categories_map_to_board_materials() {
-        let ids = BoardMaterialIds { top: 1, bottom: 2, edge: 3, plated: 4, fr4: 5, finish: 6, mask_on_fr4: 7, mask_on_copper: 8, silk: 9, ..Default::default() };
-        let board: Vec<u32> = (0..4).map(|i| ids.for_board(board_mat_of(i))).collect();
-        assert_eq!(board, vec![1, 2, 3, 4]);
+        let ids = BoardMaterialIds { edge: 3, plated: 4, fr4: 5, finish: 6, mask_on_fr4: 7, mask_on_copper: 8, silk: 9, ..Default::default() };
+        let board: Vec<u32> = (0..2).map(|i| ids.for_board(board_mat_of(i))).collect();
+        assert_eq!(board, vec![3, 4]);
         let relief: Vec<u32> = (0..5).map(|i| ids.for_relief(relief_mat_of(i))).collect();
         assert_eq!(relief, vec![5, 6, 7, 8, 9]);
     }

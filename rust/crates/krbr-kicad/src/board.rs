@@ -207,7 +207,8 @@ pub struct Drill {
     pub oval: bool,
     /// 円なら x = y = 直径
     pub size: Vec2,
-    /// パッド座標系でのずれ
+    /// 穴からパッドの形（銅・レジスト開口・カスタムパッドのプリミティブ）へのずれ（パッド座標系、未回転）。
+    /// ファイルの (drill ... (offset x y))。穴は動かさない（Pad::shape_pos を参照）
     pub offset: Vec2,
 }
 
@@ -216,7 +217,7 @@ pub struct Pad {
     pub number: String,
     pub kind: PadType,
     pub shape: PadShape,
-    /// 基板座標
+    /// 基板座標。ファイルの (at)。穴の中心（パッドの形の中心は shape_pos）
     pub pos: Vec2,
     /// パッドの絶対角度（KiCad のファイルは部品回転込み）
     pub angle_deg: f64,
@@ -236,16 +237,24 @@ pub struct Pad {
 }
 
 impl Pad {
+    /// パッドの形（銅・レジスト開口）の中心（基板座標）。KiCad の PAD::ShapePos() と同じく 位置 + 回したオフセット。
+    /// KiCad では PAD::GetPosition()（ファイルの (at)）が穴の中心で、(drill ... (offset x y)) は形を穴からずらす
+    /// （穴は GetPosition() に開け、形は ShapePos() に置く）。オフセットは穴が無いパッドにも書ける
+    pub fn shape_pos(&self) -> Vec2 {
+        self.pos + rotate_point(self.drill.offset, self.angle_deg)
+    }
+
     /// レジスト開口の広がり（パッドの指定、無ければ基板の既定。負なら開口が銅より小さい）
     pub fn mask_expansion(&self, setup: &BoardSetup) -> f64 {
         self.mask_margin.unwrap_or(setup.pad_to_mask_clearance)
     }
 
     /// 銅箔・レジスト開口・穴をすべて含む外接矩形（基板座標）。カスタムパッドのプリミティブ、台形の広がり、
-    /// 穴のずれ、レジストの広がりを含める。タイルのカリングと、差分の検出の範囲で共有する
+    /// 形のずれ（drill の offset）、レジストの広がりを含める。タイルのカリングと、差分の検出の範囲で共有する
     pub fn extent(&self, setup: &BoardSetup) -> Box2 {
         let anchor = if self.shape == PadShape::Custom { self.custom_anchor } else { self.shape };
-        // パッド座標系（未回転、原点がパッドの位置）での半分の大きさ。形の作り方は krbr-geom の shapes::basic_shape
+        // パッド座標系（未回転、原点がパッドの位置＝穴の中心）。形は offset だけずれた所にある（shape_pos）。
+        // 形の半分の大きさ。形の作り方は krbr-geom の shapes::basic_shape
         let half = match anchor {
             PadShape::Circle => Vec2::splat(self.size.x.max(self.size.y) / 2.0),
             // 台形は rect_delta の半分だけ、向かい合う辺の片方が広がる
@@ -258,8 +267,9 @@ impl Pad {
                 local.add_box(&g.bbox());
             }
         }
+        let mut local = Box2 { lo: local.lo + self.drill.offset, hi: local.hi + self.drill.offset };
         if self.drill.present {
-            local.add_box(&Box2 { lo: self.drill.offset - self.drill.size / 2.0, hi: self.drill.offset + self.drill.size / 2.0 });
+            local.add_box(&Box2 { lo: -self.drill.size / 2.0, hi: self.drill.size / 2.0 });
         }
         let local = local.expanded(self.mask_expansion(setup).max(0.0));
         // 回した矩形の 4 隅を囲む
@@ -576,5 +586,38 @@ mod tests {
         assert!(!p.on_layer("F.SilkS"));
         p.layers = vec!["F.Cu".into()];
         assert!(p.on_layer("F.Cu") && !p.on_layer("B.Cu"));
+    }
+
+    /// KiCad と同じく、穴はパッドの位置（at）にあり、drill の offset はパッドの形だけを（パッドの向きに回して）ずらす
+    #[test]
+    fn drill_offset_moves_the_shape_not_the_hole() {
+        let mut p = Pad {
+            number: "1".into(),
+            kind: PadType::ThruHole,
+            shape: PadShape::Circle,
+            pos: Vec2::new(10.0, 5.0),
+            angle_deg: 0.0,
+            size: Vec2::splat(1.0),
+            rect_delta: Vec2::ZERO,
+            round_ratio: 0.0,
+            chamfer_ratio: 0.0,
+            chamfer_corners: 0,
+            drill: Drill { present: true, oval: false, size: Vec2::splat(0.6), offset: Vec2::new(1.5, 0.0) },
+            layers: vec!["*.Cu".into()],
+            mask_margin: Some(0.0),
+            custom_anchor: PadShape::Circle,
+            primitives: Vec::new(),
+            footprint: None,
+        };
+        let setup = BoardSetup::default();
+        assert_eq!(p.shape_pos(), Vec2::new(11.5, 5.0));
+        // 範囲は、ずれた形（x = 11..12）と、位置にある穴（x = 9.7..）の両方を含む
+        let e = p.extent(&setup);
+        assert!((e.lo - Vec2::new(9.7, 4.5)).length() < 1e-9 && (e.hi - Vec2::new(12.0, 5.5)).length() < 1e-9, "{e:?}");
+        // 90° 回したパッド：オフセットも回る（x 軸上のずれは画面の上へ）。穴は位置のまま
+        p.angle_deg = 90.0;
+        assert!((p.shape_pos() - Vec2::new(10.0, 3.5)).length() < 1e-9);
+        let e = p.extent(&setup);
+        assert!((e.lo - Vec2::new(9.5, 3.0)).length() < 1e-9 && (e.hi - Vec2::new(10.5, 5.3)).length() < 1e-9, "{e:?}");
     }
 }

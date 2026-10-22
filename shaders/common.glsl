@@ -11,10 +11,9 @@
 #define PI 3.14159265358979323846
 #define INV_PI 0.31830988618379067154
 
-// 材質の種別
+// 材質の種別（rust/crates/krbr-scene/src/material.rs の MaterialKind と同じ値）
 #define MAT_GENERIC 0u
-#define MAT_BOARD 1u   // 基板の表裏面。層テクスチャで材質を決める（凹凸を形状にしない場合）
-#define MAT_MASKED 2u  // レジストの下に別の材質がある面（params1.z: 下の材質, params1.w: レジスト）
+#define MAT_MASKED 1u  // レジストの下に別の材質がある面（params1.z: 下の材質, params1.w: レジスト）
 
 #define BUMP_NONE 0u
 #define BUMP_NOISE 1u
@@ -40,7 +39,7 @@ struct Material {
     vec4 specColor;   // rgb: specular_color, a: specular_weight
     vec4 params0;     // x: base_metalness, y: specular_roughness, z: specular_ior, w: coat_weight
     vec4 coatColor;   // rgb: coat_color, a: coat_roughness
-    vec4 params1;     // x: coat_ior, y: kind, z: side（基板面: 0=表, 1=裏）/ 下の材質, w: レジストの材質
+    vec4 params1;     // x: coat_ior, y: kind, z: 下の材質（MAT_MASKED）, w: レジストの材質（MAT_MASKED）
     vec4 params2;     // x: 凹凸の模様, y: 強さ（傾き）, z: 大きさ（mm）, w: 粗さのむら
     vec4 emission;    // rgb: 放射輝度, a: geometry_opacity
     vec4 transmission;  // x: transmission_weight, y: アッベ数, z: 分散の倍率, w: thin_walled
@@ -76,6 +75,7 @@ layout(set = 0, binding = KRBR_BINDING_ENV_TEX) uniform sampler2D envTex;
 layout(set = 0, binding = KRBR_BINDING_ENV_MARGINAL, std430) readonly buffer EnvMarginal { float envMarginalCdf[]; };
 layout(set = 0, binding = KRBR_BINDING_ENV_CONDITIONAL, std430) readonly buffer EnvConditional { float envConditionalCdf[]; };
 layout(set = 0, binding = KRBR_BINDING_ENV_PDF, std430) readonly buffer EnvPdf { float envPdf[]; };
+// 基板の表・裏（層 0, 1）の縁からの距離場（RG8。r: 銅の縁, g: レジスト開口の縁）。maskParams2.w が 0 なら距離場は無い（読まない）
 layout(set = 0, binding = KRBR_BINDING_BOARD_TEX) uniform sampler2DArray boardTex;
 layout(set = 0, binding = KRBR_BINDING_ACCUM_COLOR, rgba32f) uniform image2D accumColor;
 layout(set = 0, binding = KRBR_BINDING_ACCUM_ALBEDO, rgba32f) uniform image2D accumAlbedo;
@@ -86,14 +86,12 @@ layout(set = 0, binding = KRBR_BINDING_FRAME, std140) uniform Frame {
     vec4 camRight;    // xyz: 右方向 * tan(半画角) * アスペクト
     vec4 camUp;       // xyz: 上方向 * tan(半画角)
     vec4 camForward;
-    vec4 boardMap;    // x,y: テクスチャ原点のワールド X,Z、z,w: 1/幅, 1/奥行き
+    vec4 boardMap;    // x,y: 距離場（boardTex）の原点のワールド X,Z、z,w: 1/幅, 1/奥行き
     vec4 envParams;   // x: 強度, y: 回転（rad）, z: 間接光の放射輝度の上限（0 で無効）
     uvec4 dims;       // x,y: 出力解像度, z,w: 環境マップ分布の解像度
     uvec4 counts;     // x: 最大深さ（経路の線分は x + 1 本まで。maxPathLength）, y: ロシアンルーレット開始深さ（PT のみ）
-    uvec4 boardMats;  // x: レジスト, y: 銅（レジスト下）, z: 表面処理, w: 基材
-    uvec4 boardMats2; // x: シルク, y: 銅, z: 基材
     vec4 maskParams;  // x: 銅の上のレジストの厚み, y: 基材の上, z: 銅の縁の上, w: 縁から中央への変化の距離（mm）
-    vec4 maskParams2; // x: 銅の壁ぎわのたまり, y: その距離, z: 銅の厚み, w: 距離場の範囲（mm。0 なら層テクスチャは距離場ではない）
+    vec4 maskParams2; // x: 銅の壁ぎわのたまり, y: その距離, z: 銅の厚み, w: 距離場の範囲（mm。0 なら距離場は無い）
     vec4 spectral;    // x: 1 なら分光モード（累積は XYZ）, y: 1 / ∫ȳ dλ
     vec4 rgbToXyz0;   // リニア sRGB → XYZ の列
     vec4 rgbToXyz1;

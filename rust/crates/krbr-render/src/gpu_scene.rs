@@ -3,7 +3,7 @@
 use ash::vk;
 use glam::{Mat3, Vec3, Vec4};
 use krbr_geom::raster::SDF_RANGE_MM;
-use krbr_scene::scene::{BoardMaterialIds, Scene};
+use krbr_scene::scene::Scene;
 use krbr_scene::spectrum;
 
 use crate::env_map::EnvDistribution;
@@ -72,17 +72,17 @@ pub struct GpuScene<'a> {
     pub env_dist_h: u32,
     pub env_width: u32,
     pub env_height: u32,
-    /// 基板テクスチャの対応（ワールド X, Z の原点と 1/大きさ）
+    /// 基板の距離場（board_image）の対応（ワールド X, Z の原点と 1/大きさ）
     pub board_map: Vec4,
-    pub board_mats: BoardMaterialIds,
     pub mask_params: Vec4,
-    /// x, y: 銅の壁ぎわのたまりとその距離, z: 銅の厚み, w: 距離場の範囲（mm。0 なら基板テクスチャは距離場ではない）
+    /// x, y: 銅の壁ぎわのたまりとその距離, z: 銅の厚み, w: 距離場の範囲（mm。0 なら距離場は無く、シェーダは board_image を読まない）
     pub mask_params2: Vec4,
     pub triangle_count: usize,
     blas_buffers: Vec<Buffer>,
     blas: Vec<vk::AccelerationStructureKHR>,
     tlas_buffer: Buffer,
     instance_buffer: Buffer,
+    /// board_image が距離場か（false なら記述子を埋めるだけの 1x1 の画像）
     board_image_is_sdf: bool,
     /// 発光体の表を作ったときの、材質ごとの発光（update_materials で発光が変わっていないかを確かめる）
     emissions: Vec<Vec3>,
@@ -120,7 +120,6 @@ impl<'a> GpuScene<'a> {
             env_width: 0,
             env_height: 0,
             board_map: Vec4::ZERO,
-            board_mats: BoardMaterialIds::default(),
             mask_params: Vec4::ZERO,
             mask_params2: Vec4::ZERO,
             triangle_count: 0,
@@ -440,18 +439,18 @@ impl<'a> GpuScene<'a> {
             ctx.try_upload_image(&self.board_image, &both, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
             self.board_image_is_sdf = true;
         } else {
-            // 層テクスチャ方式は未対応：1x1 のダミー
-            self.board_image = ctx.try_create_image_2d(1, 1, 2, vk::Format::R8G8B8A8_UNORM, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)?;
-            ctx.try_upload_image(&self.board_image, &[0, 0, 0, 255, 0, 0, 0, 255], vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
+            // 距離場が無い（基板の凹凸を作らないシーン）。記述子には画像が要るので、同じ形式の 1x1 の画像を置く。
+            // mask_params2.w = 0 なので、シェーダはこれを読まない
+            self.board_image = ctx.try_create_image_2d(1, 1, 2, vk::Format::R8G8_UNORM, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)?;
+            ctx.try_upload_image(&self.board_image, &[0; 4], vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
         }
         Ok(())
     }
 
-    /// 基板の材質の番号・レジストの厚みの定数・テクスチャの対応をシーンから求める。テクスチャを作り直したかどうかに関係なく
-    /// 毎回呼ぶ（設定の厚み、スタックアップの銅の厚み、外形の大きさは、テクスチャの大きさが同じでも変わりうる）
+    /// レジストの厚みの定数・距離場の対応をシーンから求める。距離場を作り直したかどうかに関係なく
+    /// 毎回呼ぶ（設定の厚み、スタックアップの銅の厚み、外形の大きさは、距離場の大きさが同じでも変わりうる）
     fn update_board_params(&mut self, sc: &Scene) {
         let m = &sc.mask;
-        self.board_mats = sc.board_mats;
         self.mask_params = Vec4::new(m.on_copper, m.on_substrate, m.at_edge, m.falloff);
         let center = sc.board.center;
         if self.board_image_is_sdf {

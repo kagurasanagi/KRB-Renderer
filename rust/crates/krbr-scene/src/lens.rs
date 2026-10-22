@@ -125,7 +125,7 @@ impl LensSystem {
     /// pbrt 形式のレンズデータを読む。1 行に 4 つの数（# から後ろはコメント）。数にならない欄や数の個数の違う行は、
     /// 列がずれた面を作らないよう行番号つきのエラーにする。焦点距離が求まらないレンズもエラー
     pub fn load(p: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(p).map_err(|_| format!("cannot open {}", p.display()))?;
+        let text = std::fs::read_to_string(p).map_err(|e| format!("cannot open {}: {e}", p.display()))?;
         Self::parse(&text, &p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()).map_err(|e| format!("{}: {e}", p.display()))
     }
 
