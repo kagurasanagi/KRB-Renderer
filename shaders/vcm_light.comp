@@ -47,7 +47,8 @@ void connectToCamera(SubPath sp, Shade s, vec3 pos, vec3 ng, vec3 ns, vec3 wo, V
     bool terminated = sp.terminated || cameraIsChromatic();
     c = maskTerminated(c, terminated);
     gClampScale = cc.weight;
-    if (sp.pathLength + 1u >= 3u) c = clampRadiance(c, terminated);
+    // 頂点の数：カメラから見た最初の頂点がこの（鏡面でない）頂点なので、光源からここまでの頂点（sp.pathLength 個）をすべて数える
+    c = clampIndirect(c, sp.pathLength, terminated);
     if (c.x + c.y + c.z + c.w <= 0.0) return;
     vec3 p0 = offsetRay(pos, ng);
     vec3 d = cc.lensPos - p0;
@@ -56,7 +57,7 @@ void connectToCamera(SubPath sp, Shade s, vec3 pos, vec3 ng, vec3 ns, vec3 wo, V
     vec3 o = toOutputColor(c);
     if (any(isnan(o)) || any(isinf(o))) return;
     uvec2 px = min(uvec2(raster), F.dims.xy - 1u);
-    uint i = (px.y * F.dims.x + px.x) * 4u;
+    uint i = splatIndex(px);
     atomicAdd(splat[i + 0u], o.x);
     atomicAdd(splat[i + 1u], o.y);
     atomicAdd(splat[i + 2u], o.z);
@@ -66,7 +67,7 @@ void main() {
     uvec2 px = KRBR_INVOCATION_ID.xy;
     if (px.x >= F.dims.x || px.y >= F.dims.y) return;
     uint pathIdx = px.y * F.dims.x + px.x;
-    Rng rng = rngInit(px, pc.sampleIndex, pc.seed ^ 0x6a09e667u);
+    Rng rng = rngInit(px, pc.sampleIndex, pc.seed ^ RNG_STREAM_LIGHT_PATH);
     bidirWavelengths(pathIdx);
     VcmConst vc = vcmConst();
     float cellSize = 2.0 * vc.radius;
@@ -79,7 +80,7 @@ void main() {
     sp.throughput = spectralMode() ? le.throughput : vec4(le.throughput.rgb, 0.0);
     sp.pathLength = 1u;
     sp.finiteLight = le.finite;
-    sp.dVCM = Mis(le.directPdfA / le.emissionPdfW);
+    sp.dVCM = Mis(le.directPdf / le.emissionPdfW);
     sp.dVC = Mis((le.finite ? le.cosLight : 1.0) / le.emissionPdfW);
     sp.dVM = sp.dVC * vc.vcWeight;
     sp.terminated = false;
@@ -91,11 +92,10 @@ void main() {
         if (!traceClosest(sp.origin, sp.dir, hit)) break;
         if (any(greaterThan(sp.mediumSigma, vec4(0.0)))) sp.throughput *= exp(-sp.mediumSigma * hit.t);
         vec3 wo = -sp.dir;
-        bool frontFace = dot(hit.ng, wo) > 0.0;
-        vec3 ng = frontFace ? hit.ng : -hit.ng;
-        vec3 ns = dot(hit.ns, ng) < 0.0 ? -hit.ns : hit.ns;
-        if (dot(ns, wo) <= 0.0) ns = ng;
-        // カメラ側で作り直すときと同じ値になるよう、法線は圧縮した値を使い、材質は保存する乱数から作る
+        bool frontFace;
+        vec3 ng, ns;
+        orientNormals(hit, wo, frontFace, ng, ns);
+        // カメラ側で作り直すとき（shadeLightVertex）と同じ値になるよう、法線は圧縮した値を使い、材質は保存する乱数から作る
         uint ngE = octEncode(ng), nsE = octEncode(ns);
         ng = octDecode(ngE);
         ns = octDecode(nsE);
@@ -105,14 +105,10 @@ void main() {
         Rng srng;
         srng.state = shadeSeed;
         vec3 nsS = ns;
-        Shade s = surfaceAt(h, nsS, srng);
-        if (dot(nsS, wo) <= 0.0) nsS = ns;
-        Material hm = materials[hit.material];
-        if (s.transWeight > 0.0) {
-            float n = iorOf(hm);
-            s.ior = frontFace ? n : 1.0 / n;
-            if (spectralMode() && hm.params3.w > 0.5) sp.terminated = true;
-        }
+        bool dispersive;
+        Shade s = shadeVertex(h, wo, frontFace, nsS, srng, dispersive);
+        // 分散で代表波長以外を打ち切る。重みは書き換えず、寄与を作るときに maskTerminated でかける
+        if (dispersive) sp.terminated = true;
         misOnHit(sp, hit.t, dot(nsS, wo), true);
 
         // 基材の中へ入る光（subsurface）は、カメラ側の経路が単方向で扱う
@@ -121,8 +117,10 @@ void main() {
         bool delta = isDeltaLike(s);
         float contProb = continuationProb(s);
         if (!delta) {
-            uint idx = atomicAdd(counters[0], 1u);
-            if (idx < counters[1]) {
+            // 容量を超えた頂点は保存しない（数は数え続け、Rust 側が容量を増やすか知らせる。保存できなかった頂点への
+            // 接続・まとめは行われず、その分の光が欠ける）
+            uint idx = atomicAdd(counters[KRBR_VCM_COUNTER_STORED], 1u);
+            if (idx < counters[KRBR_VCM_COUNTER_CAPACITY]) {
                 LightVertex lv;
                 lv.posInst = vec4(hit.pos, uintBitsToFloat(hit.instance));
                 lv.pObjMat = vec4(hit.pObj, uintBitsToFloat(hit.material));

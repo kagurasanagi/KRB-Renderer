@@ -1,5 +1,5 @@
 // 分光レンダリング（代表波長方式）：1 本のパスに 4 波長を載せる。RGB モードでは vec4 の xyz に RGB を入れ、w は使わない。
-// C++ 側 scene/spectrum.hpp と同じ式（等色関数、シグモイド多項式、表の引き方）にそろえること
+// rust/crates/krbr-scene/src/spectrum.rs と同じ式（等色関数、シグモイド多項式、表の引き方）にそろえること
 #ifndef KRBR_SPECTRAL_GLSL
 #define KRBR_SPECTRAL_GLSL
 
@@ -11,6 +11,12 @@
 vec4 gLambda = vec4(550.0);
 
 bool spectralMode() { return F.spectral.x > 0.5; }
+
+// 代表波長以外を打ち切った寄与：代表波長（x）だけを 4 倍にする（4 波長の平均の推定を 1 波長で保つ）。
+// 打ち切りの表し方は 2 通りある。PT は打ち切った時点で経路の重み beta をこれで書き換え、以後は書き換えた値を使う。
+// BDPT / VCM は光源側とカメラ側の重みを掛け合わせるので、それぞれは元のまま持ち、寄与を作るときに両側の打ち切りの
+// OR で 1 回だけこれをかける（bidir.glsl の maskTerminated）。BDPT / VCM から PT へ引き継ぐときは、ここで書き換えた重みにする
+vec4 heroOnly(vec4 c) { return vec4(4.0 * c.x, 0.0, 0.0, 0.0); }
 
 float sigmoidPoly(vec3 c, float lambda) {
     float x = (lambda - LAMBDA_MIN) / (LAMBDA_MAX - LAMBDA_MIN);

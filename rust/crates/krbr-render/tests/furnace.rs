@@ -163,10 +163,36 @@ fn white_furnace_bidirectional() {
         case("dielectric_r0.3", 0.80, 1.02, false, |_| {}),
         case("translucent", 0.98, 1.02, false, translucent),
         case("glass", 0.98, 1.02, false, glass(0.0)),
+        // すりガラス：透過する材質は粗さによらず鏡面とみなして通り抜ける（isDeltaLike）。MIS の重みの和が 1 のままで
+        // 偏らないこと（PT の白い炉と同じく、単一散乱のマイクロファセットの損失の分だけ 1 より小さい）
+        case("glass_r0.3", 0.85, 1.02, false, glass(0.3)),
         case("acrylic (spec)", 0.97, 1.03, true, acrylic),
     ];
     println!("white furnace test, bidirectional (mean radiance on the sphere, ideal = 1):");
     let mut failures = check(&cases, 128, "bdpt", &ctx);
     failures.extend(check(&cases, 128, "vcm", &ctx));
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// 鏡面とみなす頂点の近似（逆向きの確率密度 = 順向き）を両側から同じに数えるので、粗い面でも BDPT / VCM は PT と同じ値になる。
+/// 単一散乱の損失がある材質（すりガラス・粗い金属）で、白い炉の平均が PT と一致することを確かめる。
+/// （PT の側も、直接サンプリングで試さない透過の向きを MIS で割り引いていると、すりガラスで数 % 暗くなる。その確かめも兼ねる）
+#[test]
+#[ignore = "needs a Vulkan GPU with ray tracing"]
+fn rough_surfaces_bidirectional_match_pt() {
+    let _g = gpu_lock();
+    let ctx = context();
+    let mut failures = Vec::new();
+    let materials = [case("glass_r0.3", 0.0, 1.0, false, glass(0.3)), case("glass_r0.6", 0.0, 1.0, false, glass(0.6)), case("metal_r0.3", 0.0, 1.0, false, metal(0.3))];
+    for Case { name, m, .. } in &materials {
+        let pt = furnace(&ctx, m, 512, false, "pt").mean;
+        for integ in ["bdpt", "vcm"] {
+            let b = furnace(&ctx, m, 256, false, integ).mean;
+            println!("  {name:<12} pt {pt:.4}, {integ} {b:.4}");
+            if (b / pt - 1.0).abs() > 0.015 {
+                failures.push(format!("{name}: pt {pt:.4} vs {integ} {b:.4}"));
+            }
+        }
+    }
     assert!(failures.is_empty(), "{failures:#?}");
 }

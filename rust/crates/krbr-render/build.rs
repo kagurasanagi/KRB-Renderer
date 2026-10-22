@@ -2,9 +2,15 @@
 //! 積分器（レイを飛ばすもの）は、ray query 版（.comp.spv）に加えて ray tracing pipeline 版（.rgen.spv）も作る。
 //! ray_query を持たない GPU（GTX 10 系など）では後者と rt_*.spv を使う。
 //! glslc は 環境変数 GLSLC、%VULKAN_SDK%\Bin、PATH の順に探す（Vulkan SDK に付属。配布の zip を使うだけなら不要）
+//! Rust と共有する定数（バインディング番号・格子の大きさなど）は src/shader_consts.rs が正本で、-D で渡す
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[allow(dead_code)]
+mod shader_consts {
+    include!("src/shader_consts.rs");
+}
 
 /// そのまま SPIR-V にするもの（ファイル名の拡張子でステージが決まる）
 const SOURCES: &[&str] = &["pathtrace.comp", "tonemap.comp", "glow.comp", "denoise_prep.comp", "denoise_blend.comp", "vcm_light.comp", "vcm_camera.comp", "rt_hit.rchit", "rt_miss.rmiss", "rt_shadow.rmiss"];
@@ -49,6 +55,7 @@ fn main() {
 
     println!("cargo:rerun-if-env-changed=GLSLC");
     println!("cargo:rerun-if-env-changed=VULKAN_SDK");
+    println!("cargo:rerun-if-changed=src/shader_consts.rs");
     for e in std::fs::read_dir(&src_dir).expect("read shaders directory").flatten() {
         println!("cargo:rerun-if-changed={}", e.path().display());
     }
@@ -56,6 +63,7 @@ fn main() {
     println!("cargo:rustc-env=KRBR_BUILD_SHADER_DIR={}", dst.display());
 
     let glslc = find_glslc().unwrap_or_else(|e| panic!("{e}"));
+    let defines: Vec<String> = shader_consts::glsl_defines().into_iter().map(|(k, v)| format!("-D{k}={v}")).collect();
     let mut jobs: Vec<(String, Vec<String>)> = Vec::new();
     for s in SOURCES {
         jobs.push((format!("{s}.spv"), vec![s.to_string()]));
@@ -69,9 +77,16 @@ fn main() {
         let handles: Vec<_> = jobs
             .iter()
             .map(|(out, args)| {
-                let (glslc, src_dir, out_path) = (&glslc, &src_dir, dst.join(out));
+                let (glslc, src_dir, out_path, defines) = (&glslc, &src_dir, dst.join(out), &defines);
                 scope.spawn(move || {
-                    let r = Command::new(glslc).args(["--target-env=vulkan1.3", "-O", "-I"]).arg(src_dir).arg("-o").arg(&out_path).args(args.iter().map(|a| if a.starts_with('-') { a.into() } else { src_dir.join(a).into_os_string() })).output();
+                    let r = Command::new(glslc)
+                        .args(["--target-env=vulkan1.3", "-O", "-I"])
+                        .arg(src_dir)
+                        .args(defines)
+                        .arg("-o")
+                        .arg(&out_path)
+                        .args(args.iter().map(|a| if a.starts_with('-') { a.into() } else { src_dir.join(a).into_os_string() }))
+                        .output();
                     match r {
                         Ok(o) if o.status.success() => None,
                         Ok(o) => Some(format!("glslc {out}:\n{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))),

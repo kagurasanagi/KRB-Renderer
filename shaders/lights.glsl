@@ -8,12 +8,20 @@ struct Emitter {
     vec4 p1;  // w: 面積
     vec4 p2;
 };
-layout(set = 0, binding = 18, std430) readonly buffer Emitters { Emitter emitters[]; };
-layout(set = 0, binding = 19, std430) readonly buffer EmitterCdf { float emitterCdf[]; };
+layout(set = 0, binding = KRBR_BINDING_EMITTERS, std430) readonly buffer Emitters { Emitter emitters[]; };
+layout(set = 0, binding = KRBR_BINDING_EMITTER_CDF, std430) readonly buffer EmitterCdf { float emitterCdf[]; };
 
-float luminanceOf(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+// 輝度。重みは Rust の発光体の表（emitter_power）と共通（shader_consts.rs の LUMINANCE_WEIGHTS）
+float luminanceOf(vec3 c) { return dot(c, KRBR_LUMINANCE_WEIGHTS); }
 float envPickProb() { return F.lightParams.x; }
 float sceneRadius() { return F.lightParams.z; }
+
+// 環境光を「シーンを囲む球（半径 R）を覆う円盤から入る平行な光」とみなしたときの、光線を放つ確率密度
+// （面積 × 立体角あたり）。directPdfW は方向の確率密度（立体角あたり、光源を選ぶ確率を含む）
+float envEmissionPdfW(float directPdfW) {
+    float R = sceneRadius();
+    return directPdfW / (PI * R * R);
+}
 
 // 発光面の点を直接サンプリングで選ぶ確率密度（面積あたり、光源を選ぶ確率を含む）。e は材質の発光（RGB）
 float emitterPdfA(vec3 e) {
@@ -61,7 +69,7 @@ bool sampleDirectLight(vec3 p, inout Rng rng, out LightSample ls) {
         ls.dist = 1e30;
         ls.Le = envSpectrum(ls.wi);
         ls.directPdfW = pdfW * pEnv;
-        ls.emissionPdfW = ls.directPdfW / (PI * sceneRadius() * sceneRadius());
+        ls.emissionPdfW = envEmissionPdfW(ls.directPdfW);
         ls.cosAtLight = 1.0;
         ls.isEnv = true;
         return true;
@@ -91,7 +99,9 @@ struct LightEmission {
     vec3 dir;
     vec4 throughput;
     float emissionPdfW;
-    float directPdfA;  // 環境光では立体角あたり
+    // 直接サンプリングでこの点を選ぶ確率密度（光源を選ぶ確率を含む）。単位は光源による：発光面は面積あたり、
+    // 環境光は立体角あたり（環境光の点は無限遠なので面積では表せない。SmallVCM の BackgroundLight と同じ慣習）
+    float directPdf;
     float cosLight;
     bool finite;
 };
@@ -124,8 +134,8 @@ bool emitLight(inout Rng rng, out LightEmission le) {
         vec2 d = concentricDisk(u3);
         le.origin = F.sceneCenter.xyz + R * (toEnv + d.x * t + d.y * b);
         le.dir = -toEnv;
-        le.directPdfA = pdfW * pEnv;
-        le.emissionPdfW = le.directPdfA / (PI * R * R);
+        le.directPdf = pdfW * pEnv;
+        le.emissionPdfW = envEmissionPdfW(le.directPdf);
         le.cosLight = 1.0;
         le.finite = false;
         le.throughput = envSpectrum(toEnv) / le.emissionPdfW;
@@ -144,7 +154,7 @@ bool emitLight(inout Rng rng, out LightEmission le) {
     Material m = materials[floatBitsToUint(e.p0.w)];
     float pA = emitterPdfA(m.emission.rgb);
     if (pA <= 0.0) return false;
-    le.directPdfA = pA;
+    le.directPdf = pA;
     le.cosLight = l.z;
     le.emissionPdfW = pA * l.z * INV_PI;
     le.finite = true;

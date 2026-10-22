@@ -1,6 +1,8 @@
 #version 460
 // 表示用：累積画像に露出とグロー（glow.comp で作ったピラミッドの最上段）をかけ、ACES（Hill 近似）でトーンマッピングし sRGB の RGBA8 にする。
 // rust/crates/krbr-render/src/image_io.rs の tonemap_rgba8 と同じ式にそろえること
+#extension GL_GOOGLE_include_directive : require
+#include "postfx.glsl"
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0, rgba32f) uniform readonly image2D accumColor;
@@ -20,10 +22,7 @@ layout(push_constant) uniform Push {
     vec4 glow;       // x: 強さ / 段の重みの合計（0 ならグローなし）, y, z: glowImage の大きさ
 } pc;
 
-vec3 toRgb(vec3 c) {
-    if (pc.xyzToRgb0.w < 0.5) return c;
-    return mat3(pc.xyzToRgb0.xyz, pc.xyzToRgb1.xyz, pc.xyzToRgb2.xyz) * c;
-}
+vec3 toRgb(vec3 c) { return applyColorMatrix(c, pc.xyzToRgb0, pc.xyzToRgb1, pc.xyzToRgb2); }
 
 vec3 acesFitted(vec3 c) {
     const mat3 inM = mat3(0.59719, 0.07600, 0.02840, 0.35458, 0.90834, 0.13383, 0.04823, 0.01566, 0.83777);
@@ -41,7 +40,7 @@ vec3 glowAt(ivec2 q) {
 
 // グローの最上段（半分の解像度）を双線形で広げる
 vec3 glowSample(uvec2 p) {
-    vec2 f = (vec2(p) + 0.5) * 0.5 - 0.5;
+    vec2 f = halfResCoord(p);
     vec2 f0 = floor(f);
     vec2 t = f - f0;
     ivec2 q = ivec2(f0);
@@ -66,7 +65,7 @@ void main() {
         c = n.a > 0.0 ? n.rgb / n.a * 0.5 + 0.5 : vec3(0.0);
     } else {
         vec4 a = imageLoad(accumColor, ip);
-        vec3 l = a.a > 0.0 ? max(toRgb(a.rgb / a.a), vec3(0.0)) * pc.exposureScale : vec3(0.0);
+        vec3 l = resolveAccum(a, pc.xyzToRgb0, pc.xyzToRgb1, pc.xyzToRgb2, pc.exposureScale);
         if (pc.glow.x > 0.0) l += glowSample(p) * pc.glow.x;
         c = linearToSrgb(acesFitted(l));
         // 量子化の縞を減らす小さなディザ

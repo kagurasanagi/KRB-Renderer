@@ -46,9 +46,11 @@ fn gpu_tonemap(ctx: &krbr_render::Context, img: &ImageF, exposure_ev: f32, glow:
                 .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
                 .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
             unsafe { dev.cmd_copy_image_to_buffer(cmd, out, vk::ImageLayout::GENERAL, buf, &[region]) };
+            memory_barrier(dev, cmd, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, vk::PipelineStageFlags2::HOST, vk::AccessFlags2::HOST_READ);
         });
     }
-    let px = rb.mapped_ref().unwrap()[..(w * h * 4) as usize].to_vec();
+    let px = rb.mapped_bytes().unwrap().to_vec();
+    assert_eq!(px.len(), (w * h * 4) as usize);
     ctx.destroy_buffer(&mut rb);
     ctx.destroy_image(&mut color);
     px

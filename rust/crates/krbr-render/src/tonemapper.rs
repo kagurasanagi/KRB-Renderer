@@ -1,13 +1,12 @@
 //! 表示用のトーンマッピング（累積画像 -> RGBA8。shaders/tonemap.comp）と、その前のグロー（shaders/glow.comp。crate::glow と同じ式）
 
-use std::ffi::CString;
-
 use ash::vk;
 use glam::Vec4;
 
 use crate::glow;
 use crate::integrator::RenderTargets;
-use crate::vk::{image_barrier, memory_barrier, Context, Image};
+use crate::kernel::compute_pipeline;
+use crate::vk::{image_barrier, memory_barrier, Context, GpuPod, Image};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -45,6 +44,13 @@ struct GlowPush {
     xyz_to_rgb: [Vec4; 3],
 }
 
+// tonemap.comp・glow.comp のプッシュ定数と同じ大きさ（隙間が無いことの確認も兼ねる）
+const _: () = assert!(std::mem::size_of::<TonemapPush>() == 80);
+const _: () = assert!(std::mem::size_of::<GlowPush>() == 96);
+// 安全性：repr(C) で、上の assert により隙間が無い
+unsafe impl GpuPod for TonemapPush {}
+unsafe impl GpuPod for GlowPush {}
+
 /// グローの 1 回の処理（mode は glow.comp のとおり）
 struct GlowPass {
     set: vk::DescriptorSet,
@@ -72,17 +78,6 @@ pub struct Tonemapper<'a> {
     glow_pipeline: vk::Pipeline,
 }
 
-fn compute_pipeline(dev: &ash::Device, layout: vk::PipelineLayout, spv: &str) -> Result<vk::Pipeline, String> {
-    let code = std::fs::read(crate::shader_dir().join(spv)).map_err(|_| format!("cannot read {spv}"))?;
-    let words: Vec<u32> = code.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-    let sm = unsafe { dev.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None) }.map_err(|e| format!("{e:?}"))?;
-    let entry = CString::new("main").unwrap();
-    let stage = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(sm).name(&entry);
-    let r = unsafe { dev.create_compute_pipelines(vk::PipelineCache::null(), &[vk::ComputePipelineCreateInfo::default().stage(stage).layout(layout)], None) };
-    unsafe { dev.destroy_shader_module(sm, None) };
-    Ok(r.map_err(|(_, e)| format!("vkCreateComputePipelines({spv}): {e:?}"))?[0])
-}
-
 fn storage_set_layout(dev: &ash::Device, n: u32) -> Result<vk::DescriptorSetLayout, String> {
     let lb: Vec<vk::DescriptorSetLayoutBinding> = (0..n).map(|i| vk::DescriptorSetLayoutBinding::default().binding(i).descriptor_type(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE)).collect();
     unsafe { dev.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&lb), None) }.map_err(|e| format!("{e:?}"))
@@ -100,37 +95,69 @@ impl<'a> Tonemapper<'a> {
         Self::with_views(ctx, targets.color.view, targets.albedo.view, targets.normal.view, targets.width, targets.height)
     }
 
-    /// 色の画像を差し替えて作る（ノイズ除去の結果を表示するとき。A が割る数になっている画像）
+    /// 色の画像を差し替えて作る（ノイズ除去の結果を表示するとき。A が割る数になっている画像）。
+    /// 失敗したら Err（作った分は Drop が解放する）
     pub fn with_views(ctx: &'a Context, color: vk::ImageView, albedo: vk::ImageView, normal: vk::ImageView, width: u32, height: u32) -> Result<Self, String> {
         let dev = &ctx.device;
-        let out = ctx.create_image_2d(width, height, 1, vk::Format::R8G8B8A8_UNORM, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC);
+        // 資源は 1 つ作るたびにフィールドへ入れる。途中で失敗して返ると、Drop が作った分だけを破棄する（null は何もしない）
+        let mut t = Self {
+            ctx,
+            width,
+            height,
+            out: Image::default(),
+            set_layout: vk::DescriptorSetLayout::null(),
+            pool: vk::DescriptorPool::null(),
+            set: vk::DescriptorSet::null(),
+            layout: vk::PipelineLayout::null(),
+            pipeline: vk::Pipeline::null(),
+            levels: Vec::new(),
+            sums: Vec::new(),
+            glow_passes: Vec::new(),
+            glow_set_layout: vk::DescriptorSetLayout::null(),
+            glow_layout: vk::PipelineLayout::null(),
+            glow_pipeline: vk::Pipeline::null(),
+        };
+        // シェーダが読めないなど失敗しやすいものを先に作る
+        t.set_layout = storage_set_layout(dev, 5)?;
+        t.glow_set_layout = storage_set_layout(dev, 3)?;
+        let layouts = [t.set_layout];
+        let pcr = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::COMPUTE, offset: 0, size: std::mem::size_of::<TonemapPush>() as u32 }];
+        t.layout = unsafe { dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts).push_constant_ranges(&pcr), None) }.map_err(|e| format!("{e:?}"))?;
+        t.pipeline = compute_pipeline(dev, t.layout, "tonemap.comp.spv")?;
+        let gpcr = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::COMPUTE, offset: 0, size: std::mem::size_of::<GlowPush>() as u32 }];
+        let gl = [t.glow_set_layout];
+        t.glow_layout = unsafe { dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&gl).push_constant_ranges(&gpcr), None) }.map_err(|e| format!("{e:?}"))?;
+        t.glow_pipeline = compute_pipeline(dev, t.glow_layout, "glow.comp.spv")?;
+
+        t.out = ctx.try_create_image_2d(width, height, 1, vk::Format::R8G8B8A8_UNORM, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC)?;
         // グローの段（画像が小さすぎて段が無いときも、tonemap.comp に渡す 1×1 を作る）
         let sizes = glow::level_sizes(width, height);
-        let make = |(w, h): (u32, u32)| ctx.create_image_2d(w, h, 1, vk::Format::R32G32B32A32_SFLOAT, vk::ImageUsageFlags::STORAGE);
-        let levels: Vec<Image> = if sizes.is_empty() { vec![make((1, 1))] } else { sizes.iter().map(|&s| make(s)).collect() };
-        let sums: Vec<Image> = sizes.iter().take(sizes.len().saturating_sub(1)).map(|&s| make(s)).collect();
-        let images: Vec<vk::Image> = std::iter::once(out.image).chain(levels.iter().map(|i| i.image)).chain(sums.iter().map(|i| i.image)).collect();
-        ctx.submit_and_wait(|dev, cmd| {
+        let make = |(w, h): (u32, u32)| ctx.try_create_image_2d(w, h, 1, vk::Format::R32G32B32A32_SFLOAT, vk::ImageUsageFlags::STORAGE);
+        for s in if sizes.is_empty() { vec![(1, 1)] } else { sizes.clone() } {
+            t.levels.push(make(s)?);
+        }
+        for &s in sizes.iter().take(sizes.len().saturating_sub(1)) {
+            t.sums.push(make(s)?);
+        }
+        let images: Vec<vk::Image> = std::iter::once(t.out.image).chain(t.levels.iter().map(|i| i.image)).chain(t.sums.iter().map(|i| i.image)).collect();
+        ctx.try_submit_and_wait(|dev, cmd| {
             for img in &images {
                 image_barrier(dev, cmd, *img, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, 1);
             }
-        });
+        })?;
         let n_glow_sets = if sizes.is_empty() { 0 } else { 2 * sizes.len() as u32 - 1 };
-        let set_layout = storage_set_layout(dev, 5)?;
-        let glow_set_layout = storage_set_layout(dev, 3)?;
         let sizes_pool = [vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_IMAGE, descriptor_count: 5 + 3 * n_glow_sets }];
-        let pool = unsafe { dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1 + n_glow_sets).pool_sizes(&sizes_pool), None) }.map_err(|e| format!("{e:?}"))?;
-        let layouts = [set_layout];
-        let set = unsafe { dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts)) }.map_err(|e| format!("{e:?}"))?[0];
+        t.pool = unsafe { dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1 + n_glow_sets).pool_sizes(&sizes_pool), None) }.map_err(|e| format!("{e:?}"))?;
+        t.set = unsafe { dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(t.pool).set_layouts(&layouts)) }.map_err(|e| format!("{e:?}"))?[0];
         // 最上段：段が 1 つなら縮めた段、2 つ以上なら足し上げた段
-        let top = sums.first().unwrap_or(&levels[0]).view;
-        write_storage_images(dev, set, &[color, albedo, normal, out.view, top]);
+        let top = t.sums.first().unwrap_or(&t.levels[0]).view;
+        write_storage_images(dev, t.set, &[color, albedo, normal, t.out.view, top]);
 
         // グローの処理の並び：縮める（0 段目は累積画像から）→ 小さい段から足し上げる
-        let mut glow_passes = Vec::new();
         let n = sizes.len();
+        let (pool, levels, sums) = (t.pool, &t.levels, &t.sums);
+        let mut glow_passes = Vec::new();
         let mut add_pass = |views: [vk::ImageView; 3], mode: u32, src: (u32, u32), dst: (u32, u32)| -> Result<(), String> {
-            let gl = [glow_set_layout];
             let s = unsafe { dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&gl)) }.map_err(|e| format!("{e:?}"))?[0];
             write_storage_images(dev, s, &views);
             glow_passes.push(GlowPass { set: s, mode, src, dst });
@@ -145,15 +172,8 @@ impl<'a> Tonemapper<'a> {
             let small = if i + 1 == n - 1 { levels[n - 1].view } else { sums[i + 1].view };
             add_pass([small, sums[i].view, levels[i].view], 2, sizes[i + 1], sizes[i])?;
         }
-
-        let pcr = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::COMPUTE, offset: 0, size: std::mem::size_of::<TonemapPush>() as u32 }];
-        let layout = unsafe { dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts).push_constant_ranges(&pcr), None) }.map_err(|e| format!("{e:?}"))?;
-        let pipeline = compute_pipeline(dev, layout, "tonemap.comp.spv")?;
-        let gpcr = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::COMPUTE, offset: 0, size: std::mem::size_of::<GlowPush>() as u32 }];
-        let gl = [glow_set_layout];
-        let glow_layout = unsafe { dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&gl).push_constant_ranges(&gpcr), None) }.map_err(|e| format!("{e:?}"))?;
-        let glow_pipeline = compute_pipeline(dev, glow_layout, "glow.comp.spv")?;
-        Ok(Self { ctx, width, height, out, set_layout, pool, set, layout, pipeline, levels, sums, glow_passes, glow_set_layout, glow_layout, glow_pipeline })
+        t.glow_passes = glow_passes;
+        Ok(t)
     }
 
     /// xyz_input: 累積が CIE XYZ（分光モード）なら true。glow: グロー（画像の表示のときだけかける）

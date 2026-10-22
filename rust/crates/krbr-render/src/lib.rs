@@ -1,5 +1,6 @@
-//! Vulkan による描画（C++ 版の `render/` と `io/` に相当）。
+//! Vulkan による描画：加速構造、積分器のカーネル、累積、ノイズ除去、トーンマッピング、画像の入出力。
 //! シェーダ（<repo>/shaders の GLSL）は build.rs が glslc で SPIR-V にして、target/<profile>/shaders に置く。
+//! GPU に送る構造体は gpu_types.rs、シェーダと共有する定数は shader_consts.rs が正本
 
 pub mod denoiser;
 pub mod env_map;
@@ -10,6 +11,7 @@ pub mod image_io;
 pub mod integrator;
 pub mod kernel;
 pub mod renderer;
+pub mod shader_consts;
 pub mod studio_env;
 pub mod tonemapper;
 pub mod vk;
@@ -20,7 +22,7 @@ pub use gpu_scene::GpuScene;
 pub use image_io::ImageF;
 pub use integrator::{FrameParams, Progressive, RenderTargets};
 pub use renderer::{render_offscreen, RenderOutput, RenderSettings};
-pub use studio_env::{environment_label, is_builtin, load_environment_map};
+pub use studio_env::{describe_environment, environment_label, is_builtin, load_environment_map, EnvironmentName};
 pub use vk::{Context, ContextOptions, DeviceInfo};
 
 use std::path::PathBuf;

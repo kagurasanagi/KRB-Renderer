@@ -1,8 +1,13 @@
-//! シェーダ（shaders/common.glsl）と一致させる GPU 用の構造体（C++ 版 render/gpu_types.hpp と同じ並び）
+//! GPU に送る構造体。shaders/common.glsl（Vertex, MeshInfo, Material, InstanceInfo, Frame）、lights.glsl（Emitter）、
+//! bidir.glsl（LightVertex）と同じ並びにすること。大きさは const assert で確かめる（隙間が無いことの確認も兼ねる）。
+//! シェーダと共有する定数（バインディング番号など）は shader_consts.rs
 
 use glam::{UVec4, Vec3, Vec4};
 use krbr_scene::material::{Material, MaterialKind};
 use krbr_scene::spectrum::Rgb2SpecTable;
+
+use crate::shader_consts::{LUMINANCE_WEIGHTS, MAX_LENS_SURFACES};
+use crate::vk::GpuPod;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -44,9 +49,6 @@ pub struct GpuMaterial {
     pub spec_emission: Vec4,
 }
 
-const _: () = assert!(std::mem::size_of::<GpuMaterial>() == 272);
-const _: () = assert!(std::mem::size_of::<GpuVertex>() == 32);
-
 /// 発光の単位：放射輝度 1.0 を 1000 cd/m² とみなす
 pub const EMISSION_SCALE: f32 = 1.0 / 1000.0;
 
@@ -71,6 +73,28 @@ pub struct GpuEmitter {
     pub p2: Vec4,
 }
 
+/// BDPT / VCM の光源側の頂点（bidir.glsl の LightVertex。GPU だけが読み書きし、Rust はバッファの大きさにだけ使う）
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GpuLightVertex {
+    pub pos_inst: Vec4,
+    pub p_obj_mat: Vec4,
+    pub dirs: UVec4,
+    pub throughput: Vec4,
+    pub mis: Vec4,
+    pub links: UVec4,
+}
+
+/// 輝度（リニア sRGB の Y。重みはシェーダの luminanceOf と共通）
+pub fn luminance(c: Vec3) -> f32 {
+    c.dot(Vec3::from_array(LUMINANCE_WEIGHTS))
+}
+
+/// 材質の発光の放射輝度（RGB）。GPU の材質（emission）と発光体の表（build_emitters）の両方がこれを使う
+pub fn emission_radiance(m: &Material) -> Vec3 {
+    m.emission_color * (m.emission_luminance * EMISSION_SCALE)
+}
+
 pub fn to_gpu(m: &Material, spec: Option<&Rgb2SpecTable>) -> GpuMaterial {
     let masked = m.kind == MaterialKind::Masked;
     // 分散：nF, nC から Cauchy の式の係数を求める
@@ -78,7 +102,7 @@ pub fn to_gpu(m: &Material, spec: Option<&Rgb2SpecTable>) -> GpuMaterial {
     let dispersive = (nf - nc).abs() > 1e-6;
     let b = if dispersive { (nf - nc) / (1.0 / (486.1f32 * 486.1) - 1.0 / (656.3f32 * 656.3)) } else { 0.0 };
     let a = nd - b / (587.6f32 * 587.6);
-    let emission = m.emission_color * (m.emission_luminance * EMISSION_SCALE);
+    let emission = emission_radiance(m);
     let mut g = GpuMaterial {
         base_color: m.base_color.extend(m.base_weight),
         spec_color: m.specular_color.extend(m.specular_weight),
@@ -105,6 +129,7 @@ pub fn to_gpu(m: &Material, spec: Option<&Rgb2SpecTable>) -> GpuMaterial {
     g
 }
 
+/// フレームの定数（common.glsl の uniform Frame。std140 で、どのフィールドも 16 バイト単位）
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameUbo {
@@ -130,7 +155,7 @@ pub struct FrameUbo {
     pub lens2: Vec4,
     pub lens3: Vec4,
     pub lens4: Vec4,
-    pub lens_surfaces: [Vec4; 16],
+    pub lens_surfaces: [Vec4; MAX_LENS_SURFACES],
 }
 
 #[repr(C)]
@@ -139,3 +164,23 @@ pub struct PushConstants {
     pub sample_index: u32,
     pub seed: u32,
 }
+
+// 大きさ（GLSL の std430 / std140 での大きさと同じ。隙間があればここで分かる）
+const _: () = assert!(std::mem::size_of::<GpuVertex>() == 32);
+const _: () = assert!(std::mem::size_of::<GpuMeshInfo>() == 16);
+const _: () = assert!(std::mem::size_of::<GpuMaterial>() == 17 * 16);
+const _: () = assert!(std::mem::size_of::<GpuInstanceInfo>() == 64);
+const _: () = assert!(std::mem::size_of::<GpuEmitter>() == 48);
+const _: () = assert!(std::mem::size_of::<GpuLightVertex>() == 96);
+const _: () = assert!(std::mem::size_of::<FrameUbo>() == (24 + MAX_LENS_SURFACES) * 16);
+const _: () = assert!(std::mem::size_of::<PushConstants>() == 8);
+
+// 安全性：どれも repr(C) で、上の assert により隙間が無い（パディングはフィールドとして明示してある）
+unsafe impl GpuPod for GpuVertex {}
+unsafe impl GpuPod for GpuMeshInfo {}
+unsafe impl GpuPod for GpuMaterial {}
+unsafe impl GpuPod for GpuInstanceInfo {}
+unsafe impl GpuPod for GpuEmitter {}
+unsafe impl GpuPod for GpuLightVertex {}
+unsafe impl GpuPod for FrameUbo {}
+unsafe impl GpuPod for PushConstants {}

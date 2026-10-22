@@ -4,13 +4,14 @@ use std::ffi::CString;
 use std::sync::{Mutex, OnceLock};
 
 use ash::vk;
-use glam::{UVec4, Vec3, Vec4};
+use glam::{UVec4, Vec4};
 use krbr_scene::lens::{LensModel, LensParams, LensSystem};
 use krbr_scene::spectrum;
 
 use crate::gpu_scene::GpuScene;
 use crate::gpu_types::{FrameUbo, PushConstants};
 use crate::integrator::{FrameParams, RenderTargets};
+use crate::shader_consts::*;
 use crate::vk::{memory_barrier, Buffer, Context};
 
 /// 記述子 1 つ分（バッファ・画像・加速構造のどれか）
@@ -39,35 +40,36 @@ pub fn buffer_binding(binding: u32, b: &Buffer) -> Binding {
     Binding::Buffer { binding, ty: vk::DescriptorType::STORAGE_BUFFER, buffer: b.buffer }
 }
 
-/// 全積分器で共通の記述子（0〜19：シーン・環境マップ・出力先・定数・光源）
+/// 全積分器で共通の記述子（シーン・環境マップ・出力先・定数・光源。番号は shader_consts）
 pub fn scene_bindings(sc: &GpuScene, targets: &RenderTargets, frame_ubo: &Buffer) -> Vec<Binding> {
-    let mut b = vec![
-        Binding::Tlas { binding: 0, tlas: sc.tlas },
-        buffer_binding(1, &sc.vertices),
-        buffer_binding(2, &sc.indices),
-        buffer_binding(3, &sc.tri_mats),
-        buffer_binding(4, &sc.mesh_infos),
-        buffer_binding(5, &sc.materials),
-        Binding::Image { binding: 6, ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, sampler: sc.env_sampler, view: sc.env_image.view, layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL },
-        buffer_binding(7, &sc.env_marginal),
-        buffer_binding(8, &sc.env_conditional),
-        buffer_binding(9, &sc.env_pdf),
-        Binding::Image { binding: 10, ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, sampler: sc.board_sampler, view: sc.board_image.view, layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL },
-    ];
-    for (i, img) in [&targets.color, &targets.albedo, &targets.normal].iter().enumerate() {
-        b.push(Binding::Image { binding: 11 + i as u32, ty: vk::DescriptorType::STORAGE_IMAGE, sampler: vk::Sampler::null(), view: img.view, layout: vk::ImageLayout::GENERAL });
-    }
-    b.push(Binding::Buffer { binding: 14, ty: vk::DescriptorType::UNIFORM_BUFFER, buffer: frame_ubo.buffer });
-    b.push(buffer_binding(15, &sc.instance_infos));
-    b.push(buffer_binding(16, &sc.rgb2spec));
-    b.push(buffer_binding(17, &sc.rgb2spec_scale));
-    b.push(buffer_binding(18, &sc.emitters));
-    b.push(buffer_binding(19, &sc.emitter_cdf));
-    b
+    let sampled = |binding: u32, sampler: vk::Sampler, view: vk::ImageView| Binding::Image { binding, ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, sampler, view, layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL };
+    let storage = |binding: u32, view: vk::ImageView| Binding::Image { binding, ty: vk::DescriptorType::STORAGE_IMAGE, sampler: vk::Sampler::null(), view, layout: vk::ImageLayout::GENERAL };
+    vec![
+        Binding::Tlas { binding: BINDING_TLAS, tlas: sc.tlas },
+        buffer_binding(BINDING_VERTICES, &sc.vertices),
+        buffer_binding(BINDING_INDICES, &sc.indices),
+        buffer_binding(BINDING_TRI_MATS, &sc.tri_mats),
+        buffer_binding(BINDING_MESHES, &sc.mesh_infos),
+        buffer_binding(BINDING_MATERIALS, &sc.materials),
+        sampled(BINDING_ENV_TEX, sc.env_sampler, sc.env_image.view),
+        buffer_binding(BINDING_ENV_MARGINAL, &sc.env_marginal),
+        buffer_binding(BINDING_ENV_CONDITIONAL, &sc.env_conditional),
+        buffer_binding(BINDING_ENV_PDF, &sc.env_pdf),
+        sampled(BINDING_BOARD_TEX, sc.board_sampler, sc.board_image.view),
+        storage(BINDING_ACCUM_COLOR, targets.color.view),
+        storage(BINDING_ACCUM_ALBEDO, targets.albedo.view),
+        storage(BINDING_ACCUM_NORMAL, targets.normal.view),
+        Binding::Buffer { binding: BINDING_FRAME, ty: vk::DescriptorType::UNIFORM_BUFFER, buffer: frame_ubo.buffer },
+        buffer_binding(BINDING_INSTANCES, &sc.instance_infos),
+        buffer_binding(BINDING_RGB2SPEC, &sc.rgb2spec),
+        buffer_binding(BINDING_RGB2SPEC_SCALE, &sc.rgb2spec_scale),
+        buffer_binding(BINDING_EMITTERS, &sc.emitters),
+        buffer_binding(BINDING_EMITTER_CDF, &sc.emitter_cdf),
+    ]
 }
 
-/// フレームの定数（カメラ・環境光・光源の選び方など）
-pub fn make_frame_ubo(sc: &GpuScene, targets: &RenderTargets, fp: &FrameParams) -> FrameUbo {
+/// フレームの定数（カメラ・環境光・光源の選び方など）。width × height は出力の解像度、merging は VCM の近傍のまとめを使うか
+pub fn make_frame_ubo(sc: &GpuScene, width: u32, height: u32, fp: &FrameParams, merging: bool) -> FrameUbo {
     let cam = &fp.camera;
     let mut u = FrameUbo {
         cam_pos: cam.position.extend(0.0),
@@ -76,7 +78,7 @@ pub fn make_frame_ubo(sc: &GpuScene, targets: &RenderTargets, fp: &FrameParams) 
         cam_forward: cam.forward.extend(0.0),
         board_map: sc.board_map,
         env_params: Vec4::new(fp.env_intensity, fp.env_rotation_rad, fp.radiance_clamp, 0.0),
-        dims: UVec4::new(targets.width, targets.height, sc.env_dist_w, sc.env_dist_h),
+        dims: UVec4::new(width, height, sc.env_dist_w, sc.env_dist_h),
         counts: UVec4::new(fp.max_depth, fp.rr_start_depth, 0, 0),
         board_mats: UVec4::new(sc.board_mats.mask, sc.board_mats.copper, sc.board_mats.finish, sc.board_mats.fr4),
         board_mats2: UVec4::new(sc.board_mats.silk, sc.board_mats.copper, sc.board_mats.fr4, 0),
@@ -101,29 +103,39 @@ pub fn make_frame_ubo(sc: &GpuScene, targets: &RenderTargets, fp: &FrameParams) 
     u.light_params = Vec4::new(p_env, sc.emitter_power, sc.scene_radius, sc.emitter_count as f32);
     u.scene_center = sc.scene_center.extend(0.0);
     let radius = if fp.vcm_radius > 0.0 { fp.vcm_radius } else { 0.003 * sc.scene_radius };
-    u.vcm_params = Vec4::new(radius, fp.vcm_alpha, targets.width as f32 * targets.height as f32, 0.0);
+    u.vcm_params = Vec4::new(radius, fp.vcm_alpha, width as f32 * height as f32, if merging { 1.0 } else { 0.0 });
     fill_lens(&mut u, fp);
     u
 }
 
-/// 実レンズのデータは、ファイル名ごとに一度だけ読む
+/// GPU で描ける実レンズか（面の数が FrameUbo::lens_surfaces に収まる）
+fn check_lens_for_gpu(sys: LensSystem) -> Result<LensSystem, String> {
+    if sys.surfaces.len() > MAX_LENS_SURFACES {
+        return Err(format!("{} has {} surfaces; the renderer supports at most {}", sys.name, sys.surfaces.len(), MAX_LENS_SURFACES));
+    }
+    Ok(sys)
+}
+
+/// 実レンズのデータは、ファイル名ごとに一度だけ読む。読めないか GPU で描けないレンズなら、知らせて既定のレンズにする
 fn lens_system_for(file: &str) -> LensSystem {
     static CACHE: OnceLock<Mutex<std::collections::BTreeMap<String, LensSystem>>> = OnceLock::new();
-    let mut c = CACHE.get_or_init(|| Mutex::new(Default::default())).lock().unwrap();
+    let mut c = CACHE.get_or_init(|| Mutex::new(Default::default())).lock().unwrap_or_else(|e| e.into_inner());
     if let Some(s) = c.get(file) {
         return s.clone();
     }
+    let fallback = LensSystem::double_gauss50;
     let sys = if file.is_empty() {
-        LensSystem::double_gauss50()
+        fallback()
     } else {
-        match LensSystem::load(std::path::Path::new(file)) {
+        match LensSystem::load(std::path::Path::new(file)).and_then(check_lens_for_gpu) {
             Ok(s) => s,
             Err(e) => {
-                krbr_core::error!("lens: {}; using {}", e, LensSystem::double_gauss50().name);
-                LensSystem::double_gauss50()
+                krbr_core::error!("lens: {}; using {}", e, fallback().name);
+                fallback()
             }
         }
     };
+    debug_assert!(sys.surfaces.len() <= MAX_LENS_SURFACES, "the built-in lens must fit the frame constants");
     c.insert(file.to_string(), sys.clone());
     sys
 }
@@ -151,7 +163,8 @@ pub fn fill_lens(u: &mut FrameUbo, fp: &FrameParams) {
         let film_dist = sys.film_distance_for(front_to_focus);
         let fe = sys.effective_focal_length();
         let zs = sys.vertex_z();
-        let n = sys.surfaces.len().min(16);
+        // 面の数は lens_system_for が MAX_LENS_SURFACES 以下に限っている（切り詰めると光学系が食い違うので、そうしない）
+        let n = sys.surfaces.len();
         for i in 0..n {
             u.lens_surfaces[i] = Vec4::new(sys.surfaces[i].radius, zs[i], sys.surfaces[i].ior, 0.5 * sys.surfaces[i].aperture);
         }
@@ -163,14 +176,26 @@ pub fn fill_lens(u: &mut FrameUbo, fp: &FrameParams) {
     }
 }
 
-fn load_shader(dev: &ash::Device, p: &std::path::Path) -> Result<vk::ShaderModule, String> {
-    let code = std::fs::read(p).map_err(|_| format!("cannot read shader {}", p.display()))?;
+/// SPIR-V（shader_dir() の name）を読んでシェーダモジュールを作る
+pub(crate) fn load_shader(dev: &ash::Device, name: &str) -> Result<vk::ShaderModule, String> {
+    let p = crate::shader_dir().join(name);
+    let code = std::fs::read(&p).map_err(|e| format!("cannot read shader {}: {e}", p.display()))?;
     if code.len() % 4 != 0 {
-        return Err(format!("bad shader {}", p.display()));
+        return Err(format!("bad shader {} ({} bytes, not a multiple of 4)", p.display(), code.len()));
     }
     let words: Vec<u32> = code.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     let ci = vk::ShaderModuleCreateInfo::default().code(&words);
-    unsafe { dev.create_shader_module(&ci, None) }.map_err(|e| format!("vkCreateShaderModule: {e:?}"))
+    unsafe { dev.create_shader_module(&ci, None) }.map_err(|e| format!("vkCreateShaderModule({name}): {e:?}"))
+}
+
+/// 計算シェーダ 1 本のパイプライン（入口は main）
+pub(crate) fn compute_pipeline(dev: &ash::Device, layout: vk::PipelineLayout, spv: &str) -> Result<vk::Pipeline, String> {
+    let sm = load_shader(dev, spv)?;
+    let entry = CString::new("main").unwrap();
+    let stage = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(sm).name(&entry);
+    let r = unsafe { dev.create_compute_pipelines(vk::PipelineCache::null(), &[vk::ComputePipelineCreateInfo::default().stage(stage).layout(layout)], None) };
+    unsafe { dev.destroy_shader_module(sm, None) };
+    Ok(r.map_err(|(_, e)| format!("vkCreateComputePipelines({spv}): {e:?}"))?[0])
 }
 
 fn align_up(v: u32, a: u32) -> u32 {
@@ -199,17 +224,32 @@ impl<'a> Kernel<'a> {
     pub fn new(ctx: &'a Context, name: &str, bindings: &[Binding]) -> Result<Self, String> {
         let dev = &ctx.device;
         let rt = ctx.use_rt_pipeline;
+        // 資源は 1 つ作るたびにフィールドへ入れる。途中で失敗して返ると、Drop が作った分だけを破棄する（null は何もしない）
+        let mut k = Self {
+            ctx,
+            rt_pipeline: rt,
+            set_layout: vk::DescriptorSetLayout::null(),
+            pool: vk::DescriptorPool::null(),
+            set: vk::DescriptorSet::null(),
+            layout: vk::PipelineLayout::null(),
+            pipeline: vk::Pipeline::null(),
+            sbt: Buffer::default(),
+            sbt_raygen: Default::default(),
+            sbt_miss: Default::default(),
+            sbt_hit: Default::default(),
+        };
         let stages = if rt { vk::ShaderStageFlags::RAYGEN_KHR | vk::ShaderStageFlags::CLOSEST_HIT_KHR | vk::ShaderStageFlags::MISS_KHR } else { vk::ShaderStageFlags::COMPUTE };
         let lb: Vec<vk::DescriptorSetLayoutBinding> = bindings.iter().map(|b| vk::DescriptorSetLayoutBinding::default().binding(b.binding()).descriptor_type(b.ty()).descriptor_count(1).stage_flags(stages)).collect();
-        let set_layout = unsafe { dev.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&lb), None) }.map_err(|e| format!("{e:?}"))?;
+        k.set_layout = unsafe { dev.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&lb), None) }.map_err(|e| format!("vkCreateDescriptorSetLayout({name}): {e:?}"))?;
         let mut counts: std::collections::BTreeMap<vk::DescriptorType, u32> = Default::default();
         for b in bindings {
             *counts.entry(b.ty()).or_default() += 1;
         }
         let sizes: Vec<vk::DescriptorPoolSize> = counts.iter().map(|(t, n)| vk::DescriptorPoolSize { ty: *t, descriptor_count: *n }).collect();
-        let pool = unsafe { dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes), None) }.map_err(|e| format!("{e:?}"))?;
-        let layouts = [set_layout];
-        let set = unsafe { dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts)) }.map_err(|e| format!("{e:?}"))?[0];
+        k.pool = unsafe { dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes), None) }.map_err(|e| format!("vkCreateDescriptorPool({name}): {e:?}"))?;
+        let layouts = [k.set_layout];
+        let set = unsafe { dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(k.pool).set_layouts(&layouts)) }.map_err(|e| format!("vkAllocateDescriptorSets({name}): {e:?}"))?[0];
+        k.set = set;
 
         // 記述子の書き込み（参照先の構造体は書き込みが終わるまで生かしておく）
         let mut buffer_infos: Vec<vk::DescriptorBufferInfo> = Vec::new();
@@ -249,35 +289,36 @@ impl<'a> Kernel<'a> {
         unsafe { dev.update_descriptor_sets(&writes, &[]) };
 
         let pcr = [vk::PushConstantRange { stage_flags: stages, offset: 0, size: std::mem::size_of::<PushConstants>() as u32 }];
-        let layout = unsafe { dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts).push_constant_ranges(&pcr), None) }.map_err(|e| format!("{e:?}"))?;
+        k.layout = unsafe { dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts).push_constant_ranges(&pcr), None) }.map_err(|e| format!("vkCreatePipelineLayout({name}): {e:?}"))?;
 
-        let mut k = Self { ctx, rt_pipeline: rt, set_layout, pool, set, layout, pipeline: vk::Pipeline::null(), sbt: Buffer::default(), sbt_raygen: Default::default(), sbt_miss: Default::default(), sbt_hit: Default::default() };
-        let dir = crate::shader_dir();
-        let entry = CString::new("main").unwrap();
         if rt {
-            k.create_ray_tracing_pipeline(name, &dir, &entry)?;
+            k.create_ray_tracing_pipeline(name)?;
         } else {
-            let sm = load_shader(dev, &dir.join(format!("{name}.comp.spv")))?;
-            let stage = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(sm).name(&entry);
-            let cci = vk::ComputePipelineCreateInfo::default().stage(stage).layout(layout);
-            let r = unsafe { dev.create_compute_pipelines(vk::PipelineCache::null(), &[cci], None) };
-            unsafe { dev.destroy_shader_module(sm, None) };
-            k.pipeline = r.map_err(|(_, e)| format!("vkCreateComputePipelines: {e:?}"))?[0];
+            k.pipeline = compute_pipeline(dev, k.layout, &format!("{name}.comp.spv"))?;
         }
         Ok(k)
     }
 
     /// ray tracing pipeline：レイ生成 1 本 ＋ ミス 2 本（最近接用・影用）＋ 三角形のヒットグループ 1 つ。再帰はしない
-    fn create_ray_tracing_pipeline(&mut self, name: &str, dir: &std::path::Path, entry: &CString) -> Result<(), String> {
+    fn create_ray_tracing_pipeline(&mut self, name: &str) -> Result<(), String> {
         let dev = &self.ctx.device;
         let rt_dev = self.ctx.rt_device.as_ref().ok_or("no ray tracing pipeline device")?;
+        let entry = CString::new("main").unwrap();
         let files = [format!("{name}.rgen.spv"), "rt_miss.rmiss.spv".into(), "rt_shadow.rmiss.spv".into(), "rt_hit.rchit.spv".into()];
         let stage_of = [vk::ShaderStageFlags::RAYGEN_KHR, vk::ShaderStageFlags::MISS_KHR, vk::ShaderStageFlags::MISS_KHR, vk::ShaderStageFlags::CLOSEST_HIT_KHR];
         let mut modules = Vec::new();
         for f in &files {
-            modules.push(load_shader(dev, &dir.join(f))?);
+            match load_shader(dev, f) {
+                Ok(m) => modules.push(m),
+                Err(e) => {
+                    for m in modules {
+                        unsafe { dev.destroy_shader_module(m, None) };
+                    }
+                    return Err(e);
+                }
+            }
         }
-        let stages: Vec<vk::PipelineShaderStageCreateInfo> = (0..4).map(|i| vk::PipelineShaderStageCreateInfo::default().stage(stage_of[i]).module(modules[i]).name(entry)).collect();
+        let stages: Vec<vk::PipelineShaderStageCreateInfo> = (0..4).map(|i| vk::PipelineShaderStageCreateInfo::default().stage(stage_of[i]).module(modules[i]).name(&entry)).collect();
         let mut groups: Vec<vk::RayTracingShaderGroupCreateInfoKHR> = (0..3)
             .map(|i| vk::RayTracingShaderGroupCreateInfoKHR::default().ty(vk::RayTracingShaderGroupTypeKHR::GENERAL).general_shader(i).closest_hit_shader(vk::SHADER_UNUSED_KHR).any_hit_shader(vk::SHADER_UNUSED_KHR).intersection_shader(vk::SHADER_UNUSED_KHR))
             .collect();
@@ -305,7 +346,7 @@ impl<'a> Kernel<'a> {
         table[m1..m1 + h].copy_from_slice(&handles[2 * h..3 * h]);
         let hg = (raygen_size + miss_size) as usize;
         table[hg..hg + h].copy_from_slice(&handles[3 * h..4 * h]);
-        self.sbt = self.ctx.create_device_buffer(&table, vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
+        self.sbt = self.ctx.try_create_device_buffer(&table, vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)?;
         self.sbt_raygen = vk::StridedDeviceAddressRegionKHR { device_address: self.sbt.address, stride: stride as u64, size: stride as u64 };
         self.sbt_miss = vk::StridedDeviceAddressRegionKHR { device_address: self.sbt.address + raygen_size as u64, stride: stride as u64, size: 2 * stride as u64 };
         self.sbt_hit = vk::StridedDeviceAddressRegionKHR { device_address: self.sbt.address + (raygen_size + miss_size) as u64, stride: stride as u64, size: stride as u64 };
@@ -337,10 +378,9 @@ impl Drop for Kernel<'_> {
     fn drop(&mut self) {
         let dev = &self.ctx.device;
         self.ctx.destroy_buffer(&mut self.sbt);
+        // 作りかけ（Kernel::new の途中で失敗）なら一部が null。vkDestroy* は null を何もせずに通す
         unsafe {
-            if self.pipeline != vk::Pipeline::null() {
-                dev.destroy_pipeline(self.pipeline, None);
-            }
+            dev.destroy_pipeline(self.pipeline, None);
             dev.destroy_pipeline_layout(self.layout, None);
             dev.destroy_descriptor_pool(self.pool, None);
             dev.destroy_descriptor_set_layout(self.set_layout, None);
@@ -359,9 +399,4 @@ pub fn compute_barrier(ctx: &Context, cmd: vk::CommandBuffer) {
         trace | vk::PipelineStageFlags2::COPY,
         vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::TRANSFER_READ,
     );
-}
-
-pub fn xyz_to_srgb_columns() -> [Vec3; 3] {
-    let m = spectrum::xyz_to_linear_srgb();
-    [m.col(0), m.col(1), m.col(2)]
 }

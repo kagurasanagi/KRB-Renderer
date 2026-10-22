@@ -26,7 +26,6 @@ struct Shade {
     float transWeight;
     vec4 transSigma;       // 中での吸収係数（1/mm）。transmission_depth = 0 なら 0
     vec4 transTint;        // 面を通るたびにかける色（transmission_depth = 0 のとき √transmission_color）
-    bool metallic;         // 中から当たったとき光を通さない（銅など）
     // ノイズ除去用のアルベド（RGB のまま持つ）
     vec3 baseRgb;
     vec3 coatRgb;
@@ -56,21 +55,23 @@ Shade shadeFromMaterial(Material m) {
     float depth = m.transmission2.a;
     s.transSigma = depth > 0.0 ? -log(max(transColor, vec4(1e-4))) / depth : vec4(0.0);
     s.transTint = depth > 0.0 ? vec4(1.0) : sqrt(max(transColor, vec4(0.0)));
-    s.metallic = m.params0.x > 0.5;
     s.baseRgb = m.baseColor.rgb;
     s.coatRgb = m.coatColor.rgb;
     s.transRgb = m.transmission2.rgb;
     return s;
 }
 
-// コートを通る光の透過率（入射と出射の 2 回、コートの中での屈折後の角度で光路長を求める）
-vec4 coatTransmittance(Shade s, float cosV, float cosL) {
-    if (s.coatThickness <= 0.0) return s.coatColor;
+// コートを 1 回通る光の透過率。cosOut は外（空気側）での法線との余弦で、コートの中では屈折後の角度で光路長を求める。
+// coat_color は「垂直に往復したときの透過率」なので、厚みの無いコート（coatThickness = 0）の片道はその平方根
+vec4 coatTransmittance1(Shade s, float cosOut) {
+    if (s.coatThickness <= 0.0) return sqrt(max(s.coatColor, vec4(0.0)));
     float n2 = s.coatIor * s.coatIor;
-    float cv = sqrt(max(1e-4, 1.0 - (1.0 - cosV * cosV) / n2));
-    float cl = sqrt(max(1e-4, 1.0 - (1.0 - cosL * cosL) / n2));
-    return exp(-s.coatSigma * s.coatThickness * (1.0 / cv + 1.0 / cl));
+    float c = sqrt(max(1e-4, 1.0 - (1.0 - cosOut * cosOut) / n2));
+    return exp(-s.coatSigma * s.coatThickness / c);
 }
+
+// コートを往復する光の透過率（v の向きで入り、l の向きで出る）
+vec4 coatTransmittance(Shade s, float cosV, float cosL) { return coatTransmittance1(s, cosV) * coatTransmittance1(s, cosL); }
 
 float fresnelDielectric(float cosi, float eta) {
     float c = abs(cosi);
@@ -181,7 +182,8 @@ vec4 bsdfEval(Shade s, vec3 v, vec3 l) {
         float denom = LoH + VoH / eta;
         float ft = ggxD(h, a2) * ggxG2(v.z, -l.z, a2) * abs(LoH * VoH / (l.z * v.z * denom * denom)) * (1.0 - F);
         ft /= eta * eta;  // 放射輝度は屈折率の 2 乗に比例して変わる
-        vec4 coatAtten = mix(vec4(1.0), s.coatColor * (1.0 - fcV), s.coatWeight);
+        // 透過する光はコートを v の側で 1 回だけ通る（反射は往復なので coatTransmittance）
+        vec4 coatAtten = mix(vec4(1.0), coatTransmittance1(s, v.z) * (1.0 - fcV), s.coatWeight);
         return t * ft * s.transTint * coatAtten;
     }
 
@@ -260,11 +262,20 @@ vec3 bsdfSample(Shade s, vec3 v, inout Rng rng) {
     return sampleCosineHemisphere(u2);
 }
 
-// ほぼ鏡面の頂点（透過する材質、粗さの小さい金属）。BDPT / VCM は接続・まとめを行わず、
-// 間接光の上限（ホタル対策）では、カメラから最初の鏡面でない頂点までのこの頂点を数えない
+// これより鋭い金属の反射はほぼ鏡面とみなす。粗さ 0.05 は α = 0.0025 で、ローブの広がりが約 0.1°。BSDF の値が極端に尖るので、
+// 光源・光源側の頂点へつなぐと値のばらつき（ホタル）が大きいだけで、サンプリングで通り抜ける方がよく収束する
+#define DELTA_METAL_ROUGHNESS 0.05
+#define DELTA_METALNESS 0.99
+
+// ほぼ鏡面の頂点（透過する材質、粗さの小さい金属）。BDPT / VCM は接続・まとめを行わず、サンプリングだけで通り抜ける。
+// 間接光の上限（ホタル対策）では、カメラから最初の鏡面でない頂点までのこの頂点を数えない（ガラス越しの物の直接光は抑えない）。
+// 透過する材質は粗さによらず含める。接続・まとめは面の表側（反射の向き）しか扱わないので、すりガラスを鏡面でない頂点に
+// すると、透過の向きの接続・まとめが MIS の重みでは「ある」とみなされたまま行われず、その分の光が欠ける。鏡面とみなせば、
+// その頂点では接続の戦略が無いものとして MIS の重みを両側から同じ近似（逆向きの確率密度 = 順向き）で数えるので重みの和は
+// 1 のまま（偏らない）で、すりガラス越しの光は BSDF のサンプリングだけで運ぶ（ばらつきは増える）
 bool isDeltaLike(Shade s) {
     if (s.transWeight > 0.0) return true;
-    return s.metalness >= 0.99 && s.roughness < 0.05 && s.coatWeight <= 0.0;
+    return s.metalness >= DELTA_METALNESS && s.roughness < DELTA_METAL_ROUGHNESS && s.coatWeight <= 0.0;
 }
 
 // ノイズ除去用のアルベド（RGB）

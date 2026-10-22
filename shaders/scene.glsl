@@ -135,9 +135,9 @@ struct Detail {
     float colorMul;  // 色への倍率
 };
 
-// 画素 1 つが覆う広さ（mm）：カメラからの距離 × 画素 1 つ分の角度。模様を薄める目安に使う
+// 画素 1 つが覆う広さ（mm）：カメラからの距離 × 画素 1 つ分の角度（1 / 像面までの距離）。模様を薄める目安に使う
 float pixelFootprint(vec3 p) {
-    return length(p - F.camPos.xyz) * 2.0 * length(F.camUp.xyz) / float(max(F.dims.y, 1u));
+    return length(p - F.camPos.xyz) / max(imagePlaneDist(), 1e-6);
 }
 
 // footprint：画素が覆う広さ（mm）。模様の周期が画素と同じくらいまで細かくなると、平均されずに砂粒のようなノイズに
@@ -198,7 +198,25 @@ Shade boardShade(vec3 p, uint side, inout Rng rng, out uint detailMat, out uint 
     return shadeFromMaterial(materials[detailMat]);
 }
 
-// レジストを上にかぶせる（下の材質 s を、レジストのコートで覆う）。thickness > 0 なら厚みに応じた吸収と散乱
+// 下の材質のベースの層（拡散・鏡面・誘電体の透過のローブ）を、レジストの顔料の層 p に置き換える。
+// コートは applyMask が設定し、拡散の透過（基材の中へ入る光）は下の材質のものをそのまま使う
+void replaceBaseLayer(inout Shade s, Shade p) {
+    s.baseColor = p.baseColor;
+    s.baseRgb = p.baseRgb;
+    s.baseWeight = 1.0;  // 顔料の散乱は確率 scatterProb で選んだので、選んだ後は重み 1 で散乱する
+    s.metalness = p.metalness;
+    s.specColor = p.specColor;
+    s.specWeight = p.specWeight;
+    s.roughness = p.roughness;
+    s.ior = p.ior;
+    s.transWeight = p.transWeight;
+    s.transSigma = p.transSigma;
+    s.transTint = p.transTint;
+    s.transRgb = p.transRgb;
+}
+
+// レジストを上にかぶせる（下の材質 s を、レジストのコートで覆う）。thickness > 0 なら厚みに応じた吸収と散乱。
+// 変えるのはベースの層（顔料の散乱を選んだとき）とコートだけで、拡散の透過は下の材質のまま
 Shade applyMask(Shade s, Material mask, float thickness, inout Rng rng) {
     // レジストの顔料自身による散乱。厚いほど起きやすい（基準の厚みで mask の base_weight になる）
     float scatterProb = mask.baseColor.a;
@@ -207,11 +225,8 @@ Shade applyMask(Shade s, Material mask, float thickness, inout Rng rng) {
         float k = -log(max(1.0 - mask.baseColor.a, 1e-3)) / tRef;
         scatterProb = 1.0 - exp(-k * thickness);
     }
-    if (rnd(rng) < scatterProb) {
-        s = shadeFromMaterial(mask);
-        s.baseWeight = 1.0;
-    }
-        s.coatWeight = mask.params0.w;
+    if (rnd(rng) < scatterProb) replaceBaseLayer(s, shadeFromMaterial(mask));
+    s.coatWeight = mask.params0.w;
     s.coatColor = specReflect(mask.coatColor.rgb, mask.specCoat);
     s.coatRgb = mask.coatColor.rgb;
     s.coatRoughness = mask.coatColor.a;
@@ -226,7 +241,8 @@ Shade applyMask(Shade s, Material mask, float thickness, inout Rng rng) {
 
 // ---------------------------------------------------------------- レジストの厚み t(x)（距離場から）
 
-float sdfDecode(float v) { return (v * 255.0 - 128.0) / 127.0 * 0.3; }
+// 距離場の 8 bit の値（128 が縁、1 単位が 範囲 / 127 mm）を mm へ。範囲は krbr-geom の SDF_RANGE_MM（Rust から渡す）
+float sdfDecode(float v) { return (v * 255.0 - 128.0) / 127.0 * F.maskParams2.w; }
 
 vec2 boardSdf(vec3 p, uint side) {
     vec2 uv = vec2((p.x - F.boardMap.x) * F.boardMap.z, (p.z - F.boardMap.y) * F.boardMap.w);
@@ -282,7 +298,7 @@ Shade surfaceAt(Hit hit, inout vec3 ns, inout Rng rng) {
         Material base = materials[baseMat];
         if (uint(base.params2.x) == BUMP_WEAVE) addDetail(base, hit.pObj, nObj, seed, 0.05, footprint, d);
         float thickness = 0.0;
-        if (kind == MAT_MASKED && F.maskParams2.w > 0.5 && abs(nObj.y) > 0.5) {
+        if (kind == MAT_MASKED && F.maskParams2.w > 0.0 && abs(nObj.y) > 0.5) {
             // 距離場からレジストの厚みと、縁のなだらかな傾き（法線）を求める
             uint side = nObj.y > 0.0 ? 0u : 1u;
             vec2 sd = boardSdf(hit.pos, side);
@@ -297,12 +313,7 @@ Shade surfaceAt(Hit hit, inout vec3 ns, inout Rng rng) {
         }
         s.baseColor *= d.colorMul;
         s.baseRgb *= d.colorMul;
-        const float sssWeight = s.sssWeight;  // 下の材質（基材）の拡散の透過
-        const vec4 sssSigma = s.sssSigma;
         s = applyMask(s, mask, thickness, rng);
-        s.sssWeight = sssWeight;
-        s.sssSigma = sssSigma;
-        s.metallic = materials[baseMat].params0.x > 0.5;
         s.coatRoughness = clamp(s.coatRoughness * d.roughMul, 0.02, 1.0);
     } else {
         addDetail(materials[baseMat], hit.pObj, nObj, seed, 1.0, footprint, d);
@@ -321,6 +332,60 @@ Shade surfaceAt(Hit hit, inout vec3 ns, inout Rng rng) {
     return s;
 }
 
+// ---------------------------------------------------------------- 交点での前処理（全積分器で共通）
+
+// 透過する材質の屈折率（分光モードで分散があれば代表波長での値）
+float iorOf(Material m) {
+    if (spectralMode() && m.params3.w > 0.5) return m.params3.y + m.params3.z / (gLambda.x * gLambda.x);
+    return m.params0.z;
+}
+
+// 光線の来た側に法線をそろえる（両面として扱う）。frontFace：幾何法線の表（閉じた形状の外）から当たった。
+// シェーディング法線が来た側から見て裏を向いていたら幾何法線を使う
+void orientNormals(Hit hit, vec3 wo, out bool frontFace, out vec3 ng, out vec3 ns) {
+    frontFace = dot(hit.ng, wo) > 0.0;
+    ng = frontFace ? hit.ng : -hit.ng;
+    ns = dot(hit.ns, ng) < 0.0 ? -hit.ns : hit.ns;
+    if (dot(ns, wo) <= 0.0) ns = ng;
+}
+
+// 交点の材質（凹凸で傾けた法線 ns を含む。凹凸で来た側から見て裏を向いたら元の法線に戻す）。透過する材質では
+// v の側から見た相対屈折率を s.ior に入れる。dispersive：分光モードで分散のある材質（呼び出し側で代表波長以外を打ち切る）
+Shade shadeVertex(Hit hit, vec3 wo, bool frontFace, inout vec3 ns, inout Rng rng, out bool dispersive) {
+    vec3 nsBase = ns;
+    Shade s = surfaceAt(hit, ns, rng);
+    if (dot(ns, wo) <= 0.0) ns = nsBase;
+    dispersive = false;
+    if (s.transWeight > 0.0) {
+        Material m = materials[hit.material];
+        float n = iorOf(m);
+        s.ior = frontFace ? n : 1.0 / n;
+        dispersive = spectralMode() && m.params3.w > 0.5;
+    }
+    return s;
+}
+
+// ---------------------------------------------------------------- 基材の中から面に当たったとき（PT の subsurface）
+
+// 中（基材の側）から見た面の材質：レジストの下の材質（レジストの顔料・コートは外側の層なので関係しない）
+uint innerMaterial(uint id) {
+    Material m = materials[id];
+    return uint(m.params1.y) == MAT_MASKED ? uint(m.params1.z) : id;
+}
+
+// 中から当たった光を通さない材質：透過するローブ（拡散の透過・誘電体の透過）を持たないもの（銅・シルクのインク・樹脂など）。
+// 金属（base_metalness > 0.5）も通さない
+bool opaqueFromInside(Material m) { return m.params0.x > 0.5 || (m.params3.x <= 0.0 && m.transmission.x <= 0.0); }
+
+// 光を通さない面が、中から当たった光を拡散して中へ返す割合：金属は垂直入射の反射率（base_color）、
+// 誘電体はベースの拡散の反射率（base_color × base_weight）。残りは面で吸収される
+vec4 innerReflectance(Material m) {
+    vec4 c = specReflect(m.baseColor.rgb, m.specBase);
+    return m.params0.x > 0.5 ? c : c * m.baseColor.a;
+}
+
+// ---------------------------------------------------------------- 間接光の上限（ホタル対策）
+
 // 上限と比べる前に除く、推定のための倍率：カメラの重み（実レンズは絞りで遮られた光線の分を通り抜けた光線で補うので、
 // 絞るほど大きい）。カメラの光線を作ったところで設定する
 float gClampScale = 1.0;
@@ -337,6 +402,17 @@ vec4 clampRadiance(vec4 c, bool terminated) {
     float m = F.envParams.z * gClampScale * (terminated ? 4.0 : 1.0) * clampGrowth();
     float mx = max(max(c.x, c.y), max(c.z, c.w));
     return mx > m ? c * (m / mx) : c;
+}
+
+// 上限をかけ始める頂点の数。光源とカメラの間の散乱の頂点を、カメラから最初の鏡面でない頂点までのガラス・鏡（isDeltaLike）を
+// 除いて数える（PtState.rough と同じ数え方）。1 つ（最初の粗い頂点での直接光。ガラス越し・鏡に映った物を含む）は抑えず、
+// 2 つ以上（間接光）だけを抑える。PT・BDPT・VCM のすべての戦略（光源に当たる・直接サンプリング・接続・まとめ・光源側から
+// カメラへつなぐ）で、同じ経路には同じ判定になるように、それぞれが経路全体の頂点の数を渡す
+#define CLAMP_MIN_ROUGH_VERTICES 2u
+
+// 間接光なら上限をかける。roughVertices：上の数え方での経路全体の頂点の数
+vec4 clampIndirect(vec4 c, uint roughVertices, bool terminated) {
+    return roughVertices >= CLAMP_MIN_ROUGH_VERTICES ? clampRadiance(c, terminated) : c;
 }
 
 vec4 envSpectrum(vec3 dir) { return rgbToSpecUnbounded(envRadiance(dir)); }

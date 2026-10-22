@@ -1,4 +1,4 @@
-// カメラ：ピンホール・薄レンズ・実レンズ（C++ 側 scene/lens と render/kernel.cpp の fillLens に対応）。
+// カメラ：ピンホール・薄レンズ・実レンズ（rust/crates/krbr-scene/src/lens.rs と、定数を作る krbr-render/src/kernel.rs の fill_lens に対応）。
 // 薄レンズは、BDPT / VCM の「光源側の頂点をカメラへ直接つなぐ」戦略のために、カメラ側と同じ分布でレンズ上の点を選べる。
 // その点を固定すれば、画像の 1 画素あたりの確率密度はピンホールと同じ形（像面までの距離² / cos³θ）になる
 #ifndef KRBR_CAMERA_GLSL

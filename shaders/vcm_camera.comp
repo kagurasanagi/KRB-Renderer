@@ -18,6 +18,12 @@
 #include "bidir.glsl"
 #include "camera.glsl"
 
+// merging で、向きの違う面（角の向こう側・薄い板の裏表など）の光源側の頂点とはまとめない（幾何法線どうしの余弦がこれ未満）。
+// まとめる円盤は面に沿うものとして光の密度を推定するので、向きの違う面の頂点を混ぜると、その面に当たった光を誤って足す。
+// 除いた分は MIS の重みでは補わないので、角の近く（半径の範囲）でだけ光がわずかに欠けるが、半径は繰り返すほど 0 に近づくので
+// この偏りも消える。0.7 は約 45°（面取りや丸みのある縁はまとめ、直角の角はまとめない）
+#define MERGE_MIN_NORMAL_COS 0.7
+
 // カメラ側の頂点の情報
 struct CamVertex {
     vec3 pos;
@@ -63,13 +69,15 @@ LightVertexShade shadeLightVertex(LightVertex lv) {
     Rng srng;
     srng.state = lv.dirs.w;
     o.ns = nsBase;
-    o.s = surfaceAt(h, o.ns, srng);
-    if (dot(o.ns, o.wo) <= 0.0) o.ns = nsBase;
+    // 保存した頂点は鏡面でない（透過しない）ので、屈折率と分散は使わない
+    bool dispersive;
+    o.s = shadeVertex(h, o.wo, true, o.ns, srng, dispersive);
     return o;
 }
 
-// カメラ側の頂点と光源側の頂点をつなぐ（s > 1）。カメラ側の throughput もかけ、波長の打ち切りは両側を合わせて 1 回だけ扱う
-vec4 connectVertices(LightVertex lv, SubPath cam, Shade cs, CamVertex cv, VcmConst vc) {
+// カメラ側の頂点と光源側の頂点をつなぐ（s > 1）。カメラ側の throughput もかけ、波長の打ち切りは両側を合わせて 1 回だけ扱う。
+// camRough：カメラ側のこの頂点までの、間接光の上限の数え方での頂点の数（この頂点を含む）
+vec4 connectVertices(LightVertex lv, SubPath cam, Shade cs, CamVertex cv, VcmConst vc, uint camRough) {
     LightVertexShade lvs = shadeLightVertex(lv);
     vec3 d = lvs.pos - cv.pos;
     float dist2 = dot(d, d);
@@ -103,11 +111,12 @@ vec4 connectVertices(LightVertex lv, SubPath cam, Shade cs, CamVertex cv, VcmCon
     float dl = length(dd);
     if (occludedDist(p0, dd / dl, dl)) return vec4(0.0);
     bool terminated = cam.terminated || lv.links.w != 0u;
-    return clampRadiance(maskTerminated(cam.throughput * w * G * fc * fl * lv.throughput, terminated), terminated);
+    // 頂点の数：カメラ側（この頂点まで）＋ 光源側の頂点（光源から lv まで lv.links.z 個）。どちらも 1 つ以上なので常に間接光
+    return clampIndirect(maskTerminated(cam.throughput * w * G * fc * fl * lv.throughput, terminated), camRough + lv.links.z, terminated);
 }
 
-// 近くの光源側の頂点とまとめる（merging）。カメラ側の throughput と正規化の係数もかける
-vec4 mergeVertices(SubPath cam, Shade cs, CamVertex cv, VcmConst vc) {
+// 近くの光源側の頂点とまとめる（merging）。カメラ側の throughput と正規化の係数もかける。camRough は connectVertices と同じ
+vec4 mergeVertices(SubPath cam, Shade cs, CamVertex cv, VcmConst vc, uint camRough) {
     vec4 acc = vec4(0.0);
     float cellSize = 2.0 * vc.radius;
     vec3 c = cv.pos / cellSize;
@@ -122,14 +131,16 @@ vec4 mergeVertices(SubPath cam, Shade cs, CamVertex cv, VcmConst vc) {
         for (int j = 0; j < k; ++j) dup = dup || visited[j] == h;
         visited[k] = h;
         if (dup) continue;
-        uint guard = 0u;
-        for (uint idx = cellHead[h]; idx != NO_VERTEX && guard < 4096u; ++guard) {
+        // 連結リストは繰り返しごとに作り直すので普通は短い。上限は無限ループの番兵で、届いたら数えて Rust 側が知らせる
+        uint walked = 0u;
+        uint idx = cellHead[h];
+        for (; idx != NO_VERTEX && walked < KRBR_VCM_MAX_CELL_WALK; ++walked) {
             LightVertex lv = lightVerts[idx];
             idx = lv.links.y;
             vec3 d = lv.posInst.xyz - cv.pos;
             if (dot(d, d) > vc.radius2) continue;
             if (lv.links.z + cam.pathLength > maxPathLength()) continue;
-            if (dot(octDecode(lv.dirs.x), cv.ng) < 0.7) continue;  // 向きの違う面（角の向こう側など）とはまとめない
+            if (dot(octDecode(lv.dirs.x), cv.ng) < MERGE_MIN_NORMAL_COS) continue;
             vec3 l = toLocal(octDecode(lv.dirs.z), cv.t, cv.b, cv.ns);
             if (l.z <= 0.0) continue;
             vec4 f = bsdfEval(cs, cv.v, l);
@@ -139,10 +150,13 @@ vec4 mergeVertices(SubPath cam, Shade cs, CamVertex cv, VcmConst vc) {
             float wLight = lv.mis.x * vc.vcWeight + lv.mis.z * Mis(camDirPdfW);
             float wCamera = cam.dVCM * vc.vcWeight + cam.dVM * Mis(camRevPdfW);
             float w = 1.0 / (wLight + 1.0 + wCamera);
-            // 上限は、打ち切りの有無が頂点ごとに違うので、まとめた頂点ごとにかける
+            // 上限は、打ち切りの有無と頂点の数が頂点ごとに違うので、まとめた頂点ごとにかける。頂点の数は、まとめた頂点を
+            // 1 つと数えて、カメラ側（この頂点まで）＋ 光源側の lv より前の頂点（lv.links.z − 1 個）。光源から直接届いた頂点
+            // （lv.links.z = 1）と最初の粗い頂点でまとめた光は直接光なので抑えない（直接サンプリングと同じ扱い）
             bool terminated = cam.terminated || lv.links.w != 0u;
-            acc += clampRadiance(maskTerminated(cam.throughput * w * f * lv.throughput, terminated) * vc.vmNorm, terminated);
+            acc += clampIndirect(maskTerminated(cam.throughput * w * f * lv.throughput, terminated) * vc.vmNorm, camRough + lv.links.z - 1u, terminated);
         }
+        if (idx != NO_VERTEX) atomicAdd(counters[KRBR_VCM_COUNTER_MERGE_TRUNCATED], 1u);
     }
     return acc;
 }
@@ -191,29 +205,24 @@ void main() {
                 L += maskTerminated(cam.throughput * Le, cam.terminated);
                 albedo = clamp(envRadiance(cam.dir), 0.0, 1.0);
             } else {
-                float directPdfA = envLightPdfW(cam.dir);
-                float emissionPdfW = directPdfA / (PI * sceneRadius() * sceneRadius());
-                float wCamera = Mis(directPdfA) * cam.dVCM + Mis(emissionPdfW) * cam.dVC;
+                float directPdfW = envLightPdfW(cam.dir);  // 環境光の「点」の確率密度は立体角あたり（LightEmission.directPdf と同じ）
+                float emissionPdfW = envEmissionPdfW(directPdfW);
+                float wCamera = Mis(directPdfW) * cam.dVCM + Mis(emissionPdfW) * cam.dVC;
                 vec4 c = maskTerminated(cam.throughput * Le / (1.0 + wCamera), cam.terminated);
-                L += camRough >= 2u ? clampRadiance(c, cam.terminated) : c;
+                L += clampIndirect(c, camRough, cam.terminated);
             }
             break;
         }
         if (any(greaterThan(cam.mediumSigma, vec4(0.0)))) cam.throughput *= exp(-cam.mediumSigma * hit.t);
         vec3 wo = -cam.dir;
-        bool frontFace = dot(hit.ng, wo) > 0.0;
-        vec3 ng = frontFace ? hit.ng : -hit.ng;
-        vec3 ns = dot(hit.ns, ng) < 0.0 ? -hit.ns : hit.ns;
-        if (dot(ns, wo) <= 0.0) ns = ng;
-        vec3 nsBase = ns;
-        Shade s = surfaceAt(hit, ns, rng);
-        if (dot(ns, wo) <= 0.0) ns = nsBase;
+        bool frontFace;
+        vec3 ng, ns;
+        orientNormals(hit, wo, frontFace, ng, ns);
+        bool dispersive;
+        Shade s = shadeVertex(hit, wo, frontFace, ns, rng, dispersive);
+        // 分散で代表波長以外を打ち切る。重みは書き換えず、寄与を作るときに maskTerminated でかける（何度立てても同じ）
+        if (dispersive) cam.terminated = true;
         Material hm = materials[hit.material];
-        if (s.transWeight > 0.0) {
-            float n = iorOf(hm);
-            s.ior = frontFace ? n : 1.0 / n;
-            if (spectral && hm.params3.w > 0.5) cam.terminated = true;
-        }
         misOnHit(cam, hit.t, dot(ns, wo), false);
         uint roughBefore = camRough;
         if (camRough > 0u || !isDeltaLike(s)) camRough++;
@@ -228,21 +237,23 @@ void main() {
                 float emissionPdfW = directPdfA * max(dot(hit.ng, wo), 0.0) * INV_PI;
                 float wCamera = Mis(directPdfA) * cam.dVCM + Mis(emissionPdfW) * cam.dVC;
                 vec4 c = maskTerminated(cam.throughput * Le / (1.0 + wCamera), cam.terminated);
-                L += roughBefore >= 2u ? clampRadiance(c, cam.terminated) : c;
+                L += clampIndirect(c, roughBefore, cam.terminated);
             }
         }
         if (cam.pathLength == 1u) {
             albedo = shadeAlbedoRgb(s);
             normal = ns;
         }
+        // 最後の頂点：ここで終わる経路（光源に当たった分）だけを数えた（PT の ptTrace と同じ）
         if (cam.pathLength >= maxPathLength()) break;
 
         // 基材の中へ入る（subsurface）：ここから先は単方向のパストレーシングで続ける
         if (s.sssWeight > 0.0 && rnd(rng) < s.sssWeight) {
             PtState st;
+            // 打ち切りの表し方を PT のもの（重みを書き換える）へ
             st.beta = maskTerminated(cam.throughput, cam.terminated);
             st.terminated = cam.terminated;
-            vec4 tint = s.coatWeight > 0.0 ? sqrt(coatTransmittance(s, max(dot(ns, wo), 1e-3), 1.0)) : vec4(1.0);
+            vec4 tint = s.coatWeight > 0.0 ? coatTransmittance1(s, max(dot(ns, wo), 1e-3)) : vec4(1.0);
             st.beta *= tint;
             vec3 nIn = -ng;
             vec3 t, b;
@@ -253,6 +264,7 @@ void main() {
             st.insideSigma = s.sssSigma;
             st.mediumSigma = vec4(0.0);
             st.prevPdf = 0.0;
+            st.prevNee = false;
             st.rough = camRough;  // ptTrace の続きでも同じ数え方
             vec3 a2 = vec3(0.0), n2 = vec3(0.0);
             L += ptTrace(st, cam.pathLength, rng, a2, n2);
@@ -271,20 +283,21 @@ void main() {
 
         if (!delta) {
             // s = 1：光源への直接サンプリング
+            // 頂点の数は、この頂点を含めた camRough（光源までの間に頂点は無い）
             if (cam.pathLength + 1u <= maxPathLength()) {
                 vec4 c = maskTerminated(cam.throughput * directIllumination(cam, s, cv, vc, rng), cam.terminated);
-                L += roughBefore >= 1u ? clampRadiance(c, cam.terminated) : c;
+                L += clampIndirect(c, camRough, cam.terminated);
             }
             // s > 1：同じ番号の光源側の経路の頂点へつなぐ
             for (uint idx = pathHead[pathIdx]; idx != NO_VERTEX;) {
                 LightVertex lv = lightVerts[idx];
                 idx = lv.links.x;
                 if (lv.links.z + 1u + cam.pathLength > maxPathLength()) continue;
-                L += connectVertices(lv, cam, s, cv, vc);
+                L += connectVertices(lv, cam, s, cv, vc, camRough);
             }
             // merging（VCM）
             if (useMerging()) {
-                L += mergeVertices(cam, s, cv, vc);
+                L += mergeVertices(cam, s, cv, vc, camRough);
             }
         }
 
@@ -292,21 +305,9 @@ void main() {
         ++cam.pathLength;
     }
 
-    vec3 color = toOutputColor(L);
-    if (any(isnan(color)) || any(isinf(color))) color = vec3(0.0);
-    // 光源側からカメラへつないだ寄与（すでに表示の色）
-    uint si = pathIdx * 4u;
-    color += vec3(splat[si], splat[si + 1u], splat[si + 2u]);
+    // 光源側からカメラへつないだ寄与（すでに表示の色）を足す
+    uint si = splatIndex(px);
+    vec3 color = toOutputColor(L) + vec3(splat[si], splat[si + 1u], splat[si + 2u]);
     if (spectral) albedo = rgbToXyz(albedo);
-
-    ivec2 ip = ivec2(px);
-    if (pc.sampleIndex == 0u) {
-        imageStore(accumColor, ip, vec4(color, 1.0));
-        imageStore(accumAlbedo, ip, vec4(albedo, 1.0));
-        imageStore(accumNormal, ip, vec4(normal, 1.0));
-    } else {
-        imageStore(accumColor, ip, imageLoad(accumColor, ip) + vec4(color, 1.0));
-        imageStore(accumAlbedo, ip, imageLoad(accumAlbedo, ip) + vec4(albedo, 1.0));
-        imageStore(accumNormal, ip, imageLoad(accumNormal, ip) + vec4(normal, 1.0));
-    }
+    accumulate(ivec2(px), color, albedo, normal);
 }

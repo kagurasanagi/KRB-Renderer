@@ -14,12 +14,30 @@ pub fn is_builtin(spec: &str) -> bool {
     spec.starts_with("builtin:")
 }
 
-/// 一覧や表示に使う名前（ファイルならファイル名）
-pub fn environment_label(spec: &str) -> String {
-    if spec == STUDIO {
-        return "Studio (built-in)".into();
+/// 環境マップの名前の種類。表示名（翻訳）はライブラリでは決めず、UI が内蔵の ID から引く
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvironmentName {
+    /// 内蔵の環境（"studio" など。spec の "builtin:" の後ろ）
+    Builtin(String),
+    /// 画像ファイル（ファイル名）
+    File(String),
+}
+
+/// spec（設定・コマンドラインの値）が指す環境マップの名前
+pub fn describe_environment(spec: &str) -> EnvironmentName {
+    match spec.strip_prefix("builtin:") {
+        Some(id) => EnvironmentName::Builtin(id.to_string()),
+        None => EnvironmentName::File(Path::new(spec).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| spec.to_string())),
     }
-    Path::new(spec).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| spec.to_string())
+}
+
+/// ログ用の英語の名前（ファイルならファイル名）。画面に出す名前は describe_environment から UI 側で翻訳して作る
+pub fn environment_label(spec: &str) -> String {
+    match describe_environment(spec) {
+        EnvironmentName::Builtin(id) if id == "studio" => "Studio (built-in)".into(),
+        EnvironmentName::Builtin(id) => format!("{id} (built-in)"),
+        EnvironmentName::File(f) => f,
+    }
 }
 
 /// 環境マップを読み込む（内蔵の名前なら生成する）
@@ -125,6 +143,8 @@ mod tests {
 
     #[test]
     fn labels() {
+        assert_eq!(describe_environment(STUDIO), EnvironmentName::Builtin("studio".into()));
+        assert_eq!(describe_environment("C:/hdr/a.exr"), EnvironmentName::File("a.exr".into()));
         assert_eq!(environment_label(STUDIO), "Studio (built-in)");
         assert_eq!(environment_label("C:/hdr/a.exr"), "a.exr");
         assert!(load_environment_map("builtin:nope").is_err());

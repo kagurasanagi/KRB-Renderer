@@ -6,10 +6,11 @@ use krbr_scene::camera::Camera;
 use krbr_scene::lens::LensParams;
 
 use crate::gpu_scene::GpuScene;
-use crate::gpu_types::{FrameUbo, PushConstants};
+use crate::gpu_types::{FrameUbo, GpuLightVertex, PushConstants};
 use crate::image_io::ImageF;
-use crate::kernel::{buffer_binding, compute_barrier, make_frame_ubo, scene_bindings, Kernel};
-use crate::vk::{as_bytes, image_barrier, Buffer, Context, Image};
+use crate::kernel::{buffer_binding, compute_barrier, make_frame_ubo, scene_bindings, Binding, Kernel};
+use crate::shader_consts::*;
+use crate::vk::{as_bytes, image_barrier, memory_barrier, Buffer, Context, Image};
 
 /// 積分器が書き込む先（RGBA32F の累積値、A にサンプル数）
 #[derive(Default)]
@@ -28,7 +29,10 @@ pub struct FrameParams {
     pub env_rotation_rad: f32,
     /// 0 で無効
     pub radiance_clamp: f32,
+    /// 最大の深さ。経路の線分の数（カメラ・光源を含めた頂点の数 − 1）は max_depth + 1 まで。全積分器で同じ意味
     pub max_depth: u32,
+    /// ロシアンルーレットを始める深さ。パストレーサーだけに効く。BDPT / VCM の続ける確率は MIS の確率密度に含めるので、
+    /// 頂点の材質だけで決まる（光源側から数えてもカメラ側から数えても同じ）値にする必要があり、深さによらず最初の頂点から効く
     pub rr_start_depth: u32,
     pub seed: u32,
     /// 分光モード（代表波長方式。累積は CIE XYZ）
@@ -52,12 +56,12 @@ struct FrameBuffer<'a> {
 }
 
 impl<'a> FrameBuffer<'a> {
-    fn new(ctx: &'a Context) -> Self {
-        Self { ctx, ubo: ctx.create_buffer(std::mem::size_of::<FrameUbo>() as u64, vk::BufferUsageFlags::UNIFORM_BUFFER, true, false) }
+    fn new(ctx: &'a Context) -> Result<Self, String> {
+        Ok(Self { ctx, ubo: ctx.try_create_buffer(std::mem::size_of::<FrameUbo>() as u64, vk::BufferUsageFlags::UNIFORM_BUFFER, true, false)? })
     }
     fn write(&mut self, u: &FrameUbo) {
         let bytes = as_bytes(std::slice::from_ref(u));
-        self.ubo.mapped().unwrap()[..bytes.len()].copy_from_slice(bytes);
+        self.ubo.mapped_bytes_mut().expect("the frame constants are in host-visible memory").copy_from_slice(bytes);
     }
 }
 
@@ -72,6 +76,10 @@ pub trait Integrator {
     fn update_frame(&mut self, fp: &FrameParams);
     /// sample_index 番目のサンプルを cmd に記録する（0 番目で累積を初期化）
     fn record_sample(&self, cmd: vk::CommandBuffer, sample_index: u32);
+    /// 前に記録したサンプルが GPU で終わった後の確かめ（容量の不足など）。Progressive::record が次を記録する前に呼ぶ
+    fn review_completed(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 struct PathTracer<'a> {
@@ -79,7 +87,6 @@ struct PathTracer<'a> {
     scene: &'a GpuScene<'a>,
     width: u32,
     height: u32,
-    targets_ref: (u32, u32),
     seed: u32,
     frame: FrameBuffer<'a>,
     kernel: Kernel<'a>,
@@ -87,10 +94,10 @@ struct PathTracer<'a> {
 
 impl<'a> PathTracer<'a> {
     fn new(ctx: &'a Context, sc: &'a GpuScene<'a>, targets: &RenderTargets, fp: &FrameParams) -> Result<Self, String> {
-        let mut frame = FrameBuffer::new(ctx);
-        frame.write(&make_frame_ubo(sc, targets, fp));
+        let mut frame = FrameBuffer::new(ctx)?;
+        frame.write(&make_frame_ubo(sc, targets.width, targets.height, fp, false));
         let kernel = Kernel::new(ctx, "pathtrace", &scene_bindings(sc, targets, &frame.ubo))?;
-        Ok(Self { ctx, scene: sc, width: targets.width, height: targets.height, targets_ref: (targets.width, targets.height), seed: fp.seed, frame, kernel })
+        Ok(Self { ctx, scene: sc, width: targets.width, height: targets.height, seed: fp.seed, frame, kernel })
     }
 }
 
@@ -100,13 +107,59 @@ impl Integrator for PathTracer<'_> {
     }
     fn update_frame(&mut self, fp: &FrameParams) {
         self.seed = fp.seed;
-        let t = RenderTargets { width: self.targets_ref.0, height: self.targets_ref.1, ..Default::default() };
-        self.frame.write(&make_frame_ubo(self.scene, &t, fp));
+        self.frame.write(&make_frame_ubo(self.scene, self.width, self.height, fp, false));
     }
     fn record_sample(&self, cmd: vk::CommandBuffer, sample_index: u32) {
         self.kernel.dispatch(cmd, PushConstants { sample_index, seed: self.seed }, self.width, self.height);
         compute_barrier(self.ctx, cmd); // 次のサンプルが累積を読む前に書き込みを完了させる
     }
+}
+
+/// 光源側の頂点：1 本の経路あたり平均この数まで保存できるように確保する（足りなければ review_completed で増やす）
+const LIGHT_VERTICES_PER_PATH: u64 = 4;
+/// 光源側の頂点のバッファの上限（VRAM の使いすぎを防ぐ）
+const LIGHT_VERTEX_BUFFER_MAX_BYTES: u64 = 512 << 20;
+
+/// BDPT / VCM のバッファ（作りかけで失敗しても Drop が作った分を解放する）
+struct VcmBuffers<'a> {
+    ctx: &'a Context,
+    light_verts: Buffer,
+    path_heads: Buffer,
+    cell_heads: Buffer,
+    counters: Buffer,
+    /// counters を毎回写して CPU から読む（容量の不足などを知らせるため）
+    counters_readback: Buffer,
+    splat: Buffer,
+}
+
+impl<'a> VcmBuffers<'a> {
+    fn new(ctx: &'a Context, paths: u64, capacity: u32) -> Result<Self, String> {
+        let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
+        let mut b = Self { ctx, light_verts: Buffer::default(), path_heads: Buffer::default(), cell_heads: Buffer::default(), counters: Buffer::default(), counters_readback: Buffer::default(), splat: Buffer::default() };
+        b.light_verts = ctx.try_create_buffer(light_vertex_bytes(capacity), usage, false, false)?;
+        b.path_heads = ctx.try_create_buffer(paths * 4, usage, false, false)?;
+        b.cell_heads = ctx.try_create_buffer(VCM_GRID_SIZE as u64 * 4, usage, false, false)?;
+        b.counters = ctx.try_create_buffer(VCM_COUNTER_COUNT as u64 * 4, usage | vk::BufferUsageFlags::TRANSFER_SRC, false, false)?;
+        b.counters_readback = ctx.try_create_buffer(VCM_COUNTER_COUNT as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST, true, true)?;
+        b.splat = ctx.try_create_buffer(paths * VCM_SPLAT_FLOATS_PER_PIXEL as u64 * 4, usage, false, false)?;
+        Ok(b)
+    }
+}
+
+impl Drop for VcmBuffers<'_> {
+    fn drop(&mut self) {
+        for b in [&mut self.light_verts, &mut self.path_heads, &mut self.cell_heads, &mut self.counters, &mut self.counters_readback, &mut self.splat] {
+            self.ctx.destroy_buffer(b);
+        }
+    }
+}
+
+fn light_vertex_bytes(capacity: u32) -> u64 {
+    capacity as u64 * std::mem::size_of::<GpuLightVertex>() as u64
+}
+
+fn max_light_vertices() -> u64 {
+    LIGHT_VERTEX_BUFFER_MAX_BYTES / std::mem::size_of::<GpuLightVertex>() as u64
 }
 
 /// BDPT（merging なし）と VCM（merging あり）
@@ -117,15 +170,19 @@ struct Bidirectional<'a> {
     width: u32,
     height: u32,
     seed: u32,
+    /// 光源側の頂点の容量（個）
     capacity: u32,
     frame: FrameBuffer<'a>,
-    light_verts: Buffer,
-    path_heads: Buffer,
-    cell_heads: Buffer,
-    counters: Buffer,
-    splat: Buffer,
+    bindings: Vec<Binding>,
+    // カーネルはバッファを記述子で参照するので、バッファより先に破棄する（フィールドは宣言の順に破棄される）
     light: Kernel<'a>,
     camera: Kernel<'a>,
+    buffers: VcmBuffers<'a>,
+    /// 容量を増やせるか（増やすのに失敗したら false）
+    growable: bool,
+    /// 容量を使い切った・セルの走査を打ち切った、を一度だけ知らせる
+    warned_full: bool,
+    warned_cell_walk: bool,
 }
 
 impl<'a> Bidirectional<'a> {
@@ -133,29 +190,67 @@ impl<'a> Bidirectional<'a> {
         if !ctx.info.atomic_float_add {
             return Err("bdpt / vcm need VK_EXT_shader_atomic_float (shaderBufferFloat32AtomicAdd)".into());
         }
-        let mut frame = FrameBuffer::new(ctx);
-        let mut u = make_frame_ubo(sc, targets, fp);
-        u.vcm_params.w = if merging { 1.0 } else { 0.0 };
-        frame.write(&u);
-        // 光源側の頂点：1 本の経路あたり平均 4 個まで、全体で 512 MB まで
+        let mut frame = FrameBuffer::new(ctx)?;
+        frame.write(&make_frame_ubo(sc, targets.width, targets.height, fp, merging));
         let paths = targets.width as u64 * targets.height as u64;
-        let capacity = (paths * 4).min((512u64 << 20) / 96) as u32;
+        let capacity = (paths * LIGHT_VERTICES_PER_PATH).min(max_light_vertices()) as u32;
+        let buffers = VcmBuffers::new(ctx, paths, capacity)?;
+        let mut bindings = scene_bindings(sc, targets, &frame.ubo);
+        bindings.push(buffer_binding(BINDING_LIGHT_VERTICES, &buffers.light_verts));
+        bindings.push(buffer_binding(BINDING_PATH_HEADS, &buffers.path_heads));
+        bindings.push(buffer_binding(BINDING_CELL_HEADS, &buffers.cell_heads));
+        bindings.push(buffer_binding(BINDING_COUNTERS, &buffers.counters));
+        bindings.push(buffer_binding(BINDING_SPLAT, &buffers.splat));
+        let light = Kernel::new(ctx, "vcm_light", &bindings)?;
+        let camera = Kernel::new(ctx, "vcm_camera", &bindings)?;
+        krbr_core::info!("{}: up to {} light vertices ({} MB)", if merging { "vcm" } else { "bdpt" }, capacity, light_vertex_bytes(capacity) >> 20);
+        Ok(Self {
+            ctx,
+            scene: sc,
+            merging,
+            width: targets.width,
+            height: targets.height,
+            seed: fp.seed,
+            capacity,
+            frame,
+            bindings,
+            light,
+            camera,
+            buffers,
+            growable: true,
+            warned_full: false,
+            warned_cell_walk: false,
+        })
+    }
+
+    /// 光源側の頂点のバッファを capacity 個に作り直す（記述子が変わるのでカーネルも作り直す）。
+    /// 失敗したら Err で、今のバッファとカーネルをそのまま使い続ける
+    fn grow(&mut self, capacity: u32) -> Result<(), String> {
+        self.ctx.wait_idle();
         let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
-        let light_verts = ctx.create_buffer(capacity as u64 * 96, usage, false, false);
-        let path_heads = ctx.create_buffer(paths * 4, usage, false, false);
-        let cell_heads = ctx.create_buffer((1u64 << 21) * 4, usage, false, false);
-        let counters = ctx.create_buffer(16, usage, false, false);
-        let splat = ctx.create_buffer(paths * 16, usage, false, false);
-        let mut b = scene_bindings(sc, targets, &frame.ubo);
-        b.push(buffer_binding(20, &light_verts));
-        b.push(buffer_binding(21, &path_heads));
-        b.push(buffer_binding(22, &cell_heads));
-        b.push(buffer_binding(23, &counters));
-        b.push(buffer_binding(24, &splat));
-        let light = Kernel::new(ctx, "vcm_light", &b)?;
-        let camera = Kernel::new(ctx, "vcm_camera", &b)?;
-        krbr_core::info!("{}: up to {} light vertices ({} MB)", if merging { "vcm" } else { "bdpt" }, capacity, (capacity as u64 * 96) >> 20);
-        Ok(Self { ctx, scene: sc, merging, width: targets.width, height: targets.height, seed: fp.seed, capacity, frame, light_verts, path_heads, cell_heads, counters, splat, light, camera })
+        let mut new_buf = self.ctx.try_create_buffer(light_vertex_bytes(capacity), usage, false, false)?;
+        let mut bindings = self.bindings.clone();
+        for b in &mut bindings {
+            if let Binding::Buffer { binding: BINDING_LIGHT_VERTICES, buffer, .. } = b {
+                *buffer = new_buf.buffer;
+            }
+        }
+        let kernels = Kernel::new(self.ctx, "vcm_light", &bindings).and_then(|l| Ok((l, Kernel::new(self.ctx, "vcm_camera", &bindings)?)));
+        let (light, camera) = match kernels {
+            Ok(k) => k,
+            Err(e) => {
+                self.ctx.destroy_buffer(&mut new_buf);
+                return Err(e);
+            }
+        };
+        // 古いカーネルを破棄してから、それが参照していた古いバッファを解放する
+        self.light = light;
+        self.camera = camera;
+        let mut old = std::mem::replace(&mut self.buffers.light_verts, new_buf);
+        self.ctx.destroy_buffer(&mut old);
+        self.bindings = bindings;
+        self.capacity = capacity;
+        Ok(())
     }
 }
 
@@ -169,37 +264,68 @@ impl Integrator for Bidirectional<'_> {
     }
     fn update_frame(&mut self, fp: &FrameParams) {
         self.seed = fp.seed;
-        let t = RenderTargets { width: self.width, height: self.height, ..Default::default() };
-        let mut u = make_frame_ubo(self.scene, &t, fp);
-        u.vcm_params.w = if self.merging { 1.0 } else { 0.0 };
-        self.frame.write(&u);
+        self.frame.write(&make_frame_ubo(self.scene, self.width, self.height, fp, self.merging));
     }
     fn record_sample(&self, cmd: vk::CommandBuffer, sample_index: u32) {
         let dev = &self.ctx.device;
+        let b = &self.buffers;
         unsafe {
             // 前の繰り返しの頂点・格子・画面への足し込みを空にする
-            dev.cmd_fill_buffer(cmd, self.path_heads.buffer, 0, vk::WHOLE_SIZE, 0xFFFF_FFFF);
+            dev.cmd_fill_buffer(cmd, b.path_heads.buffer, 0, vk::WHOLE_SIZE, 0xFFFF_FFFF);
             if self.merging {
-                dev.cmd_fill_buffer(cmd, self.cell_heads.buffer, 0, vk::WHOLE_SIZE, 0xFFFF_FFFF);
+                dev.cmd_fill_buffer(cmd, b.cell_heads.buffer, 0, vk::WHOLE_SIZE, 0xFFFF_FFFF);
             }
-            dev.cmd_fill_buffer(cmd, self.splat.buffer, 0, vk::WHOLE_SIZE, 0);
-            let counters = [0u32, self.capacity, 0, 0];
-            dev.cmd_update_buffer(cmd, self.counters.buffer, 0, as_bytes(&counters));
+            dev.cmd_fill_buffer(cmd, b.splat.buffer, 0, vk::WHOLE_SIZE, 0);
+            let mut counters = [0u32; VCM_COUNTER_COUNT as usize];
+            counters[VCM_COUNTER_CAPACITY as usize] = self.capacity;
+            dev.cmd_update_buffer(cmd, b.counters.buffer, 0, as_bytes(&counters));
         }
         compute_barrier(self.ctx, cmd);
         self.light.dispatch(cmd, PushConstants { sample_index, seed: self.seed }, self.width, self.height);
         compute_barrier(self.ctx, cmd);
         self.camera.dispatch(cmd, PushConstants { sample_index, seed: self.seed }, self.width, self.height);
         compute_barrier(self.ctx, cmd);
+        // この繰り返しの数を CPU から読めるところへ写す（review_completed で見る）
+        let n = VCM_COUNTER_COUNT as u64 * 4;
+        unsafe { dev.cmd_copy_buffer(cmd, b.counters.buffer, b.counters_readback.buffer, &[vk::BufferCopy { src_offset: 0, dst_offset: 0, size: n }]) };
+        memory_barrier(dev, cmd, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, vk::PipelineStageFlags2::HOST, vk::AccessFlags2::HOST_READ);
+    }
+    fn review_completed(&mut self) -> Result<(), String> {
+        let Some(bytes) = self.buffers.counters_readback.mapped_bytes() else { return Ok(()) };
+        let counter = |i: u32| {
+            let o = i as usize * 4;
+            u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]])
+        };
+        // 数は容量を超えても数え続ける（保存できなかった頂点も数える）
+        let wanted = counter(VCM_COUNTER_STORED) as u64;
+        let truncated = counter(VCM_COUNTER_MERGE_TRUNCATED);
+        if truncated > 0 && !std::mem::replace(&mut self.warned_cell_walk, true) {
+            krbr_core::warn!("vcm: {} merging lookups stopped after {} vertices in one cell; some light is missing there", truncated, VCM_MAX_CELL_WALK);
+        }
+        if wanted <= self.capacity as u64 {
+            return Ok(());
+        }
+        // 保存できなかった頂点への接続・まとめは行われず、その分の光が欠ける（MIS の重みはその戦略がある前提なので暗くなる）。
+        // 上限までは容量を増やして、次の繰り返しから欠けないようにする
+        let max = max_light_vertices();
+        if self.growable && (self.capacity as u64) < max {
+            let capacity = (wanted + wanted / 4).min(max) as u32;
+            krbr_core::info!("{}: {} light vertices did not fit in {}; growing to {}", self.name(), wanted, self.capacity, capacity);
+            let r = self.grow(capacity);
+            // 作れなかったら（VRAM の不足など）、今の容量のまま続ける。毎回試さない
+            self.growable = r.is_ok();
+            return r;
+        }
+        if !std::mem::replace(&mut self.warned_full, true) {
+            krbr_core::warn!("{}: {} light vertices did not fit in {} ({} MB, the limit); the rest are dropped and some light is missing", self.name(), wanted, self.capacity, light_vertex_bytes(self.capacity) >> 20);
+        }
+        Ok(())
     }
 }
 
 impl Drop for Bidirectional<'_> {
     fn drop(&mut self) {
         self.ctx.wait_idle();
-        for b in [&mut self.light_verts, &mut self.path_heads, &mut self.cell_heads, &mut self.counters, &mut self.splat] {
-            self.ctx.destroy_buffer(b);
-        }
     }
 }
 
@@ -248,19 +374,21 @@ impl<'a> Progressive<'a> {
         Ok(p)
     }
 
+    /// 出力先の画像と積分器を作る。失敗したら Err（作った画像は destroy_targets・Drop が解放する）
     fn create_targets(&mut self) -> Result<(), String> {
         let usage = vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC;
         let (w, h) = (self.targets.width, self.targets.height);
-        self.targets.color = self.ctx.create_image_2d(w, h, 1, vk::Format::R32G32B32A32_SFLOAT, usage);
-        self.targets.albedo = self.ctx.create_image_2d(w, h, 1, vk::Format::R32G32B32A32_SFLOAT, usage);
-        self.targets.normal = self.ctx.create_image_2d(w, h, 1, vk::Format::R32G32B32A32_SFLOAT, usage);
+        let f = vk::Format::R32G32B32A32_SFLOAT;
+        self.targets.color = self.ctx.try_create_image_2d(w, h, 1, f, usage)?;
+        self.targets.albedo = self.ctx.try_create_image_2d(w, h, 1, f, usage)?;
+        self.targets.normal = self.ctx.try_create_image_2d(w, h, 1, f, usage)?;
         let imgs = [self.targets.color.image, self.targets.albedo.image, self.targets.normal.image];
         let trace = self.ctx.trace_stages();
-        self.ctx.submit_and_wait(|dev, cmd| {
+        self.ctx.try_submit_and_wait(|dev, cmd| {
             for img in imgs {
                 image_barrier(dev, cmd, img, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE, trace, vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE, 1);
             }
-        });
+        })?;
         self.integrator = Some(create_integrator(self.ctx, self.scene, &self.targets, &self.frame, &self.integrator_name)?);
         self.samples = 0;
         Ok(())
@@ -273,7 +401,7 @@ impl<'a> Progressive<'a> {
         self.ctx.destroy_image(&mut self.targets.normal);
     }
 
-    /// 解像度を変える（出力先と積分器を作り直し、累積は 0 から）
+    /// 解像度を変える（出力先と積分器を作り直し、累積は 0 から）。失敗したら Err（積分器は無いままになり、record は何もしない）
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
         if width == self.targets.width && height == self.targets.height {
             return Ok(());
@@ -315,9 +443,14 @@ impl<'a> Progressive<'a> {
         self.samples = 0;
     }
 
-    /// count サンプルを cmd に記録する
+    /// count サンプルを cmd に記録する。前に記録したコマンドの完了を待ってから呼ぶこと（その結果を確かめてから記録する）
     pub fn record(&mut self, cmd: vk::CommandBuffer, count: u32) {
-        if let Some(i) = &self.integrator {
+        if let Some(i) = &mut self.integrator {
+            if self.samples > 0 {
+                if let Err(e) = i.review_completed() {
+                    krbr_core::error!("{}: {e}", i.name());
+                }
+            }
             for _ in 0..count {
                 i.record_sample(cmd, self.samples);
                 self.samples += 1;
@@ -342,14 +475,15 @@ impl<'a> Progressive<'a> {
         self.integrator.as_ref().map(|i| i.name()).unwrap_or("?")
     }
 
-    /// 現在の累積を読み戻す（GPU が待機中に呼ぶこと）。分光モードでも RGB に変換して返す
-    pub fn readback(&self) -> AovImages {
+    /// 現在の累積を読み戻す（GPU が待機中に呼ぶこと）。分光モードでも RGB に変換して返す。
+    /// 読み戻し用のバッファが作れないなどで失敗したら Err
+    pub fn try_readback(&self) -> Result<AovImages, String> {
         let (w, h) = (self.targets.width, self.targets.height);
         let bytes = w as u64 * h as u64 * 16;
-        let mut rb = self.ctx.create_buffer(bytes * 3, vk::BufferUsageFlags::TRANSFER_DST, true, true);
+        let mut rb = self.ctx.try_create_buffer(bytes * 3, vk::BufferUsageFlags::TRANSFER_DST, true, true)?;
         let imgs = [self.targets.color.image, self.targets.albedo.image, self.targets.normal.image];
         let rbb = rb.buffer;
-        self.ctx.submit_and_wait(|dev, cmd| {
+        let r = self.ctx.try_submit_and_wait(|dev, cmd| {
             for (k, img) in imgs.iter().enumerate() {
                 let region = vk::BufferImageCopy::default()
                     .buffer_offset(bytes * k as u64)
@@ -357,14 +491,22 @@ impl<'a> Progressive<'a> {
                     .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
                 unsafe { dev.cmd_copy_image_to_buffer(cmd, *img, vk::ImageLayout::GENERAL, rbb, &[region]) };
             }
+            memory_barrier(dev, cmd, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, vk::PipelineStageFlags2::HOST, vk::AccessFlags2::HOST_READ);
         });
-        let src = rb.mapped_ref().unwrap();
+        if let Err(e) = r {
+            self.ctx.destroy_buffer(&mut rb);
+            return Err(e);
+        }
+        let src = rb.mapped_bytes().expect("the readback buffer is host-visible");
         let n = (w * h) as usize;
         let mut out = [ImageF::new(w, h), ImageF::new(w, h), ImageF::new(w, h)];
         for (k, dst) in out.iter_mut().enumerate() {
             let base = n * 16 * k;
             for i in 0..n {
-                let px = |c: usize| f32::from_le_bytes([src[base + i * 16 + c * 4], src[base + i * 16 + c * 4 + 1], src[base + i * 16 + c * 4 + 2], src[base + i * 16 + c * 4 + 3]]);
+                let px = |c: usize| {
+                    let o = base + i * 16 + c * 4;
+                    f32::from_le_bytes([src[o], src[o + 1], src[o + 2], src[o + 3]])
+                };
                 let cnt = px(3); // A にサンプル数が入っている
                 let inv = if cnt > 0.0 { 1.0 / cnt } else { 0.0 };
                 for c in 0..3 {
@@ -379,7 +521,12 @@ impl<'a> Progressive<'a> {
             xyz_to_linear_srgb(&mut color);
             xyz_to_linear_srgb(&mut albedo);
         }
-        AovImages { color, albedo, normal }
+        Ok(AovImages { color, albedo, normal })
+    }
+
+    /// try_readback の、失敗したらパニックする版（失敗を扱えない呼び出し元用）
+    pub fn readback(&self) -> AovImages {
+        self.try_readback().unwrap_or_else(|e| panic!("readback: {e}"))
     }
 }
 

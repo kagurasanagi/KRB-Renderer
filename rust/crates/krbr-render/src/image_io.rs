@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn aces_maps_white_below_one() {
-        // RRT + ODT の近似（C++ 版と同じ式）では、白 1.0 は約 0.62 になる
+        // RRT + ODT の近似（表示の shaders/tonemap.comp と同じ式）では、白 1.0 は約 0.62 になる
         let (r, g, b) = aces_fitted(1.0, 1.0, 1.0);
         assert!(r < 1.0 && r > 0.55 && (r - g).abs() < 0.02 && (g - b).abs() < 0.02, "{r} {g} {b}");
     }

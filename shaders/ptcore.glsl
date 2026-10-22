@@ -3,24 +3,24 @@
 #ifndef KRBR_PTCORE_GLSL
 #define KRBR_PTCORE_GLSL
 
+// ロシアンルーレットの続ける確率の範囲（経路の重みの最大の成分から決める）。下限は、暗い経路を打ち切りすぎて
+// 生き残った経路の重みが 1 / q で大きくなりすぎない（ホタルにならない）ため、上限は明るい経路もいずれ終わるため
+#define PT_RR_MIN_PROB 0.05
+#define PT_RR_MAX_PROB 0.95
+
 struct PtState {
     vec3 origin;
     vec3 dir;
-    vec4 beta;           // 代表波長以外を打ち切ったら (4β₀, 0, 0, 0)
-    float prevPdf;       // 直前の BSDF サンプリングの確率密度（0 は直接サンプリングと組み合わせない）
+    vec4 beta;           // 代表波長以外を打ち切ったら heroOnly で書き換えた値
+    float prevPdf;       // 直前の BSDF サンプリングの確率密度。0 は基材の中を進む光線（外へ抜けた光は捨て、光源は MIS なしで数える）
+    bool prevNee;        // 直前の方向は直接サンプリングでも選べた（false：透過の向きなど BSDF サンプリングだけの戦略で、MIS の重みは 1）
     bool inside;         // 基材の中を進んでいる（拡散の透過で入った）
     vec4 insideSigma;
     vec4 mediumSigma;    // 透明な物体の中での吸収係数
     bool terminated;     // 代表波長以外を打ち切った
-    uint rough;          // 間接光の上限をかけるかの判定に使う頂点の数。カメラから最初の鏡面でない頂点までの
+    uint rough;          // 間接光の上限をかけるかの判定に使う頂点の数（clampIndirect）。カメラから最初の鏡面でない頂点までの
                          // ガラス・鏡（isDeltaLike）は数えない（ガラス越し・鏡に映った物の直接光は抑えない）
 };
-
-// 透過する材質の屈折率（分光モードで分散があれば代表波長での値）
-float iorOf(Material m) {
-    if (spectralMode() && m.params3.w > 0.5) return m.params3.y + m.params3.z / (gLambda.x * gLambda.x);
-    return m.params0.z;
-}
 
 // 光源への直接サンプリング（NEE）。p は光線の始点、l の判定は呼び出し側の基底で
 vec4 directLightPt(Shade s, vec3 p, vec3 ng, vec3 ns, vec3 t, vec3 b, vec3 v, vec4 beta, inout Rng rng) {
@@ -36,12 +36,13 @@ vec4 directLightPt(Shade s, vec3 p, vec3 ng, vec3 ns, vec3 t, vec3 b, vec3 v, ve
     return beta * f * l.z * ls.Le * (w / ls.directPdfW);
 }
 
-// 経路を depth0 番目の線分から最後まで追う。返り値は放射輝度（beta をかけた後）。
-// depth0 == 0 のときだけ、最初の交点のアルベドと法線を書く
+// 経路を depth0 番目の線分から最後まで追う（depth 番目の線分の先の頂点は、始点から depth + 1 本目の線分の先）。
+// 経路の線分は maxPathLength() 本まで：最後の頂点では光源・環境光に当たった分だけを数え、直接サンプリングも散乱もしない
+// （同じ長さの経路を、直接サンプリングでも BSDF サンプリングでも作れるようにして、MIS の両方がそろうように）。
+// 返り値は放射輝度（beta をかけた後）。depth0 == 0 のときだけ、最初の交点のアルベドと法線を書く
 vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, inout vec3 normal) {
     vec4 L = vec4(0.0);
-    uint maxDepth = F.counts.x;
-    for (uint depth = depth0; depth < maxDepth; ++depth) {
+    for (uint depth = depth0;; ++depth) {
         Hit hit;
         if (!traceClosest(st.origin, st.dir, hit)) {
             vec4 Le = envSpectrum(st.dir);
@@ -49,9 +50,8 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
                 L += st.beta * Le;  // beta はカメラの重み（周辺減光など）
                 albedo = clamp(envRadiance(st.dir), 0.0, 1.0);
             } else if (st.prevPdf > 0.0) {  // prevPdf = 0 は基材の中など（中から抜けた光は捨てる）
-                float w = powerHeuristic(st.prevPdf, envLightPdfW(st.dir));
-                vec4 c = st.beta * Le * w;
-                L += st.rough >= 2u ? clampRadiance(c, st.terminated) : c;  // 間接光だけを抑える（ホタル対策）
+                float w = st.prevNee ? powerHeuristic(st.prevPdf, envLightPdfW(st.dir)) : 1.0;
+                L += clampIndirect(st.beta * Le * w, st.rough, st.terminated);
             }
             break;
         }
@@ -59,7 +59,9 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
         if (any(greaterThan(st.mediumSigma, vec4(0.0)))) st.beta *= exp(-st.mediumSigma * hit.t);
 
         vec3 wo = -st.dir;
-        bool frontFace = dot(hit.ng, wo) > 0.0;  // 幾何法線は外向き（閉じた形状の表から当たった）
+        bool frontFace;
+        vec3 ng, ns;
+        orientNormals(hit, wo, frontFace, ng, ns);
         uint roughBefore = st.rough;
         // 発光面（片面）。直接サンプリングと MIS で組み合わせる
         Material hm = materials[hit.material];
@@ -67,53 +69,47 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
             vec4 Le = specUnbounded(hm.emission.rgb, hm.specEmission);
             if (depth == 0u) {
                 L += st.beta * Le;
-                albedo = clamp(hm.emission.rgb, 0.0, 1.0);
             } else {
                 float cosL = dot(hit.ng, wo);
                 float lightPdfW = emitterPdfA(hm.emission.rgb) * hit.t * hit.t / max(cosL, 1e-6);
-                float w = st.prevPdf > 0.0 ? powerHeuristic(st.prevPdf, lightPdfW) : 1.0;
-                vec4 c = st.beta * Le * w;
-                L += roughBefore >= 1u ? clampRadiance(c, st.terminated) : c;
+                float w = st.prevPdf > 0.0 && st.prevNee ? powerHeuristic(st.prevPdf, lightPdfW) : 1.0;
+                L += clampIndirect(st.beta * Le * w, roughBefore, st.terminated);
             }
         }
 
-        // 光線の来た側に法線をそろえる（両面として扱う）
-        vec3 ng = frontFace ? hit.ng : -hit.ng;
-        vec3 ns = dot(hit.ns, ng) < 0.0 ? -hit.ns : hit.ns;
-        if (dot(ns, wo) <= 0.0) ns = ng;
-
-        vec3 nsBase = ns;
-        Shade s = surfaceAt(hit, ns, rng);
-        if (dot(ns, wo) <= 0.0) ns = nsBase;  // 凹凸で裏を向いた場合は元に戻す
-
-        if (s.transWeight > 0.0) {
-            // 透過する材質：v の側から見た相対屈折率。分散があれば、ここで代表波長以外を打ち切る
-            float n = iorOf(hm);
-            s.ior = frontFace ? n : 1.0 / n;
-            if (spectralMode() && hm.params3.w > 0.5 && !st.terminated) {
-                st.beta = vec4(st.beta.x * 4.0, 0.0, 0.0, 0.0);
-                st.terminated = true;
-            }
+        bool dispersive;
+        Shade s = shadeVertex(hit, wo, frontFace, ns, rng, dispersive);
+        // 分散のある材質では、屈折の向きが波長で変わるので代表波長以外を打ち切る
+        if (dispersive && !st.terminated) {
+            st.beta = heroOnly(st.beta);
+            st.terminated = true;
         }
         if (st.rough > 0u || !isDeltaLike(s)) st.rough++;
+        if (depth == 0u) {
+            albedo = shadeAlbedoRgb(s);
+            normal = ns;
+        }
+        // 最後の頂点：ここで終わる経路（光源に当たった分）だけを数えた
+        if (depth + 1u >= maxPathLength()) break;
 
         if (st.inside) {
             // ---- 基材の中から面に当たった：ここまでの吸収をかけ、外へ拡散して出るか、中へはね返る
             st.beta *= exp(-st.insideSigma * hit.t);
             vec3 p = offsetRay(hit.pos, ng);  // ng は中側を向いている
-            if (s.metallic || s.sssWeight <= 0.0 && s.coatWeight <= 0.0 && s.baseRgb.r > 0.5) {
-                // 銅・不透明なシルクなど：中へ拡散してはね返る
+            Material im = materials[innerMaterial(hit.material)];
+            if (opaqueFromInside(im)) {
+                // 銅・シルクのインクなど光を通さない面：その面の反射率で中へ拡散してはね返る（残りは吸収される）
                 vec3 t, b;
                 basis(ng, t, b);
                 st.dir = toWorld(sampleCosineHemisphere(rnd2(rng)), t, b, ng);
-                st.beta *= s.metallic ? s.baseColor * 0.8 : vec4(0.8);
+                st.beta *= innerReflectance(im);
                 st.origin = p;
                 st.prevPdf = 0.0;
                 continue;
             }
-            // 外へ出る：レジストがあれば、その厚みの吸収を受ける（拡散の出射、f = 1/π）
+            // 外へ出る：レジストがあれば、その厚みを 1 回通る吸収を受ける（拡散の出射、f = 1/π）
             vec3 nOut = -ng;
-            vec4 tint = s.coatWeight > 0.0 ? sqrt(coatTransmittance(s, 1.0, 1.0)) : vec4(1.0);
+            vec4 tint = s.coatWeight > 0.0 ? coatTransmittance1(s, 1.0) : vec4(1.0);
             st.beta *= tint;
             vec3 pOut = offsetRay(hit.pos, nOut);
             vec3 t, b;
@@ -124,13 +120,14 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
                     float c = dot(ls.wi, nOut);
                     if (c > 0.0 && !(ls.isEnv ? occluded(pOut, ls.wi) : occludedDist(pOut, ls.wi, ls.dist * (1.0 - 1e-4)))) {
                         float w = powerHeuristic(ls.directPdfW, c * INV_PI);
-                        L += clampRadiance(st.beta * INV_PI * c * ls.Le * (w / ls.directPdfW), st.terminated);
+                        L += clampIndirect(st.beta * INV_PI * c * ls.Le * (w / ls.directPdfW), st.rough, st.terminated);
                     }
                 }
             }
             vec3 l = sampleCosineHemisphere(rnd2(rng));
             st.dir = toWorld(l, t, b, nOut);
             st.prevPdf = l.z * INV_PI;
+            st.prevNee = true;
             st.origin = pOut;
             st.inside = false;
             continue;
@@ -138,7 +135,8 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
 
         // ---- 拡散の透過：一部の光は基材の中へ入る（確率 sssWeight で選び、重みは打ち消し合う）
         if (s.sssWeight > 0.0 && rnd(rng) < s.sssWeight) {
-            vec4 tint = s.coatWeight > 0.0 ? sqrt(coatTransmittance(s, max(dot(ns, wo), 1e-3), 1.0)) : vec4(1.0);
+            // レジストがあれば、その厚みを v の向きで 1 回通る
+            vec4 tint = s.coatWeight > 0.0 ? coatTransmittance1(s, max(dot(ns, wo), 1e-3)) : vec4(1.0);
             st.beta *= tint;
             vec3 nIn = -ng;
             vec3 t, b;
@@ -148,15 +146,7 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
             st.inside = true;
             st.insideSigma = s.sssSigma;
             st.prevPdf = 0.0;
-            if (depth == 0u) {
-                albedo = shadeAlbedoRgb(s);
-                normal = ns;
-            }
             continue;
-        }
-        if (depth == 0u) {
-            albedo = shadeAlbedoRgb(s);
-            normal = ns;
         }
 
         vec3 t, b;
@@ -166,11 +156,9 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
 
         vec3 p = offsetRay(hit.pos, ng);
 
-        // 光源の直接サンプリング（NEE）。透過の方向は、物体自身にさえぎられるので試さない
-        {
-            vec4 c = directLightPt(s, p, ng, ns, t, b, v, st.beta, rng);
-            L += roughBefore >= 1u ? clampRadiance(c, st.terminated) : c;
-        }
+        // 光源の直接サンプリング（NEE）。反射の向き（面の表側）だけを試す。透過の向きは、閉じた物体の外から入る光線なら物体自身に
+        // さえぎられるので試さない（中から外へ抜ける光線では光源に届きうるので、そちらは BSDF サンプリングだけで重み 1 で数える）
+        L += clampIndirect(directLightPt(s, p, ng, ns, t, b, v, st.beta, rng), st.rough, st.terminated);
 
         // BSDF サンプリング
         vec3 l = bsdfSample(s, v, rng);
@@ -184,6 +172,7 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
         if (transmit ? dot(wi, ng) >= 0.0 : dot(wi, ng) <= 0.0) break;
         st.beta *= f * abs(l.z) / pdf;
         st.prevPdf = pdf;
+        st.prevNee = !transmit;
         if (transmit) {
             // 面を通り抜けた：表から入ったなら中の吸収を、裏から出たなら外（空気）に戻す
             st.mediumSigma = frontFace ? s.transSigma : vec4(0.0);
@@ -193,9 +182,9 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
         }
         st.dir = wi;
 
-        // ロシアンルーレット
+        // ロシアンルーレット（rr_start_depth から。BDPT / VCM の continuationProb は別の決め方。bidir.glsl を参照）
         if (depth + 1u >= F.counts.y) {
-            float q = clamp(max(max(st.beta.x, st.beta.y), max(st.beta.z, st.beta.w)), 0.05, 0.95);
+            float q = clamp(max(max(st.beta.x, st.beta.y), max(st.beta.z, st.beta.w)), PT_RR_MIN_PROB, PT_RR_MAX_PROB);
             if (rnd(rng) > q) break;
             st.beta /= q;
         }

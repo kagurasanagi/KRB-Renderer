@@ -1,5 +1,7 @@
-//! ノイズ除去（Intel Open Image Denoise 2.5 の RT フィルタ。HDR、補助情報としてアルベドと法線）。C++ 版 render/denoiser と同じ流れ：
+//! ノイズ除去（Intel Open Image Denoise 2.5 の RT フィルタ。HDR、補助情報としてアルベドと法線）。流れ：
 //!   denoise_prep.comp（累積画像をサンプル数で割ってバッファへ）→ OIDN → denoise_blend.comp（元の画像と strength で混ぜて画像へ）
+//! OIDN の学習済みモデルはリニア RGB を前提にするので、分光モード（累積が CIE XYZ）では前処理でリニア sRGB に変換し、
+//! 混ぜるときに XYZ へ戻す（出力は累積と同じ色空間のまま。トーンマッピングと読み戻しの扱いは変わらない）
 //! OIDN は Vulkan と同じ GPU の CUDA などのデバイスで動かし、バッファを Win32 ハンドルで共有する（CPU を経由しない）。
 //! 共有できなければ CPU デバイスで、ホストから見えるバッファを渡す。OIDN の DLL（OpenImageDenoise.dll）は実行時に読む。
 //! 同期：OIDN と Vulkan の間にセマフォは無い。呼び出し側は、前処理の完了を待ってから execute し、execute が終わってから
@@ -10,9 +12,11 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use ash::vk;
+use glam::Vec4;
 
 use crate::integrator::RenderTargets;
-use crate::vk::{image_barrier, memory_barrier, Context, Image};
+use crate::kernel::compute_pipeline;
+use crate::vk::{as_bytes, image_barrier, memory_barrier, Context, GpuPod, Image};
 
 type OidnDevice = *mut c_void;
 type OidnBuffer = *mut c_void;
@@ -180,8 +184,9 @@ impl SharedBuf {
     }
 }
 
-/// 計算シェーダ 1 本（記述子は呼び出し側で書く）
-struct Kernel {
+//// 計算シェーダ 1 本と、その記述子の組 1 つ（記述子は呼び出し側で書く）。積分器のカーネル（kernel::Kernel）とは別の、
+/// 前処理・後処理用の小さなもの
+struct ComputeKernel {
     set_layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
@@ -189,27 +194,32 @@ struct Kernel {
     pipeline: vk::Pipeline,
 }
 
-impl Kernel {
-    fn new(ctx: &Context, spv: &str, types: &[vk::DescriptorType], push_size: u32) -> Result<Kernel, String> {
+impl ComputeKernel {
+    const NULL: ComputeKernel = ComputeKernel { set_layout: vk::DescriptorSetLayout::null(), pool: vk::DescriptorPool::null(), set: vk::DescriptorSet::null(), layout: vk::PipelineLayout::null(), pipeline: vk::Pipeline::null() };
+
+    /// 失敗したら Err（作りかけの資源は解放する）
+    fn new(ctx: &Context, spv: &str, types: &[vk::DescriptorType], push_size: u32) -> Result<ComputeKernel, String> {
+        let mut k = ComputeKernel::NULL;
+        let r = k.create(ctx, spv, types, push_size);
+        if r.is_err() {
+            k.destroy(ctx);
+        }
+        r.map(|_| k)
+    }
+
+    fn create(&mut self, ctx: &Context, spv: &str, types: &[vk::DescriptorType], push_size: u32) -> Result<(), String> {
         let dev = &ctx.device;
         let lb: Vec<vk::DescriptorSetLayoutBinding> = types.iter().enumerate().map(|(i, t)| vk::DescriptorSetLayoutBinding::default().binding(i as u32).descriptor_type(*t).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE)).collect();
-        let set_layout = unsafe { dev.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&lb), None) }.map_err(|e| format!("{e:?}"))?;
+        self.set_layout = unsafe { dev.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&lb), None) }.map_err(|e| format!("{e:?}"))?;
+        let pcr = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::COMPUTE, offset: 0, size: push_size }];
+        let layouts = [self.set_layout];
+        self.layout = unsafe { dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts).push_constant_ranges(&pcr), None) }.map_err(|e| format!("{e:?}"))?;
+        self.pipeline = compute_pipeline(dev, self.layout, spv)?;
         let count = |t: vk::DescriptorType| types.iter().filter(|x| **x == t).count() as u32;
         let sizes: Vec<vk::DescriptorPoolSize> = [vk::DescriptorType::STORAGE_IMAGE, vk::DescriptorType::STORAGE_BUFFER].iter().filter(|t| count(**t) > 0).map(|t| vk::DescriptorPoolSize { ty: *t, descriptor_count: count(*t) }).collect();
-        let pool = unsafe { dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes), None) }.map_err(|e| format!("{e:?}"))?;
-        let layouts = [set_layout];
-        let set = unsafe { dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts)) }.map_err(|e| format!("{e:?}"))?[0];
-        let pcr = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::COMPUTE, offset: 0, size: push_size }];
-        let layout = unsafe { dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts).push_constant_ranges(&pcr), None) }.map_err(|e| format!("{e:?}"))?;
-        let code = std::fs::read(crate::shader_dir().join(spv)).map_err(|_| format!("cannot read {spv}"))?;
-        let words: Vec<u32> = code.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-        let sm = unsafe { dev.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None) }.map_err(|e| format!("{e:?}"))?;
-        let entry = cstr("main");
-        let stage = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(sm).name(&entry);
-        let r = unsafe { dev.create_compute_pipelines(vk::PipelineCache::null(), &[vk::ComputePipelineCreateInfo::default().stage(stage).layout(layout)], None) };
-        unsafe { dev.destroy_shader_module(sm, None) };
-        let pipeline = r.map_err(|(_, e)| format!("vkCreateComputePipelines({spv}): {e:?}"))?[0];
-        Ok(Kernel { set_layout, pool, set, layout, pipeline })
+        self.pool = unsafe { dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes), None) }.map_err(|e| format!("{e:?}"))?;
+        self.set = unsafe { dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(self.pool).set_layouts(&layouts)) }.map_err(|e| format!("{e:?}"))?[0];
+        Ok(())
     }
 
     fn write(&self, ctx: &Context, images: &[(u32, vk::ImageView)], buffers: &[(u32, vk::Buffer)]) {
@@ -225,16 +235,17 @@ impl Kernel {
         unsafe { ctx.device.update_descriptor_sets(&w, &[]) };
     }
 
-    fn dispatch(&self, ctx: &Context, cmd: vk::CommandBuffer, push: &[u8], w: u32, h: u32) {
+    fn dispatch<P: GpuPod>(&self, ctx: &Context, cmd: vk::CommandBuffer, push: &P, w: u32, h: u32) {
         let dev = &ctx.device;
         unsafe {
             dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
             dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.layout, 0, &[self.set], &[]);
-            dev.cmd_push_constants(cmd, self.layout, vk::ShaderStageFlags::COMPUTE, 0, push);
+            dev.cmd_push_constants(cmd, self.layout, vk::ShaderStageFlags::COMPUTE, 0, as_bytes(std::slice::from_ref(push)));
             dev.cmd_dispatch(cmd, w.div_ceil(8), h.div_ceil(8), 1);
         }
     }
 
+    /// 破棄する（作りかけで一部が null でもよい。vkDestroy* は null を何もせずに通す）
     fn destroy(&mut self, ctx: &Context) {
         let dev = &ctx.device;
         unsafe {
@@ -243,8 +254,44 @@ impl Kernel {
             dev.destroy_descriptor_pool(self.pool, None);
             dev.destroy_descriptor_set_layout(self.set_layout, None);
         }
+        *self = ComputeKernel::NULL;
     }
 }
+
+/// XYZ ⇄ リニア sRGB の行列の列（w = 1 なら変換する、0 ならそのまま）。shaders/postfx.glsl の applyColorMatrix が読む
+fn color_matrix(m: glam::Mat3, on: bool) -> [Vec4; 3] {
+    let w = if on { 1.0 } else { 0.0 };
+    [m.col(0).extend(w), m.col(1).extend(w), m.col(2).extend(w)]
+}
+
+/// denoise_prep.comp のプッシュ定数
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PrepPush {
+    width: u32,
+    height: u32,
+    _pad: [u32; 2],
+    /// 累積が XYZ（分光モード）なら、OIDN に渡す前にリニア sRGB へ変換する
+    xyz_to_rgb: [Vec4; 3],
+}
+
+/// denoise_blend.comp のプッシュ定数
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BlendPush {
+    width: u32,
+    height: u32,
+    strength: f32,
+    _pad: u32,
+    /// 累積が XYZ（分光モード）なら、OIDN の結果（リニア sRGB）を XYZ へ戻してから元の画像と混ぜる
+    rgb_to_xyz: [Vec4; 3],
+}
+
+const _: () = assert!(std::mem::size_of::<PrepPush>() == 64);
+const _: () = assert!(std::mem::size_of::<BlendPush>() == 64);
+// 安全性：repr(C) で、上の assert により隙間が無い
+unsafe impl GpuPod for PrepPush {}
+unsafe impl GpuPod for BlendPush {}
 
 pub struct Denoiser<'a> {
     ctx: &'a Context,
@@ -260,8 +307,8 @@ pub struct Denoiser<'a> {
     /// color, albedo, normal, output
     bufs: [SharedBuf; 4],
     out_image: Image,
-    prep: Kernel,
-    blend: Kernel,
+    prep: ComputeKernel,
+    blend: ComputeKernel,
 }
 
 impl<'a> Denoiser<'a> {
@@ -282,8 +329,8 @@ impl<'a> Denoiser<'a> {
             filter: std::ptr::null_mut(),
             bufs: Default::default(),
             out_image: Image::default(),
-            prep: Kernel { set_layout: vk::DescriptorSetLayout::null(), pool: vk::DescriptorPool::null(), set: vk::DescriptorSet::null(), layout: vk::PipelineLayout::null(), pipeline: vk::Pipeline::null() },
-            blend: Kernel { set_layout: vk::DescriptorSetLayout::null(), pool: vk::DescriptorPool::null(), set: vk::DescriptorSet::null(), layout: vk::PipelineLayout::null(), pipeline: vk::Pipeline::null() },
+            prep: ComputeKernel::NULL,
+            blend: ComputeKernel::NULL,
         };
         d.setup(targets)?;
         krbr_core::info!("denoiser: OIDN on {} ({}), {}x{}, quality {}", d.name, if d.shared { "shared memory" } else { "host memory" }, width, height, quality.name());
@@ -315,14 +362,14 @@ impl<'a> Denoiser<'a> {
         check(api, self.device, "filter")?;
 
         let ctx = self.ctx;
-        self.out_image = ctx.create_image_2d(self.width, self.height, 1, vk::Format::R32G32B32A32_SFLOAT, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_DST);
+        self.out_image = ctx.try_create_image_2d(self.width, self.height, 1, vk::Format::R32G32B32A32_SFLOAT, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_DST)?;
         let img = self.out_image.image;
-        ctx.submit_and_wait(|dev, cmd| {
+        ctx.try_submit_and_wait(|dev, cmd| {
             image_barrier(dev, cmd, img, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, 1);
-        });
+        })?;
         let (si, sb) = (vk::DescriptorType::STORAGE_IMAGE, vk::DescriptorType::STORAGE_BUFFER);
-        self.prep = Kernel::new(ctx, "denoise_prep.comp.spv", &[si, si, si, sb, sb, sb, sb], 8)?;
-        self.blend = Kernel::new(ctx, "denoise_blend.comp.spv", &[si, sb, si], 12)?;
+        self.prep = ComputeKernel::new(ctx, "denoise_prep.comp.spv", &[si, si, si, sb, sb, sb, sb], std::mem::size_of::<PrepPush>() as u32)?;
+        self.blend = ComputeKernel::new(ctx, "denoise_blend.comp.spv", &[si, sb, si], std::mem::size_of::<BlendPush>() as u32)?;
         self.rebind(targets);
         Ok(())
     }
@@ -334,9 +381,6 @@ impl<'a> Denoiser<'a> {
         self.blend.write(self.ctx, &[(0, targets.color.view), (2, self.out_image.view)], &[(1, b(3))]);
     }
 
-    pub fn size(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
 
     /// "CUDA" / "HIP" / "GPU" / "CPU"
     pub fn device_name(&self) -> &str {
@@ -347,26 +391,38 @@ impl<'a> Denoiser<'a> {
         self.quality
     }
 
+    /// 品質を変える。OIDN が受け付けなければ知らせて、元の品質のまま使い続ける（quality() は実際の品質を返す）
     pub fn set_quality(&mut self, q: DenoiseQuality) {
         if q == self.quality {
             return;
         }
-        let api = self.api;
-        unsafe {
-            (api.set_filter_int)(self.filter, cstr("quality").as_ptr(), q.oidn());
-            (api.commit_filter)(self.filter);
+        let (api, filter) = (self.api, self.filter);
+        let apply = |q: DenoiseQuality| unsafe {
+            (api.set_filter_int)(filter, cstr("quality").as_ptr(), q.oidn());
+            (api.commit_filter)(filter);
+        };
+        apply(q);
+        match check(api, self.device, "quality") {
+            Ok(()) => self.quality = q,
+            Err(e) => {
+                krbr_core::warn!("{e}; keeping quality {}", self.quality.name());
+                apply(self.quality);
+                if let Err(e) = check(api, self.device, "quality") {
+                    krbr_core::warn!("{e}");
+                }
+            }
         }
-        if let Err(e) = check(api, self.device, "quality") {
-            krbr_core::warn!("{e}");
-        }
-        self.quality = q;
     }
 
-    /// 累積画像から OIDN の入力を作るコマンドを記録する（この後、完了を待ってから execute）
+    /// 累積画像から OIDN の入力を作るコマンドを記録する（この後、完了を待ってから execute）。累積はリニア sRGB とみなす。
+    /// 分光モード（累積が XYZ）では record_prepare_xyz を使う
     pub fn record_prepare(&self, cmd: vk::CommandBuffer) {
-        let mut push = [0u8; 8];
-        push[..4].copy_from_slice(&self.width.to_le_bytes());
-        push[4..].copy_from_slice(&self.height.to_le_bytes());
+        self.record_prepare_xyz(cmd, false);
+    }
+
+    /// record_prepare の、累積の色空間を指定する版。xyz_input: 累積が CIE XYZ（分光モード。Progressive::xyz_output）なら true
+    pub fn record_prepare_xyz(&self, cmd: vk::CommandBuffer, xyz_input: bool) {
+        let push = PrepPush { width: self.width, height: self.height, _pad: [0; 2], xyz_to_rgb: color_matrix(krbr_scene::spectrum::xyz_to_linear_srgb(), xyz_input) };
         self.prep.dispatch(self.ctx, cmd, &push, self.width, self.height);
         // 書き込みを、完了の待機後に OIDN（外部・CPU）から読めるようにする
         memory_barrier(&self.ctx.device, cmd, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::HOST, vk::AccessFlags2::HOST_READ);
@@ -381,14 +437,17 @@ impl<'a> Denoiser<'a> {
         Ok(t0.elapsed().as_secs_f64() * 1000.0)
     }
 
-    /// 結果を、元の画像と strength（0..1、1 で OIDN の結果そのまま）で混ぜて output() の画像へ書くコマンドを記録する
+    /// 結果を、元の画像と strength（0..1、1 で OIDN の結果そのまま）で混ぜて output() の画像へ書くコマンドを記録する。
+    /// 累積はリニア sRGB とみなす。分光モードでは record_output_xyz を使う
     pub fn record_output(&self, cmd: vk::CommandBuffer, strength: f32) {
+        self.record_output_xyz(cmd, strength, false);
+    }
+
+    /// record_output の、累積の色空間を指定する版（record_prepare_xyz と同じ xyz_input を渡す）。出力は累積と同じ色空間
+    pub fn record_output_xyz(&self, cmd: vk::CommandBuffer, strength: f32, xyz_input: bool) {
         let dev = &self.ctx.device;
         memory_barrier(dev, cmd, vk::PipelineStageFlags2::HOST, vk::AccessFlags2::HOST_WRITE, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_READ);
-        let mut push = [0u8; 12];
-        push[..4].copy_from_slice(&self.width.to_le_bytes());
-        push[4..8].copy_from_slice(&self.height.to_le_bytes());
-        push[8..].copy_from_slice(&strength.to_le_bytes());
+        let push = BlendPush { width: self.width, height: self.height, strength, _pad: 0, rgb_to_xyz: color_matrix(krbr_scene::spectrum::linear_srgb_to_xyz(), xyz_input) };
         self.blend.dispatch(self.ctx, cmd, &push, self.width, self.height);
         memory_barrier(dev, cmd, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::COPY, vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::TRANSFER_READ);
     }
@@ -398,25 +457,34 @@ impl<'a> Denoiser<'a> {
         &self.out_image
     }
 
-    /// output() の画像を読み戻す（GPU が待機中に呼ぶこと。分光モードなら XYZ のまま）
-    pub fn read_output(&self) -> crate::image_io::ImageF {
+    /// output() の画像を読み戻す（GPU が待機中に呼ぶこと。分光モードなら XYZ のまま）。失敗したら Err
+    pub fn try_read_output(&self) -> Result<crate::image_io::ImageF, String> {
         let (w, h) = (self.width, self.height);
         let bytes = w as u64 * h as u64 * 16;
-        let mut rb = self.ctx.create_buffer(bytes, vk::BufferUsageFlags::TRANSFER_DST, true, true);
+        let mut rb = self.ctx.try_create_buffer(bytes, vk::BufferUsageFlags::TRANSFER_DST, true, true)?;
         let (img, rbb) = (self.out_image.image, rb.buffer);
-        self.ctx.submit_and_wait(|dev, cmd| {
+        let r = self.ctx.try_submit_and_wait(|dev, cmd| {
             let region = vk::BufferImageCopy::default()
                 .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
                 .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
             unsafe { dev.cmd_copy_image_to_buffer(cmd, img, vk::ImageLayout::GENERAL, rbb, &[region]) };
+            memory_barrier(dev, cmd, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, vk::PipelineStageFlags2::HOST, vk::AccessFlags2::HOST_READ);
         });
-        let src = rb.mapped_ref().unwrap();
-        let mut out = crate::image_io::ImageF::new(w, h);
-        for (d, s) in out.rgba.iter_mut().zip(src.chunks_exact(4)) {
-            *d = f32::from_le_bytes([s[0], s[1], s[2], s[3]]);
-        }
+        let out = r.map(|()| {
+            let src = rb.mapped_bytes().expect("the readback buffer is host-visible");
+            let mut out = crate::image_io::ImageF::new(w, h);
+            for (d, s) in out.rgba.iter_mut().zip(src.chunks_exact(4)) {
+                *d = f32::from_le_bytes([s[0], s[1], s[2], s[3]]);
+            }
+            out
+        });
         self.ctx.destroy_buffer(&mut rb);
         out
+    }
+
+    /// try_read_output の、失敗したらパニックする版
+    pub fn read_output(&self) -> crate::image_io::ImageF {
+        self.try_read_output().unwrap_or_else(|e| panic!("denoiser readback: {e}"))
     }
 
     fn create_shared(&self, size: u64) -> Result<SharedBuf, String> {
@@ -457,12 +525,18 @@ impl<'a> Denoiser<'a> {
 
     fn create_host(&self, size: u64) -> Result<SharedBuf, String> {
         let mut b = SharedBuf::default();
-        let mut host = self.ctx.create_buffer(size, vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST, true, true);
-        let ptr = host.mapped().ok_or("host buffer is not mapped")?.as_mut_ptr() as *mut c_void;
+        let mut host = self.ctx.try_create_buffer(size, vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST, true, true)?;
+        let ptr = host.mapped_bytes_mut().map(|m| m.as_mut_ptr() as *mut c_void);
         b.host = Some(host);
-        // 安全性：ptr はホストから見えるバッファ（GPU と一貫性のあるメモリ）で、b と同じ寿命
+        let Some(ptr) = ptr else {
+            self.release(&mut b);
+            return Err("host buffer is not mapped".into());
+        };
+        // 安全性：ptr はホストから見えるバッファ（GPU と一貫性のあるメモリ）の size バイトで、b と同じ寿命
         let ob = unsafe { (self.api.new_shared_buffer)(self.device, ptr, size as usize) };
-        if let Err(e) = check(self.api, self.device, "host buffer") {
+        // create_shared と同じく、エラーと null の両方を確かめる
+        let r = check(self.api, self.device, "host buffer").and_then(|()| if ob.is_null() { Err("OIDN: cannot wrap the host buffer".to_string()) } else { Ok(()) });
+        if let Err(e) = r {
             self.release(&mut b);
             return Err(e);
         }
@@ -505,12 +579,8 @@ impl Drop for Denoiser<'_> {
             self.release(b);
         }
         unsafe { (self.api.release_device)(self.device) };
-        if self.prep.pipeline != vk::Pipeline::null() {
-            self.prep.destroy(ctx);
-        }
-        if self.blend.pipeline != vk::Pipeline::null() {
-            self.blend.destroy(ctx);
-        }
+        self.prep.destroy(ctx);
+        self.blend.destroy(ctx);
         let mut img = std::mem::take(&mut self.out_image);
         ctx.destroy_image(&mut img);
     }

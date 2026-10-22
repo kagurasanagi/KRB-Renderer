@@ -46,14 +46,23 @@ pub struct Buffer {
 }
 
 impl Buffer {
-    pub fn is_valid(&self) -> bool {
-        self.buffer != vk::Buffer::null()
-    }
+    /// 割り当てたメモリ全体（アロケータの都合で、作るときに求めた大きさ size より長いことがある）
     pub fn mapped(&mut self) -> Option<&mut [u8]> {
         self.allocation.as_mut().and_then(|a| a.mapped_slice_mut())
     }
+    /// 割り当てたメモリ全体（mapped と同じく size より長いことがある）。読み戻しには mapped_bytes を使う
     pub fn mapped_ref(&self) -> Option<&[u8]> {
         self.allocation.as_ref().and_then(|a| a.mapped_slice())
+    }
+    /// CPU から見えるメモリのうち、作るときに求めた大きさ（size バイト）だけ。読み戻した内容はこれで見る
+    pub fn mapped_bytes(&self) -> Option<&[u8]> {
+        let n = self.size as usize;
+        self.mapped_ref().and_then(|m| m.get(..n))
+    }
+    /// mapped_bytes の書き込み用
+    pub fn mapped_bytes_mut(&mut self) -> Option<&mut [u8]> {
+        let n = self.size as usize;
+        self.mapped().and_then(|m| m.get_mut(..n))
     }
 }
 
@@ -66,12 +75,6 @@ pub struct Image {
     pub width: u32,
     pub height: u32,
     pub layers: u32,
-}
-
-impl Image {
-    pub fn is_valid(&self) -> bool {
-        self.image != vk::Image::null()
-    }
 }
 
 fn has_ext(exts: &[vk::ExtensionProperties], name: &CStr) -> bool {
@@ -278,14 +281,18 @@ impl Context {
             None
         };
 
-        let mut f12 = vk::PhysicalDeviceVulkan12Features::default().buffer_device_address(true).descriptor_indexing(true).runtime_descriptor_array(true).shader_sampled_image_array_non_uniform_indexing(true).scalar_block_layout(true);
+        // 使う機能だけを有効にする。シェーダの SPIR-V が宣言するのは Shader、RayQueryKHR か RayTracingKHR、
+        // AtomicFloat32AddEXT（BDPT / VCM の画面への足し込み）だけで、64 ビット整数・記述子の配列・scalar レイアウトは使わない。
+        // bufferDeviceAddress（加速構造の入力）・synchronization2・maintenance4・dynamicRendering（表示）は Vulkan 1.3 で
+        // 必須の機能なので、1.3 のデバイスを選んだ時点で使える。加速構造・ray query・ray tracing pipeline・atomic float は
+        // query_info で対応を調べてから要求する
+        let mut f12 = vk::PhysicalDeviceVulkan12Features::default().buffer_device_address(true);
         let mut f13 = vk::PhysicalDeviceVulkan13Features::default().synchronization2(true).maintenance4(true).dynamic_rendering(true);
         let mut fas = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default().acceleration_structure(true);
         let mut frq = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
         let mut frtp = vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default().ray_tracing_pipeline(true);
         let mut faf = vk::PhysicalDeviceShaderAtomicFloatFeaturesEXT::default().shader_buffer_float32_atomic_add(true);
-        let features = vk::PhysicalDeviceFeatures::default().shader_int64(true);
-        let mut f2 = vk::PhysicalDeviceFeatures2::default().features(features).push_next(&mut f12).push_next(&mut f13).push_next(&mut fas);
+        let mut f2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut f12).push_next(&mut f13).push_next(&mut fas);
         if use_rt_pipeline {
             f2 = f2.push_next(&mut frtp);
         } else {
@@ -373,9 +380,10 @@ impl Context {
         }
     }
 
-    pub fn create_buffer(&self, size: u64, usage: vk::BufferUsageFlags, host_visible: bool, host_readback: bool) -> Buffer {
+    /// バッファを作る。VRAM が足りないなどで作れなければ Err（作りかけの資源は解放する）
+    pub fn try_create_buffer(&self, size: u64, usage: vk::BufferUsageFlags, host_visible: bool, host_readback: bool) -> Result<Buffer, String> {
         let ci = vk::BufferCreateInfo::default().size(size.max(16)).usage(usage | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
-        let buffer = unsafe { self.device.create_buffer(&ci, None) }.expect("vkCreateBuffer");
+        let buffer = unsafe { self.device.create_buffer(&ci, None) }.map_err(|e| format!("vkCreateBuffer ({}): {e:?}", mib(size)))?;
         let req = unsafe { self.device.get_buffer_memory_requirements(buffer) };
         let location = if host_readback {
             MemoryLocation::GpuToCpu
@@ -384,20 +392,41 @@ impl Context {
         } else {
             MemoryLocation::GpuOnly
         };
-        let allocation = self
-            .allocator
-            .lock()
-            .unwrap()
-            .allocate(&AllocationCreateDesc { name: "buffer", requirements: req, location, linear: true, allocation_scheme: AllocationScheme::GpuAllocatorManaged })
-            .expect("allocate");
-        unsafe { self.device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) }.expect("bind");
+        let allocation = match self.allocate(&AllocationCreateDesc { name: "buffer", requirements: req, location, linear: true, allocation_scheme: AllocationScheme::GpuAllocatorManaged }) {
+            Ok(a) => a,
+            Err(e) => {
+                unsafe { self.device.destroy_buffer(buffer, None) };
+                return Err(format!("buffer of {} ({location:?}): {e}", mib(size)));
+            }
+        };
+        if let Err(e) = unsafe { self.device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) } {
+            self.free(allocation);
+            unsafe { self.device.destroy_buffer(buffer, None) };
+            return Err(format!("vkBindBufferMemory: {e:?}"));
+        }
         let address = unsafe { self.device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer)) };
-        Buffer { buffer, allocation: Some(allocation), size, address }
+        Ok(Buffer { buffer, allocation: Some(allocation), size, address })
+    }
+
+    /// try_create_buffer の、失敗したらパニックする版（失敗を扱えない呼び出し元用。新しいコードは try_ の方を使う）
+    pub fn create_buffer(&self, size: u64, usage: vk::BufferUsageFlags, host_visible: bool, host_readback: bool) -> Buffer {
+        self.try_create_buffer(size, usage, host_visible, host_readback).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn allocate(&self, desc: &AllocationCreateDesc<'_>) -> Result<Allocation, String> {
+        let mut a = self.allocator.lock().map_err(|_| "the GPU memory allocator is poisoned".to_string())?;
+        a.allocate(desc).map_err(|e| e.to_string())
+    }
+
+    fn free(&self, a: Allocation) {
+        if let Ok(mut al) = self.allocator.lock() {
+            let _ = al.free(a);
+        }
     }
 
     pub fn destroy_buffer(&self, b: &mut Buffer) {
         if let Some(a) = b.allocation.take() {
-            let _ = self.allocator.lock().unwrap().free(a);
+            self.free(a);
         }
         if b.buffer != vk::Buffer::null() {
             unsafe { self.device.destroy_buffer(b.buffer, None) };
@@ -405,29 +434,45 @@ impl Context {
         *b = Buffer::default();
     }
 
-    /// device-local バッファを作ってステージング経由で転送
+    /// device-local バッファを作ってステージング経由で転送する。失敗したら Err（作ったバッファは解放する）
+    pub fn try_create_device_buffer(&self, data: &[u8], usage: vk::BufferUsageFlags) -> Result<Buffer, String> {
+        let mut b = self.try_create_buffer(data.len() as u64, usage | vk::BufferUsageFlags::TRANSFER_DST, false, false)?;
+        if let Err(e) = self.try_upload(&mut b, data, 0) {
+            self.destroy_buffer(&mut b);
+            return Err(e);
+        }
+        Ok(b)
+    }
+
+    /// try_create_device_buffer の、失敗したらパニックする版
     pub fn create_device_buffer(&self, data: &[u8], usage: vk::BufferUsageFlags) -> Buffer {
-        let mut b = self.create_buffer(data.len() as u64, usage | vk::BufferUsageFlags::TRANSFER_DST, false, false);
-        if !data.is_empty() {
-            self.upload(&mut b, data, 0);
-        }
-        b
+        self.try_create_device_buffer(data, usage).unwrap_or_else(|e| panic!("{e}"))
     }
 
-    pub fn upload(&self, dst: &mut Buffer, data: &[u8], dst_offset: u64) {
+    /// data を dst の dst_offset へ転送して、完了まで待つ
+    pub fn try_upload(&self, dst: &mut Buffer, data: &[u8], dst_offset: u64) -> Result<(), String> {
         if data.is_empty() {
-            return;
+            return Ok(());
         }
-        let mut staging = self.create_buffer(data.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC, true, false);
-        staging.mapped().unwrap()[..data.len()].copy_from_slice(data);
-        let (src, dstb, n) = (staging.buffer, dst.buffer, data.len() as u64);
-        self.submit_and_wait(|dev, cmd| unsafe {
-            dev.cmd_copy_buffer(cmd, src, dstb, &[vk::BufferCopy { src_offset: 0, dst_offset, size: n }]);
-        });
+        let mut staging = self.try_create_buffer(data.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC, true, false)?;
+        let r = (|| {
+            staging.mapped_bytes_mut().ok_or("the staging buffer is not mapped")?.copy_from_slice(data);
+            let (src, dstb, n) = (staging.buffer, dst.buffer, data.len() as u64);
+            self.try_submit_and_wait(|dev, cmd| unsafe {
+                dev.cmd_copy_buffer(cmd, src, dstb, &[vk::BufferCopy { src_offset: 0, dst_offset, size: n }]);
+            })
+        })();
         self.destroy_buffer(&mut staging);
+        r
     }
 
-    pub fn create_image_2d(&self, w: u32, h: u32, layers: u32, format: vk::Format, usage: vk::ImageUsageFlags) -> Image {
+    /// try_upload の、失敗したらパニックする版
+    pub fn upload(&self, dst: &mut Buffer, data: &[u8], dst_offset: u64) {
+        self.try_upload(dst, data, dst_offset).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// 2D の画像（layers > 1 なら配列）とビューを作る。失敗したら Err（作りかけの資源は解放する）
+    pub fn try_create_image_2d(&self, w: u32, h: u32, layers: u32, format: vk::Format, usage: vk::ImageUsageFlags) -> Result<Image, String> {
         let ici = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -438,22 +483,37 @@ impl Context {
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(usage)
             .initial_layout(vk::ImageLayout::UNDEFINED);
-        let image = unsafe { self.device.create_image(&ici, None) }.expect("vkCreateImage");
+        let image = unsafe { self.device.create_image(&ici, None) }.map_err(|e| format!("vkCreateImage ({w}x{h}x{layers} {format:?}): {e:?}"))?;
         let req = unsafe { self.device.get_image_memory_requirements(image) };
-        let allocation = self
-            .allocator
-            .lock()
-            .unwrap()
-            .allocate(&AllocationCreateDesc { name: "image", requirements: req, location: MemoryLocation::GpuOnly, linear: false, allocation_scheme: AllocationScheme::GpuAllocatorManaged })
-            .expect("allocate image");
-        unsafe { self.device.bind_image_memory(image, allocation.memory(), allocation.offset()) }.expect("bind image");
-        let vci = vk::ImageViewCreateInfo::default()
-            .image(image)
-            .view_type(if layers > 1 { vk::ImageViewType::TYPE_2D_ARRAY } else { vk::ImageViewType::TYPE_2D })
-            .format(format)
-            .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: layers });
-        let view = unsafe { self.device.create_image_view(&vci, None) }.expect("vkCreateImageView");
-        Image { image, allocation: Some(allocation), view, format, width: w, height: h, layers }
+        let mut img = Image { image, allocation: None, view: vk::ImageView::null(), format, width: w, height: h, layers };
+        let r = (|| {
+            let allocation = self
+                .allocate(&AllocationCreateDesc { name: "image", requirements: req, location: MemoryLocation::GpuOnly, linear: false, allocation_scheme: AllocationScheme::GpuAllocatorManaged })
+                .map_err(|e| format!("image {w}x{h}x{layers} {format:?} ({}): {e}", mib(req.size)))?;
+            // 安全性：memory は bind にだけ使い、allocation（img が持つ）より長く使わない
+            let (memory, offset) = (unsafe { allocation.memory() }, allocation.offset());
+            img.allocation = Some(allocation);
+            unsafe { self.device.bind_image_memory(image, memory, offset) }.map_err(|e| format!("vkBindImageMemory: {e:?}"))?;
+            let vci = vk::ImageViewCreateInfo::default()
+                .image(image)
+                .view_type(if layers > 1 { vk::ImageViewType::TYPE_2D_ARRAY } else { vk::ImageViewType::TYPE_2D })
+                .format(format)
+                .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: layers });
+            img.view = unsafe { self.device.create_image_view(&vci, None) }.map_err(|e| format!("vkCreateImageView: {e:?}"))?;
+            Ok::<(), String>(())
+        })();
+        match r {
+            Ok(()) => Ok(img),
+            Err(e) => {
+                self.destroy_image(&mut img);
+                Err(e)
+            }
+        }
+    }
+
+    /// try_create_image_2d の、失敗したらパニックする版
+    pub fn create_image_2d(&self, w: u32, h: u32, layers: u32, format: vk::Format, usage: vk::ImageUsageFlags) -> Image {
+        self.try_create_image_2d(w, h, layers, format, usage).unwrap_or_else(|e| panic!("{e}"))
     }
 
     pub fn destroy_image(&self, img: &mut Image) {
@@ -461,7 +521,7 @@ impl Context {
             unsafe { self.device.destroy_image_view(img.view, None) };
         }
         if let Some(a) = img.allocation.take() {
-            let _ = self.allocator.lock().unwrap().free(a);
+            self.free(a);
         }
         if img.image != vk::Image::null() {
             unsafe { self.device.destroy_image(img.image, None) };
@@ -469,42 +529,81 @@ impl Context {
         *img = Image::default();
     }
 
-    /// 画像全体にデータを転送して最終レイアウトへ遷移
-    pub fn upload_image(&self, img: &Image, data: &[u8], final_layout: vk::ImageLayout) {
-        let mut staging = self.create_buffer(data.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC, true, false);
-        staging.mapped().unwrap()[..data.len()].copy_from_slice(data);
-        let (sb, image, w, h, layers) = (staging.buffer, img.image, img.width, img.height, img.layers);
-        let trace = self.trace_stages();
-        self.submit_and_wait(|dev, cmd| {
-            image_barrier(dev, cmd, image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, layers);
-            let region = vk::BufferImageCopy::default()
-                .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: layers })
-                .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
-            unsafe { dev.cmd_copy_buffer_to_image(cmd, sb, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[region]) };
-            image_barrier(dev, cmd, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, final_layout, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, trace, vk::AccessFlags2::SHADER_SAMPLED_READ | vk::AccessFlags2::SHADER_STORAGE_READ, layers);
-        });
+    /// 画像全体にデータを転送して最終レイアウトへ遷移する
+    pub fn try_upload_image(&self, img: &Image, data: &[u8], final_layout: vk::ImageLayout) -> Result<(), String> {
+        let mut staging = self.try_create_buffer(data.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC, true, false)?;
+        let r = (|| {
+            staging.mapped_bytes_mut().ok_or("the staging buffer is not mapped")?.copy_from_slice(data);
+            let (sb, image, w, h, layers) = (staging.buffer, img.image, img.width, img.height, img.layers);
+            let trace = self.trace_stages();
+            self.try_submit_and_wait(|dev, cmd| {
+                image_barrier(dev, cmd, image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, layers);
+                let region = vk::BufferImageCopy::default()
+                    .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: layers })
+                    .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
+                unsafe { dev.cmd_copy_buffer_to_image(cmd, sb, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[region]) };
+                image_barrier(dev, cmd, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, final_layout, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, trace, vk::AccessFlags2::SHADER_SAMPLED_READ | vk::AccessFlags2::SHADER_STORAGE_READ, layers);
+            })
+        })();
         self.destroy_buffer(&mut staging);
+        r
     }
 
-    /// 1 回きりのコマンドを記録して完了まで待つ
-    pub fn submit_and_wait(&self, record: impl FnOnce(&ash::Device, vk::CommandBuffer)) {
+    /// try_upload_image の、失敗したらパニックする版
+    pub fn upload_image(&self, img: &Image, data: &[u8], final_layout: vk::ImageLayout) {
+        self.try_upload_image(img, data, final_layout).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// 1 回きりのコマンドを記録して完了まで待つ。投入や待機に失敗したら Err（デバイスを失ったときなど）
+    pub fn try_submit_and_wait(&self, record: impl FnOnce(&ash::Device, vk::CommandBuffer)) -> Result<(), String> {
         let dev = &self.device;
-        unsafe {
-            let cmd = dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(self.pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1)).expect("alloc cmd")[0];
-            dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).expect("begin");
+        let ai = vk::CommandBufferAllocateInfo::default().command_pool(self.pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1);
+        let cmd = unsafe { dev.allocate_command_buffers(&ai) }.map_err(|e| format!("vkAllocateCommandBuffers: {e:?}"))?[0];
+        let r = (|| unsafe {
+            dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(|e| format!("vkBeginCommandBuffer: {e:?}"))?;
             record(dev, cmd);
-            dev.end_command_buffer(cmd).expect("end");
+            dev.end_command_buffer(cmd).map_err(|e| format!("vkEndCommandBuffer: {e:?}"))?;
             let cmds = [cmd];
             let si = vk::SubmitInfo::default().command_buffers(&cmds);
-            dev.reset_fences(&[self.fence]).expect("reset fence");
-            dev.queue_submit(self.queue, &[si], self.fence).expect("vkQueueSubmit");
-            dev.wait_for_fences(&[self.fence], true, u64::MAX).expect("wait fence");
-            dev.free_command_buffers(self.pool, &[cmd]);
-        }
+            dev.reset_fences(&[self.fence]).map_err(|e| format!("vkResetFences: {e:?}"))?;
+            dev.queue_submit(self.queue, &[si], self.fence).map_err(|e| format!("vkQueueSubmit: {e:?}"))?;
+            dev.wait_for_fences(&[self.fence], true, u64::MAX).map_err(|e| format!("vkWaitForFences: {e:?}"))
+        })();
+        unsafe { dev.free_command_buffers(self.pool, &[cmd]) };
+        r
+    }
+
+    /// try_submit_and_wait の、失敗したらパニックする版
+    pub fn submit_and_wait(&self, record: impl FnOnce(&ash::Device, vk::CommandBuffer)) {
+        self.try_submit_and_wait(record).unwrap_or_else(|e| panic!("{e}"))
     }
 
     pub fn wait_idle(&self) {
         let _ = unsafe { self.device.device_wait_idle() };
+    }
+}
+
+impl Context {
+    /// アロケータ（とそれが持つメモリ）をデバイスより先に解放する。
+    /// allocator は Arc<Mutex<Allocator>> のまま表示（egui_ash_renderer の with_gpu_allocator）へ渡すので、型を Option にして
+    /// take() することができない。そこで中身を空のアロケータと入れ替えて、古い方をここで解放する。
+    /// 空のアロケータを作れなかったときは、壊した後のデバイスでメモリを解放しないよう、古い方を解放せずに残す（Arc を 1 つ忘れる）
+    fn release_allocator(&mut self) {
+        let empty = Allocator::new(&AllocatorCreateDesc {
+            instance: self.instance.clone(),
+            device: self.device.clone(),
+            physical_device: self.physical,
+            debug_settings: Default::default(),
+            buffer_device_address: false,
+            allocation_sizes: Default::default(),
+        });
+        match (self.allocator.lock(), empty) {
+            (Ok(mut a), Ok(e)) => drop(std::mem::replace(&mut *a, e)),
+            _ => {
+                krbr_core::warn!("cannot release the GPU memory allocator before the device; leaving its memory allocated");
+                std::mem::forget(self.allocator.clone());
+            }
+        }
     }
 }
 
@@ -514,21 +613,7 @@ impl Drop for Context {
             let _ = self.device.device_wait_idle();
             self.device.destroy_fence(self.fence, None);
             self.device.destroy_command_pool(self.pool, None);
-            // アロケータはデバイスより先に解放する
-            if let Ok(mut a) = self.allocator.lock() {
-                let empty = Allocator::new(&AllocatorCreateDesc {
-                    instance: self.instance.clone(),
-                    device: self.device.clone(),
-                    physical_device: self.physical,
-                    debug_settings: Default::default(),
-                    buffer_device_address: false,
-                    allocation_sizes: Default::default(),
-                });
-                if let Ok(e) = empty {
-                    let old = std::mem::replace(&mut *a, e);
-                    drop(old);
-                }
-            }
+            self.release_allocator();
             self.device.destroy_device(None);
             if let (Some(sl), true) = (&self.surface_loader, self.surface != vk::SurfaceKHR::null()) {
                 sl.destroy_surface(self.surface, None);
@@ -565,8 +650,33 @@ pub fn memory_barrier(dev: &ash::Device, cmd: vk::CommandBuffer, src_stage: vk::
     unsafe { dev.cmd_pipeline_barrier2(cmd, &di) };
 }
 
-/// POD の並びをバイト列として見る
-pub fn as_bytes<T: Copy>(v: &[T]) -> &[u8] {
-    // 安全性：T は repr(C) の POD として使う前提。読み取りのみ
+/// GPU へそのまま送れる型：どのバイトも初期化されている（repr(C) でパディングが無く、参照を持たない）。
+/// GPU 用の構造体は、隙間をパディングのフィールドで明示的に埋め、size_of の const assert で隙間が無いことを確かめてから実装する
+///
+/// # Safety
+/// 実装する型は、どのバイトも初期化済みであること（as_bytes がバイト列として読む）
+pub unsafe trait GpuPod: Copy + 'static {}
+
+// 安全性：プリミティブと、glam の repr(C) のベクトル（成分だけでパディングが無い）
+unsafe impl GpuPod for u8 {}
+unsafe impl GpuPod for u32 {}
+unsafe impl GpuPod for i32 {}
+unsafe impl GpuPod for f32 {}
+unsafe impl GpuPod for glam::Vec3 {}
+unsafe impl GpuPod for glam::Vec4 {}
+unsafe impl GpuPod for glam::UVec4 {}
+unsafe impl<T: GpuPod, const N: usize> GpuPod for [T; N] {}
+// 安全性：変換行列（f32 x 12）、2 つの Packed24_8（u32）、デバイスアドレス（u64）の 64 バイトで、隙間が無い
+unsafe impl GpuPod for vk::AccelerationStructureInstanceKHR {}
+const _: () = assert!(std::mem::size_of::<vk::AccelerationStructureInstanceKHR>() == 64);
+
+/// GPU へ送る値の並びをバイト列として見る
+pub fn as_bytes<T: GpuPod>(v: &[T]) -> &[u8] {
+    // 安全性：T: GpuPod なので、どのバイトも初期化されている。読み取りのみ
     unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
+}
+
+/// ログ用：バイト数を MB で
+fn mib(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / (1u64 << 20) as f64)
 }
