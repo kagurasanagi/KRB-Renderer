@@ -2,6 +2,9 @@
 
 use glam::{DVec3, Vec3};
 
+/// 画面端の余白（割合）の上限。両側で 90% を超えると、基板を収める範囲がほとんど無くなる
+pub const MAX_MARGIN: f64 = 0.45;
+
 #[derive(Debug, Clone, Copy)]
 pub struct CameraParams {
     /// 基板面からの仰角
@@ -62,7 +65,7 @@ pub fn frame_camera(p: &CameraParams, points: &[Vec3]) -> Camera {
     let aspect = p.width as f32 / p.height.max(1) as f32;
     let ty = (p.fov_deg.to_radians() / 2.0).tan();
     let tx = ty * aspect as f64;
-    let keep = 1.0 - p.margin.clamp(0.0, 0.45) * 2.0;
+    let keep = 1.0 - p.margin.clamp(0.0, MAX_MARGIN) * 2.0;
 
     let mut target = DVec3::ZERO;
     if !points.is_empty() {

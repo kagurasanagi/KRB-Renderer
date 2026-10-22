@@ -404,7 +404,20 @@ fn usable_view_values(b: &Table, config_now: &ViewValues) -> ViewValues {
         return ViewValues::new();
     };
     let config_then = b.get("view_config").and_then(|v| v.as_table());
-    values.iter().filter(|(k, _)| config_then.and_then(|c| c.get(*k)) == config_now.get(*k)).map(|(k, v)| (k.clone(), v.clone())).collect()
+    values
+        .iter()
+        .filter(|(k, _)| config_then.and_then(|c| c.get(*k)).map(|v| canonical_config_value(k, v)) == config_now.get(*k).cloned())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// 覚えた設定ファイルの値を、今の書き方（ViewSettings::values）にそろえる。以前は積分器の名前を設定ファイルの
+/// 書き方のまま（"path" など）覚えていたので、別名を正規の名前にしないと「設定ファイルが変わった」とみなしてしまう
+fn canonical_config_value(key: &str, v: &Value) -> Value {
+    match (key, v.as_str().map(str::parse::<IntegratorKind>)) {
+        ("integrator", Some(Ok(k))) => Value::String(k.as_str().into()),
+        _ => v.clone(),
+    }
 }
 
 fn remember_view_in(b: &mut Table, values: &ViewValues, config: &ViewValues) {
@@ -615,6 +628,11 @@ mod tests {
         assert!(!got.contains_key("exposure_ev"));
         assert_eq!(got.get("integrator").and_then(|v| v.as_str()), Some("vcm"));
         assert_eq!(ViewerValues::of(&got).max_spp, Some(1024));
+
+        // 以前の版は設定ファイルの積分器の名前を別名のまま覚えていた（"path"）。今の "pt" と同じとみなす
+        let mut old = b.clone();
+        old["view_config"].as_table_mut().unwrap().insert("integrator".into(), Value::String("path".into()));
+        assert_eq!(usable_view_values(&old, &config_then).get("integrator").and_then(|v| v.as_str()), Some("vcm"));
 
         // 視点
         let mut v = ViewValues::new();

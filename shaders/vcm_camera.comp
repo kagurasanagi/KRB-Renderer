@@ -305,9 +305,10 @@ void main() {
         ++cam.pathLength;
     }
 
-    // 光源側からカメラへつないだ寄与（すでに表示の色）を足す
+    // 光源側からカメラへつないだ寄与（すでに表示の色。vcm_light.comp で NaN を除いてある）を足す。
+    // カメラ側の経路が NaN になっても光源側の寄与まで捨てないよう、足す前にカメラ側だけを確かめる
     uint si = splatIndex(px);
-    vec3 color = toOutputColor(L) + vec3(splat[si], splat[si + 1u], splat[si + 2u]);
+    vec3 color = dropNonFinite(toOutputColor(L)) + vec3(splat[si], splat[si + 1u], splat[si + 2u]);
     if (spectral) albedo = rgbToXyz(albedo);
     accumulate(ivec2(px), color, albedo, normal);
 }

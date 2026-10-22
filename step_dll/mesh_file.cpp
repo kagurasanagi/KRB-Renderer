@@ -31,9 +31,14 @@ bool writeMeshFile(const std::filesystem::path& p, const ModelMesh& m) {
     // 表せない文字を含むパスでは例外になる
     std::filesystem::path tmp = p;
     tmp += ".tmp";
+    // 失敗したら一時ファイルを消す（途中までのファイルも、空のファイルも残さない）
+    const auto fail = [&] {
+        std::filesystem::remove(tmp, ec);
+        return false;
+    };
     {
         std::ofstream f(tmp, std::ios::binary);
-        if (!f) return false;
+        if (!f) return fail();
         const uint32_t hdr[4] = {kMeshFileVersion, static_cast<uint32_t>(m.mesh.positions.size()),
                                  static_cast<uint32_t>(m.mesh.triangleCount()), static_cast<uint32_t>(m.parts.size())};
         f.write(kMagic, 4);
@@ -50,12 +55,13 @@ bool writeMeshFile(const std::filesystem::path& p, const ModelMesh& m) {
             const float c[5] = {part.srgb.r, part.srgb.g, part.srgb.b, part.alpha, part.hasColor ? 1.0f : 0.0f};
             f.write(reinterpret_cast<const char*>(c), sizeof(c));
         }
-        if (!f) return false;
+        // close で残りを書き出す。その失敗（ディスクが一杯など）も、ここで見ないと途中までのファイルを置いてしまう
+        f.close();
+        if (!f) return fail();
     }
     std::filesystem::rename(tmp, p, ec);  // 書き込み途中のファイルを残さない
     if (!ec) return true;
-    std::filesystem::remove(tmp, ec);
-    return false;
+    return fail();
 }
 
 }  // namespace krbr::model

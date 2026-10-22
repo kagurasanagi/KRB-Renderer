@@ -293,6 +293,8 @@ struct Requests {
     reveal_settings: bool,
     /// 視点を戻す（R）
     reset_view: bool,
+    /// 「すべて既定に戻す」の後：視点を戻した後で、覚える値の基準を今の値に取り直す（戻した値は覚えない）
+    rebase_view: bool,
     auto_exposure: bool,
     /// メニュー：パネルの設定をすべて既定（設定ファイルとコマンドライン）に戻し、覚えたものを忘れる
     reset_all: bool,
@@ -1024,9 +1026,11 @@ impl App {
             st.changed.integrator = true;
         }
         self.prep.cfg.lens = c.lens.clone();
-        // レジストの色と視点（自動の構図）はここで設定に反映する（下で、覚える値の基準をこの値に取り直すため）
         self.apply_mask_choice();
-        self.reset_camera(self.st.display.w, self.st.display.h);
+        // 視点（自動の構図）は描画サイズの縦横比で決まるので、戻したサイズで表示の矩形を決め直した後
+        // （apply_view_requests）に合わせる。覚える値の基準もそこで取り直す
+        self.st.req.reset_view = true;
+        self.st.req.rebase_view = true;
         // 環境マップ：--hdr、設定ファイルの [environment] hdr、内蔵のスタジオ（読み終えても覚えない）
         let hdr = if !self.vo.common.hdr.is_empty() {
             remember::normalize_hdr(&self.vo.common.hdr)
@@ -1038,9 +1042,6 @@ impl App {
         if self.env_job.is_none() && !remember::same_hdr(&hdr, &self.env_path) {
             self.start_env_load(hdr, false);
         }
-        // 戻した値は覚えない：今の値を基準にする（忘れた状態のまま。次に変えたときから、また覚える）
-        self.view_seen = self.current_view();
-        self.view_saved = self.view_seen.clone();
         self.last_update = fl!("reset-all-done");
         info!("panel settings reset to the configuration files");
     }
@@ -2192,7 +2193,7 @@ impl App {
 
     /// UI の要求と裏の処理の結果を反映する（GPU は前のフレームの完了を待っているので、ここで資源を触ってよい）
     fn apply_requests(&mut self, ui: &UiFrame, fbw: u32, fbh: u32) -> Result<(), String> {
-        // 覚えるのは前のフレームまでに反映した値（「すべて既定に戻す」は、その中で基準を取り直す）
+        // 覚えるのは前のフレームまでに反映した値（「すべて既定に戻す」は、apply_view_requests で基準を取り直す）
         self.save_view(false);
         if std::mem::take(&mut self.st.req.reset_all) {
             self.reset_all_settings();
@@ -2384,6 +2385,11 @@ impl App {
         }
         if std::mem::take(&mut self.st.req.reset_view) {
             self.reset_camera(self.st.display.w, self.st.display.h);
+        }
+        if std::mem::take(&mut self.st.req.rebase_view) {
+            // 戻した値は覚えない：今の値を基準にする（忘れた状態のまま。次に変えたときから、また覚える）
+            self.view_seen = self.current_view();
+            self.view_saved = self.view_seen.clone();
         }
         if std::mem::take(&mut self.st.changed.frame) {
             let (w, h) = {

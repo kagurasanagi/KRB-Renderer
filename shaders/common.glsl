@@ -129,14 +129,20 @@ float imagePlaneDist() { return float(F.dims.y) / (2.0 * tanHalfFovY()); }
 // 累積画像へ 1 サンプル分を足す（sampleIndex 0 で初期化）。A はサンプル数（表示と読み戻しで割る数）。
 // color が NaN / Inf なら、このサンプルの寄与を 0 にする（1 つの値が画素の平均を壊さないように）。発生源を追うときは
 // -DKRBR_DEBUG_NAN を付けてコンパイルすると、その画素に目立つ色（マゼンタ）を足して場所が分かるようにする
-void accumulate(ivec2 ip, vec3 color, vec3 albedo, vec3 normal) {
-    if (any(isnan(color)) || any(isinf(color))) {
+// NaN・無限大になった寄与を捨てる（KRBR_DEBUG_NAN を付けてコンパイルするとマゼンタにして、発生源を見えるようにする）
+vec3 dropNonFinite(vec3 c) {
+    if (any(isnan(c)) || any(isinf(c))) {
 #ifdef KRBR_DEBUG_NAN
-        color = vec3(1000.0, 0.0, 1000.0);
+        return vec3(1000.0, 0.0, 1000.0);
 #else
-        color = vec3(0.0);
+        return vec3(0.0);
 #endif
     }
+    return c;
+}
+
+void accumulate(ivec2 ip, vec3 color, vec3 albedo, vec3 normal) {
+    color = dropNonFinite(color);
     if (pc.sampleIndex == 0u) {
         imageStore(accumColor, ip, vec4(color, 1.0));
         imageStore(accumAlbedo, ip, vec4(albedo, 1.0));

@@ -54,57 +54,63 @@ struct StepDll {
 unsafe impl Send for StepDll {}
 unsafe impl Sync for StepDll {}
 
-fn step_dll() -> Result<&'static StepDll, &'static str> {
-    static DLL: OnceLock<Result<StepDll, String>> = OnceLock::new();
-    DLL.get_or_init(|| {
-        // 配布用の一式の dll\step、exe と同じフォルダの step\、開発中は scripts\build.cmd（CMake）の出力（<repo>/build/release/step）
-        let mut path = krbr_core::platform::dll_dir("step").join("krbr_step.dll");
-        if !path.exists() {
-            path = krbr_core::platform::exe_dir().join("step").join("krbr_step.dll");
+/// 読み込めた DLL だけを覚える。失敗は覚えないので、実行中に DLL を置けば次の変換から使える
+fn step_dll() -> Result<&'static StepDll, String> {
+    static DLL: OnceLock<StepDll> = OnceLock::new();
+    if let Some(d) = DLL.get() {
+        return Ok(d);
+    }
+    let d = load_step_dll()?;
+    // ほかのスレッドが先に読み込んでいたら、そちらを使う（こちらは閉じる）
+    Ok(DLL.get_or_init(|| d))
+}
+
+fn load_step_dll() -> Result<StepDll, String> {
+    // 配布用の一式の dll\step、exe と同じフォルダの step\、開発中は scripts\build.cmd（CMake）の出力（<repo>/build/release/step）
+    let mut path = krbr_core::platform::dll_dir("step").join("krbr_step.dll");
+    if !path.exists() {
+        path = krbr_core::platform::exe_dir().join("step").join("krbr_step.dll");
+    }
+    if !path.exists() {
+        if let Some(dev) = krbr_core::platform::dev_build_dir("step", "krbr_step.dll") {
+            path = dev.join("krbr_step.dll");
         }
-        if !path.exists() {
-            if let Some(dev) = krbr_core::platform::dev_build_dir("step", "krbr_step.dll") {
-                path = dev.join("krbr_step.dll");
-            }
+    }
+    if !path.exists() {
+        return Err(format!("not found: {}", path.display()));
+    }
+    // 安全性：DLL は同梱の変換器で、読み込み時に任意の初期化を行わない
+    let lib = unsafe {
+        // DLL と同じフォルダから OpenCASCADE の DLL を探す
+        #[cfg(windows)]
+        {
+            use libloading::os::windows::{Library, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR};
+            Library::load_with_flags(&path, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)
+                .map(libloading::Library::from)
         }
-        if !path.exists() {
-            return Err(format!("not found: {}", path.display()));
+        #[cfg(not(windows))]
+        {
+            libloading::Library::new(&path)
         }
-        // 安全性：DLL は同梱の変換器で、読み込み時に任意の初期化を行わない
-        let lib = unsafe {
-            // DLL と同じフォルダから OpenCASCADE の DLL を探す
-            #[cfg(windows)]
-            {
-                use libloading::os::windows::{Library, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR};
-                Library::load_with_flags(&path, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)
-                    .map(libloading::Library::from)
-            }
-            #[cfg(not(windows))]
-            {
-                libloading::Library::new(&path)
-            }
-        }
-        .map_err(|e| format!("cannot load {}: {e}", path.display()))?;
-        let (api, file, func) = unsafe {
-            let api: libloading::Symbol<VersionFn> = lib.get(b"krbr_step_api_version\0").map_err(|e| e.to_string())?;
-            let file: libloading::Symbol<VersionFn> = lib.get(b"krbr_step_mesh_file_version\0").map_err(|e| e.to_string())?;
-            let func: libloading::Symbol<ToMeshFileFn> = lib.get(b"krbr_step_to_mesh_file\0").map_err(|e| e.to_string())?;
-            (api(), file(), *func)
-        };
-        if api != STEP_API_VERSION || file != MESH_FILE_VERSION as c_int {
-            return Err(format!(
-                "krbr_step.dll version mismatch (api {api} / mesh file v{file}; expected {STEP_API_VERSION} / v{MESH_FILE_VERSION})"
-            ));
-        }
-        krbr_core::debug!("STEP converter: {}", path.display());
-        Ok(StepDll { _lib: lib, to_mesh_file: func })
-    })
-    .as_ref()
-    .map_err(|e| e.as_str())
+    }
+    .map_err(|e| format!("cannot load {}: {e}", path.display()))?;
+    let (api, file, func) = unsafe {
+        let api: libloading::Symbol<VersionFn> = lib.get(b"krbr_step_api_version\0").map_err(|e| e.to_string())?;
+        let file: libloading::Symbol<VersionFn> = lib.get(b"krbr_step_mesh_file_version\0").map_err(|e| e.to_string())?;
+        let func: libloading::Symbol<ToMeshFileFn> = lib.get(b"krbr_step_to_mesh_file\0").map_err(|e| e.to_string())?;
+        (api(), file(), *func)
+    };
+    if api != STEP_API_VERSION || file != MESH_FILE_VERSION as c_int {
+        return Err(format!(
+            "krbr_step.dll version mismatch (api {api} / mesh file v{file}; expected {STEP_API_VERSION} / v{MESH_FILE_VERSION})"
+        ));
+    }
+    krbr_core::debug!("STEP converter: {}", path.display());
+    Ok(StepDll { _lib: lib, to_mesh_file: func })
 }
 
 /// STEP 変換器 DLL が使えるか（使えなければ理由）
-pub fn step_support() -> Result<(), &'static str> {
+pub fn step_support() -> Result<(), String> {
     step_dll().map(|_| ())
 }
 

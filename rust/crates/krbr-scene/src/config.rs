@@ -277,6 +277,17 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// 数。lo..=hi の外なら警告して端に丸める（範囲外でも効き方が決まっている項目用。num_f64 は範囲外を捨てる）
+    fn num_f64_clamped(&mut self, path: &[&str], lo: f64, hi: f64, dst: &mut f64) {
+        // NaN は number が警告して捨てる
+        let Some(x) = self.number(path, Range::ANY) else { return };
+        let c = x.clamp(lo, hi);
+        if c != x {
+            self.warn(path, &format!("{x} is out of range (must be {lo} to {hi}); using {c}"));
+        }
+        *dst = c;
+    }
+
     /// 整数（小数部のない数も受け付ける）。以前は `v as u32` で、負の値が黙って 0 になっていた
     fn integer(&mut self, path: &[&str], min: i64, max: i64) -> Option<i64> {
         let x = self.number(path, Range::closed(min as f64, max as f64))?;
@@ -499,8 +510,8 @@ fn read_into(c: &mut ProjectConfig, r: &mut Reader, base: &Path) {
     r.num_f64(&["camera", "elevation_deg"], R::closed(-90.0, 90.0), &mut c.elevation_deg);
     r.num_f64(&["camera", "azimuth_deg"], R::ANY, &mut c.azimuth_deg);
     r.num_f64(&["camera", "fov_deg"], R::open(0.0, 180.0), &mut c.fov_deg);
-    // frame_camera が 0.45 で頭打ちにするので、それより大きい値は効かない
-    r.num_f64(&["camera", "margin"], R::closed(0.0, 0.45), &mut c.margin);
+    // 以前から、範囲外は frame_camera が端に丸めて使っていた（捨てると構図が変わる）ので、警告して丸める
+    r.num_f64_clamped(&["camera", "margin"], 0.0, crate::camera::MAX_MARGIN, &mut c.margin);
     r.num_u32(&["render", "width"], 1, &mut c.width);
     r.num_u32(&["render", "height"], 1, &mut c.height);
     r.num_u32(&["render", "spp"], 1, &mut c.spp);
