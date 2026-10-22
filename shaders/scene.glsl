@@ -192,6 +192,9 @@ void replaceBaseLayer(inout Shade s, Shade p) {
     s.transSigma = p.transSigma;
     s.transTint = p.transTint;
     s.transRgb = p.transRgb;
+    s.conductor = p.conductor;
+    s.condEta = p.condEta;
+    s.condK = p.condK;
 }
 
 // レジストを上にかぶせる（下の材質 s を、レジストのコートで覆う）。thickness > 0 なら厚みに応じた吸収と散乱。

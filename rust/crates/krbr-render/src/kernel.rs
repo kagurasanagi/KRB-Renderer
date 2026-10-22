@@ -65,6 +65,7 @@ pub fn scene_bindings(sc: &GpuScene, targets: &RenderTargets, frame_ubo: &Buffer
         buffer_binding(BINDING_RGB2SPEC_SCALE, &sc.rgb2spec_scale),
         buffer_binding(BINDING_EMITTERS, &sc.emitters),
         buffer_binding(BINDING_EMITTER_CDF, &sc.emitter_cdf),
+        buffer_binding(BINDING_CONDUCTORS, &sc.conductors),
     ]
 }
 

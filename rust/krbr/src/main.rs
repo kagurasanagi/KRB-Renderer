@@ -146,8 +146,8 @@ enum MaskCmd {
 
 #[derive(Args, Debug)]
 struct RenderArgs {
-    /// .kicad_pcb file
-    pcb: PathBuf,
+    /// .kicad_pcb file (view: optional; without it the window opens empty and a board can be opened from the File menu)
+    pcb: Option<PathBuf>,
     /// equirectangular environment map (.hdr / .exr, or builtin:studio). Remembered per board;
     /// if omitted: the one last used for this board, else [environment] hdr in <name>.krbr, else builtin:studio
     #[arg(long, default_value = "")]
@@ -244,6 +244,9 @@ struct RenderArgs {
     /// solder mask: preset name (see: krbr mask list) or r,g,b in sRGB
     #[arg(long, default_value = "")]
     mask_color: String,
+    /// substrate material: a name from the material library (krbr material list), e.g. glass_frosted; fr4 = the default
+    #[arg(long, default_value = "")]
+    substrate: String,
 }
 
 #[derive(Args, Debug)]
@@ -283,6 +286,15 @@ struct ViewArgs {
     /// development: press "reset all settings" in the menu during the test
     #[arg(long)]
     test_reset_settings: bool,
+    /// development: open the material editor during the test
+    #[arg(long)]
+    test_material_editor: bool,
+    /// development: select the part with this reference during the test (instead of --test-pick)
+    #[arg(long, default_value = "")]
+    test_select: String,
+    /// development: open this board from the File menu during the test
+    #[arg(long)]
+    test_open: Option<PathBuf>,
     /// rendering size: WxH (the window is resized so that the 3D view is that size / ratio) or "fit" (follow the window); default: last used
     #[arg(long, value_parser = parse_render_size)]
     render_size: Option<RenderSize>,
@@ -311,7 +323,7 @@ impl RenderArgs {
     /// default_out：--out を省略したときの出力先
     fn to_options(&self, default_out: &str) -> krbr_app::RenderOptions {
         krbr_app::RenderOptions {
-            pcb: self.pcb.clone(),
+            pcb: self.pcb.clone().unwrap_or_default(),
             hdr: self.hdr.clone(),
             out: self.out.clone().unwrap_or_else(|| PathBuf::from(default_out)),
             spp: self.spp,
@@ -346,6 +358,7 @@ impl RenderArgs {
             focus_distance: self.focus_distance,
             blades: self.blades,
             mask_color: self.mask_color.clone(),
+            substrate: self.substrate.clone(),
         }
     }
 }
@@ -534,6 +547,22 @@ fn main() {
             args.insert(i, "view".into());
         }
     }
+    // 基板を指定せずに起動したら（引数なし、または --spectral のようなオプションだけ）、最後にビューアで開いた基板を開く
+    let help = args.iter().skip(1).any(|a| matches!(a.as_str(), "-h" | "--help" | "-V" | "--version"));
+    if !help && args.iter().skip(1).all(|a| a.starts_with('-')) {
+        match krbr_app::remember::last_board() {
+            Some(pcb) if pcb.is_file() => {
+                eprintln!("opening the last board: {}", pcb.display());
+                args.splice(1..1, ["view".to_string(), pcb.to_string_lossy().into_owned()]);
+            }
+            // 覚えた基板が無い（消えた）ときは、基板なしでビューアを開く（「ファイル → 開く...」で開ける）
+            Some(pcb) => {
+                eprintln!("the last board {} is not found; opening the viewer without a board", pcb.display());
+                args.insert(1, "view".to_string());
+            }
+            None => args.insert(1, "view".to_string()),
+        }
+    }
     let cli = match Cli::try_parse_from(args) {
         Ok(c) => c,
         Err(e) => {
@@ -552,12 +581,13 @@ fn main() {
     krbr_core::debug!("process priority: {}", if krbr_core::platform::process_priority_is_low() { "below normal" } else { "normal" });
     let result = match &cli.command {
         Command::Info { pcb, models } => cmd_info(pcb, *models),
+        Command::Render(args) if args.pcb.is_none() => Err(anyhow::anyhow!("give a .kicad_pcb file (krbr render <board>.kicad_pcb)")),
         Command::Render(args) => krbr_app::cmd_render(&args.to_options("out/board.png")),
         Command::View(args) => {
             let mut common = args.render.to_options("out/board.png");
             // S で保存する画像は、--out を付けなければ基板のフォルダに <基板の名前>_000.png（.exr）
-            if args.render.out.is_none() {
-                let pcb = std::path::absolute(&args.render.pcb).unwrap_or_else(|_| args.render.pcb.clone());
+            if let (None, Some(pcb)) = (&args.render.out, &args.render.pcb) {
+                let pcb = std::path::absolute(pcb).unwrap_or_else(|_| pcb.clone());
                 let stem = pcb.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "board".into());
                 common.out = krbr_scene::board_file::base_dir(&pcb).join(format!("{stem}.png"));
             }
@@ -579,6 +609,9 @@ fn main() {
                     mask: args.test_mask.clone(),
                     save_as: args.test_save_as.clone(),
                     reset_settings: args.test_reset_settings,
+                    material_editor: args.test_material_editor,
+                    select: args.test_select.clone(),
+                    open: args.test_open.clone(),
                 },
             };
             krbr_app::run_viewer(vo).map(|rc| {
@@ -587,6 +620,7 @@ fn main() {
                 }
             })
         }
+        Command::Watch(args) if args.render.pcb.is_none() => Err(anyhow::anyhow!("give a .kicad_pcb file (krbr watch <board>.kicad_pcb)")),
         Command::Watch(args) => krbr_app::cmd_watch(&krbr_app::WatchOptions { common: args.render.to_options("out/watch.png"), max_updates: args.max_updates }),
         Command::Probe => krbr_app::material_cmd::cmd_probe(),
         Command::Material { cmd } => match cmd {

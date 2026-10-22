@@ -19,6 +19,10 @@ Kicadの基板の3Dプレビューは素晴らしい機能だが、PCBの編集�
 # リアルタイム表示（既定。ウィンドウが開く。--hdr は省略できる）
 krbr board.kicad_pcb
 
+# 基板を指定しなければ、最後にビューアで開いた基板を開く（%APPDATA%\krbr\state.toml の [ui] last_board）。
+# 覚えた基板が無ければ（消えていれば）、基板なしで開く。どちらでも「ファイル → 開く...」（O）で別の基板を開ける
+krbr
+
 # ファイルへ出力（ウィンドウは開かない）
 krbr render board.kicad_pcb --hdr studio.exr --spp 256 --width 1920 --height 1080 --out out/board.png
 ```
@@ -39,7 +43,7 @@ krbr render board.kicad_pcb --hdr studio.exr --spp 256 --width 1920 --height 108
 | 表示 | 描画のサイズとレンダリングの比率（下記）、画像 / アルベド / 法線、最大 spp（2 の累乗） |
 | カメラ | 画角、視点を戻す、保存 |
 | 積分器・レンズ・色の計算 | PT / BDPT / VCM、ピンホール / 薄レンズ / 実レンズ、RGB / 分光 |
-| 選んだ部品 | 部品をクリックで選び、部位ごとに材質を割り当てる（下記「ビューアで材質を割り当てる」） |
+| 選んだ部品 | 部品をクリックで選び、部位ごとに材質を割り当てる。「材質エディタ...」で、見本を見ながら選ぶ別の窓を開く（下記「ビューアで材質を割り当てる」「材質エディタ」） |
 
 | 操作 | 内容 |
 |---|---|
@@ -55,6 +59,8 @@ krbr render board.kicad_pcb --hdr studio.exr --spp 256 --width 1920 --height 108
 | `+` / `-` | 露出 ±0.25 EV（表示だけ。累積はやり直さない） |
 | `[` / `]` | 環境マップを ±15° 回す |
 | `1` / `2` / `3` | 画像 / アルベド / 法線 の表示 |
+| `M` | 材質エディタを開く・閉じる |
+| `O` / ファイル ＞ 開く... | 別の基板（.kicad_pcb）を開く。読み込みは別スレッドで行い、その間は今の基板を表示し続ける。開いた基板では、その基板で覚えた設定（環境マップ・視点・パネルの設定）を使い、コマンドラインの `--hdr` などの前の基板のための指定は持ち越さない |
 | `Esc` | 終了 |
 | ファイル ＞ PNG として保存... / EXR として保存... | 場所と名前を選んで保存する（ダイアログは基板のフォルダから始まる）。PNG は露出・グロー・トーンマッピング済み、EXR はリニアの放射輝度。ノイズ除去した画像を表示していれば、その画像を保存する |
 
@@ -178,7 +184,7 @@ STEP 変換器 DLL と OIDN が無くても krbr.exe は動きます（STEP の�
 | `krbr geom <pcb>` / `krbr models <pcb>` | 開発用：基板の形状と凹凸タイル（GPU を使わない）／全 3D モデルの読み込みの統計 |
 | `krbr diff <a> <b>` | 開発用：2 枚の画像（PNG / EXR）の差の平均と最大 |
 
-`render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率。正の値。付けると基板で覚えた視点を使わない）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--integrator pt|bdpt|vcm`（`path` は `pt` の別名。知らない名前はエラー）, `--seed`, `--spectral` / `--rgb`（色の計算）, `--mask-color <プリセット名 または r,g,b>`（レジストの色。下記）, `--lens pinhole|thin|realistic`（知らない名前はエラー）, `--f-number`, `--focal-length`, `--focus-distance`, `--blades`, `--denoise` / `--no-denoise` / `--denoise-strength`, `--init`, `--no-cache`, `--no-kicad-cli`, `--validate`, `--normal-priority`, `-v`。
+`render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率。正の値。付けると基板で覚えた視点を使わない）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--integrator pt|bdpt|vcm`（`path` は `pt` の別名。知らない名前はエラー）, `--seed`, `--spectral` / `--rgb`（色の計算）, `--mask-color <プリセット名 または r,g,b>`（レジストの色。下記）, `--substrate <材質名>`（基材。下記）, `--lens pinhole|thin|realistic`（知らない名前はエラー）, `--f-number`, `--focal-length`, `--focus-distance`, `--blades`, `--denoise` / `--no-denoise` / `--denoise-strength`, `--init`, `--no-cache`, `--no-kicad-cli`, `--validate`, `--normal-priority`, `-v`。
 
 ### 速さの計測（`krbr bench`）
 
@@ -242,7 +248,7 @@ STEP の読み込み・三角形分割だけが OpenCASCADE（C++ のライブ�
 | `<基板のフォルダ>\<基板の名前>.krbr`（または `%APPDATA%\krbr\boards\`。下記） | 基板ごとの設定をすべて 1 つの TOML に入れる（下の表） |
 | `%APPDATA%\krbr\settings.toml` | 全体の設定（`board_settings`：基板の設定ファイルの置き場所） |
 | `%APPDATA%\krbr\state.toml` | 基板によらない記憶（最近使った環境マップ、ビューアのウィンドウ） |
-| `%APPDATA%\krbr\materials\*.toml` | 名前付きの材質（OpenPBR）。組み込みの材質に、書いた項目だけ重ねる |
+| `%APPDATA%\krbr\materials\*.toml` | 名前付きの材質（OpenPBR）。組み込みの材質に、書いた項目だけ重ねる。ビューアの材質エディタで作った材質は `user.toml` に書く |
 | `%APPDATA%\krbr\model_map.toml` | 3D モデルごとの材質（他のプロジェクトと共有）と、色・名前の規則 |
 | `%LOCALAPPDATA%\krbr\cache\meshes\` | STEP の分割結果のキャッシュ（キーはファイル内容の XXH64 ＋分割パラメータ） |
 | `%LOCALAPPDATA%\krbr\cache\silk\` | kicad-cli によるシルク SVG のキャッシュ |
@@ -276,6 +282,9 @@ STEP の読み込み・三角形分割だけが OpenCASCADE（C++ のライブ�
 |---|---|
 | `green` `red` `blue` `yellow` `purple` `black` `white` `matte-black` | KiCad の stackup の色名と同じもの。stackup に色があれば自動でこれが使われる |
 | `jlcpcb-green` `jlcpcb-purple` `jlcpcb-red` `jlcpcb-yellow` `jlcpcb-blue` `jlcpcb-white` `jlcpcb-black` `jlcpcb-matte-black` `jlcpcb-matte-green` | JLCPCB の注文時に選べる色。白・黒は不透明寄り、matte は粗さを上げてある |
+| `clear` | 透明なレジスト（色も顔料の散乱も無い）。下の透明な基材と組み合わせると基板が透ける |
+
+**基材**（`--substrate <名前>`、`<名前>.krbr` の `[board] substrate`、ビューアの「表面」→「基材」。基板ごとに覚える）：既定は FR4 です。材質ライブラリの名前を書くと、基材（基板の本体と側面）をその材質にします（例 `glass_frosted` ですりガラスの基板、`ceramic_alumina` でアルミナ基板。ビューアでは透明な材質・宝石・セラミックから選べる）。レジストは基材の上に塗るので、透けて見せるにはレジストも `clear` にします。銅のベタがある基板では、透明なレジストの下に銅がそのまま見えます。内層は形状に無いので描きません。
 
 ビューアでは操作パネルの「表面」→「レジスト」でその場で切り替えられます（材質だけを送り直すので一瞬で、累積はやり直し）。
 
@@ -291,6 +300,41 @@ krbr render board.kicad_pcb --hdr studio.exr --mask-color jlcpcb-purple
 ### 材質システム
 
 材質は OpenPBR Surface のパラメータで書きます（`krbr-scene` の `material.rs`、色はリニア）。分散は `transmission_dispersion_abbe_number` と `transmission_dispersion_scale` で指定し、`specular_ior` を nd として扱います。アッベ数で表せない材質は、`[material.<名前>.krbr]` に Sellmeier の係数（`sellmeier_b`, `sellmeier_c`）を書けます。
+
+**金属**のフレネルは OpenPBR の F82-tint です（`base_color` が正面の反射率 F0、`specular_color` が 82° での色味。Schlick の近似に対する比）。`[material.<名前>.krbr]` に `conductor = "Au"` のように書くと、**測定値の複素屈折率 n + ik** の金属になります。
+
+- 分光モードでは、波長ごとの n, k から厳密なフレネルの式で反射率を求めます（`shaders/bsdf.glsl` の `fresnelConductor`）。
+- RGB モードでは、同じ表から求めた F0 と F82-tint を使います（反射率のスペクトルを、分光モードと同じ等色関数・白色点で RGB にしたもの）。白い炉の中で両者の色の差は 1〜3% です。
+- 表は `krbr-scene/src/conductor_data.rs` で、`scripts/gen_conductors.py` が refractiveindex.info のデータベース（CC0。コミットを固定）から 360〜830 nm を 5 nm 刻みで作ります。
+- 測定値の金属の色は測定値から決まるので、`base_color` / `specular_color` / `base_metalness` を書くと測定値の金属ではなくなります（`conductor = "none"` でも外れる）。
+
+| ID | 金属 | 出典 |
+|---|---|---|
+| `Au` / `Ag` / `Cu` | 金・銀・銅 | Johnson & Christy 1972 |
+| `Cr` / `Ni` / `Fe` / `Co` / `Ti` / `Pd` | クロム・ニッケル・鉄・コバルト・チタン・パラジウム | Johnson & Christy 1974 |
+| `Al` | アルミニウム | Rakić 1995 |
+| `Pt` | 白金 | Rakić et al. 1998（Brendel-Bormann のモデル） |
+| `Rh` / `W` | ロジウム・タングステン | Weaver et al. 1977 / 1975 |
+| `Os` | オスミウム | Nemoshkalenko et al. 1968（常光線と異常光線の誘電率を 2:1 で平均した多結晶） |
+| `Zn` | 亜鉛 | Werner et al. 2009（Querry 1987 の値は可視域の n が 9〜14 と金属の値に見えないので使わない） |
+| `CuZn30` / `CuZn15` | 真鍮・丹銅 | Querry 1985 |
+| `SS_austenitic` | ステンレス鋼（オーステナイト系） | Karlsson & Ribbing 1982 |
+
+錫は可視域の測定値が見つからない（refractiveindex.info は 0.73 µm から）ので、`metal_tin` は 3D モデルの面の色を F0 にした金属のままです。
+
+**組み込みの材質**（`krbr-scene/src/builtin_materials.toml`。`krbr material list` で一覧）は、分類（`[krbr] category`：metal / plastic / rubber / ceramic / glass / other）ごとに並べています。表示名は `krbr-app/i18n/*/krbr-app.ftl` の `matname-<名前>` です（自分の材質は名前のまま）。
+
+- 金属：上の表の金属すべて（クロム・ニッケル・ステンレスはサテンの版も。サテンは粗さ 0.3〜0.35 の等方的な面で、ヘアラインの向きは表さない）と錫
+- 樹脂：ABS・ポリカーボネート・PBT・ナイロン（PA66）・ポリアセタール（POM）・PP・PVC・PET・PTFE と、これまでの `plastic` / `glossy_plastic` / `epoxy_black`。色は 3D モデルの面の色で、部位ごとに `+color=` で変えられます。屈折率は、分散式のあるもの（PC：Sultanova et al. 2009）はその係数、測定値の見つかったもの（PVC・PET：Zhang et al. 2020）は nd、ほか（ABS・PBT・PA66・POM・PP・PTFE）はデータシートの代表値です
+- ゴム：シリコーンゴム（PDMS：Schneider et al. 2009）、黒いゴム
+- セラミック：`ceramic`、アルミナ（屈折率はサファイアの常光線：Malitson & Dodge 1972）
+- ガラス・透明：アクリル（PMMA：Sultanova et al. 2009）、ポリカーボネート、透明シリコーン、透明な PET（Zhang et al. 2020 の表からアッベ数 28）、BK7（SCHOTT N-BK7）、石英ガラス（Malitson 1965）、ソーダ石灰ガラス（Rubin 1985）、無色のサファイア。すりガラス（ソーダ石灰ガラス、粗さ 0.35）とすりガラス調のアクリル（粗さ 0.3）は、表面の粗い透明な材質です（屈折して通るが像がぼける）
+- 宝石：ダイヤモンド（Peter 1923）、ルビー・青いサファイア（コランダム：Malitson & Dodge 1972 の常光線）、エメラルド（ベリル。nd 1.577 と B–G の分散 0.014 からアッベ数 70.5）、キュービックジルコニア（Wood & Nassau 1982）。屈折率・分散は測定値か宝石学の値で、B–G（430.8〜686.7 nm）の分散はダイヤモンド 0.044、コランダム 0.018、キュービックジルコニア 0.060 と宝石学の値に合っています。色は代表的な宝石の色を「4 mm 進んだときの透過の色」として与えた目安です（吸収スペクトルの測定値ではない）。色は厚みで変わり、大きな部品ほど濃くなります
+- 樹脂の `plastic_pet` などは、着色した成形品として不透明です（PET・PP・PC の樹脂そのものは透明か半透明。透明なものは「ガラス・透明」に入れてある）
+
+材質エディタの見本の球は、直径 4 mm の球の見え方です（吸収の深さを、描く球の大きさとの比で伸ばしている）。
+
+木材は、木目の模様を描く仕組みがまだ無いので入れていません。
 
 ```toml
 # %APPDATA%\krbr\materials\my.toml
@@ -316,6 +360,7 @@ bump_scale = 0.1
 - 材質ライブラリで `base_color` を書かない材質は、3D モデルの面の色を使います。
 - 組み込みの規則の先頭は、KiCad 標準のアルミ電解コンデンサのモデル用です（ファイル名が `CP_Radial_D*` / `CP_Elec_*`）。金属色の部位（缶と上面）を `aluminum`、ラジアルの帯（`kicad:light_brown_body`、スリーブへの印刷）を `plastic` にします（色で決める規則だけだと、上面が錫、帯がセラミックになるため）。タンタル（`CP_Radial_Tantal_*`）は対象外です。
 - 材質名の後ろに `+smooth` を付けると、表面の模様（凹凸と粗さのむら）を無くした版になります（例 `plastic+smooth`。`krbr material set --material plastic+smooth`、ビューアの部位ごとの「模様」のチェック）。
+- 材質名の後ろに `+color=#rrggbb`（sRGB）を付けると色を、`+rough=<0〜1>` を付けると粗さ（`specular_roughness`）を変えた版になります（例 `plastic_abs+color=#c03020+rough=0.25`。ビューアの材質エディタの「この部位の調整」）。色は、不透明な材質では地の色、透明な材質では透過の色、金属では F0 です。測定値の金属に色を付けると、測定値ではなくその色の金属（Schlick）になります。組み立ての順は `+smooth`、`+color=`、`+rough=`、`+emit=` で、同じ指定が 2 つあれば後ろのものが勝ちます。
 - 材質名の後ろに `+emit=#rrggbb,<輝度>` を付けると、その色（sRGB。`#` は省略可）と輝度（cd/m²）で光る版になります（LED の点灯など。例 `plastic+emit=#ff0000,5000`。`+smooth` と組み合わせられる）。部品ごとに別の色にするなら、部品番号ごとの上書きに書きます（`krbr material set <pcb> --ref D4 --part kicad:white_body --material "plastic+emit=#ff0000,5000"`、ビューアの部位ごとの「発光」のチェック）。光るのは面の表側だけで、周りの基板や部品も照らします。KiCad 標準の `LED_0603_1608Metric` などでは、光らせる本体は `kicad:white_body` です（`kicad:green_body` は外から見えない部位）。
   - 光っている部位の地の色（拡散の反射率）は、発光の色にします（最も明るい成分を 0.7。色のついた拡散レンズ）。白い地のままだと、周りの光を白く返して発光の色が薄まるためです。
   - 明るさの目安（露出 0.7 EV）：1000〜2000 で色を保ったまま点灯して見え、上げるほど芯がオレンジ〜白に寄ります（ACES のトーンマッピングは、明るすぎる色を白へ向かわせる。実際のカメラで撮った LED と同じ）。グロー（下記）でにじませるには、しきい値（既定 4）を超える明るさが要ります。ビューアで発光を付けたときの既定は 5000 です。
@@ -371,7 +416,21 @@ bump_scale = 0.1
 
 **材質の CLI**：`krbr material list / show / set`、`krbr mask list`（上の「コマンド」の表）。`material set` は、書き込む先の `<名前>.krbr` / `model_map.toml` が既にあって書式の誤りで読めないときは、エラーで止めてファイルに触りません。全部位の指定（`--part` を省略、または `*`。ビューアの「まとめて選ぶ」）は、同じ書き込み先の部位ごとの指定も消して、本当に全部位をその材質にします。
 
-**ビューアで材質を割り当てる**：3D 表示の部品を**クリック**すると選び（ドラッグは回転、Ctrl ＋クリックはピント合わせのまま）、輪郭線をオレンジで重ねます（画像には入りません。実レンズのときは投影が違うので出しません）。設定パネルの「選んだ部品」に、部位ごとの材質（材質ライブラリから選べる）と、決まった段階が出ます。書き込む先は「この部品」（`<名前>.krbr` の部品番号）、「このモデル」（`<名前>.krbr` の 3D モデル）、「全基板」（`%APPDATA%\krbr\model_map.toml`）から選び、材質を選ぶとすぐ書いて描き直します（`krbr material set` と同じ書き方）。「上書きを消す」で規則どおりに戻せます。部位の「発光」にチェックを入れると、その部位が光り（色の初期値は部位の色を最も明るくしたもの、輝度は 5000 cd/m²）、下の行で色（色の見本をクリック）と輝度を変えられます。色と輝度は、動かし終えてから 0.4 秒後に書き込んで描き直します。3D モデルが見つからない代わりの箱を選んだときは、探したパスと理由を出します。
+**ビューアで材質を割り当てる**：3D 表示の部品を**クリック**すると選び（ドラッグは回転、Ctrl ＋クリックはピント合わせのまま）、輪郭線をオレンジで重ねます（画像には入りません。実レンズのときは投影が違うので出しません）。設定パネルの「選んだ部品」に、部位ごとの材質（材質ライブラリから選べる）と、決まった段階が出ます。書き込む先は「この部品」（`<名前>.krbr` の部品番号）、「このモデル」（`<名前>.krbr` の 3D モデル）、「全基板」（`%APPDATA%\krbr\model_map.toml`）から選び、材質を選ぶとすぐ書いて描き直します（`krbr material set` と同じ書き方）。「上書きを消す」で規則どおりに戻せます。部位の「発光」にチェックを入れると、その部位が光り（色の初期値は部位の色を最も明るくしたもの、輝度は 5000 cd/m²）、下の行で色（色の見本をクリック）と輝度を変えられます。色と輝度は、動かし終えてから 0.4 秒後に書き込んで描き直します。3D モデルが見つからない代わりの箱を選んだときは、探したパスと理由を出します。「輪郭線」のチェックを外すと、輪郭線を重ねません（細かい部品が並んでいて、輪郭線でかえって見にくいとき）。
+
+**材質エディタ**（`M`、メニューの「表示」、パネルの「材質エディタ...」）：ビューアの中に別の窓を開きます（大きさを変えられ、どこにでも動かせる）。
+
+- 左：分類ごとの材質の見本（市松模様の床の上の球。内蔵のスタジオの照明で、見えている見本だけを順に描く）と検索。選んだ部品の今の材質は、名前の色を変えて示します。クリックで選び、ダブルクリックで割り当てます。★は自分の材質です。
+- 右上：選んだ部品だけを置いたプレビュー（ドラッグで回転、ホイールで拡大、ダブルクリックで戻す）。細かい部品でも、輪郭線なしで材質を確かめられます。その下に、書き込む先（この部品・このモデル・全基板）と、部位ごとの今の材質（見本つき）。割り当て先の部位を選びます（「（全体）」なら全部位）。
+- この部位の調整：色（`+color=`）と粗さ（`+rough=`）。動かすとプレビューにすぐ出て、止めてから 0.4 秒後に書き込んで 3D 表示も描き直します。「自分の材質として保存...」で、調整したものを名前付きの材質にできます。
+- 右下：一覧で選んだ材質の説明（測定値の金属は出典、ほかは屈折率）と、「この部位に割り当てる」「複製して自分の材質にする...」。組み込みの材質は編集できません。
+- 自分の材質（全体設定の `materials/user.toml`）は、その場で編集できます。種類（不透明・金属・透明）を選ぶと、その種類で意味のある項目だけを出し、ほかの種類の項目は矛盾しない値（例：金属なら透過 0）にします。
+  - 不透明：色（または 3D モデルの色）、粗さ、屈折率、クリアコート
+  - 金属：測定値の金属（上の表）か、F0 と縁の色味（F82-tint）を自分で決める「カスタム」、粗さ
+  - 透明：透過の色と、その色になる深さ、粗さ、屈折率、アッベ数
+  - 拡散の色が現実の範囲（反射率およそ 2〜90%）の外なら ⚠ を出します。屈折率を変えると、分散式は同じ分散のアッベ数に置き換えます。
+  - 編集した値は、止めてから 0.4 秒後に `user.toml` に書き、使っている部位の材質だけを送り直します（形状は組み直さない）。3D モデルの色を使うかどうかを変えたときと、削除したときは、部位の材質を決め直します。
+- 見本とプレビューは、ビューアと同じ GPU・同じ積分器（PT）で、色の計算（RGB / 分光）もビューアに合わせます。窓を閉じると GPU の資源を返します。
 
 **一時停止**：メニューの下の「■ 一時停止」ボタン（`P`、メニューの「表示」、起動時から止めるなら `--paused`）で、サンプルの積み足しを止めます。GPU の負荷がほぼ無くなるので、GPU の弱い PC でも操作できます。止めている間にカメラなどを変えたときは、表示のために 1 サンプルだけ描いて止まります。
 
@@ -408,6 +467,7 @@ cargo test --release -p krbr-render -- --ignored --nocapture                 # G
 cargo test --release -p krbr-app --test watch -- --ignored --nocapture       # 保存の監視（GPU と KiCad の 3D モデルが要る）
 cargo test --release -p krbr-app --test material -- --ignored --nocapture    # 材質の CLI（KiCad の 3D モデルが要る）
 cargo test --release -p krbr-app --test denoise -- --ignored --nocapture     # ノイズ除去（GPU と OIDN の DLL が要る）
+cargo test --release -p krbr-app --lib preview -- --ignored --nocapture      # 材質の見本を out/material_swatches.png に描く（目で確かめる）
 ```
 
 krbr-app のテスト（watch / material / denoise）が使う基板は、既定では `<リポジトリ>\kicad\mini_dsp_radio.kicad_pcb`（git に入れていない）で、環境変数 `KRBR_TEST_PCB` で差し替えられます。部品番号や座標は基板の中から選びます（KiCad 標準の色を持つ IC、`C_0603_1608Metric` のコンデンサ）。基板は読むだけで、書き換えるテストは一時フォルダのコピーを使います。
@@ -417,6 +477,9 @@ GPU・KiCad の 3D モデル・OIDN が要るテストは `#[ignore]` にして�
 GPU を使わないもの（各 crate のユニットテスト）：
 
 - 材質の TOML の往復、アッベ数からの屈折率、材質ライブラリの重ね方
+- 金属のフレネルの式（正面・かすめる角度・k = 0 で誘電体と同じ）、測定値の表の引き方と色（金は赤・緑が高く青が低い、クロムは灰色に近い）、`conductor` / `category` の読み書き
+- 組み込みの材質：どれにも分類があり、金属（錫を除く）は測定値、分散式の nd と `specular_ior` が合っていること。変種（`+color=` / `+rough=`）の組み立てと読み直し、`user.toml` の書き換え（ほかの材質を残す）
+- ビューア：組み込みの材質・分類・測定値の金属に英語の表示名があること
 - 解決順序の5段階、パス・ハッシュでの照合、部位ごとの指定、全体設定と overrides の保存と読み込み
 - S 式・基板の解析、差分、角の丸い四角形と白抜きの文字
 - 距離場：半平面と 1 点からの距離、8bit への詰め方と範囲の上限
@@ -426,6 +489,7 @@ GPU の検証（`rust/crates/krbr-render/tests/`。基準の値は以前の C++ 
 
 - **BDPT / VCM の白い炉テスト**：上の主な材質（拡散・金属・誘電体・subsurface・ガラス・分光のアクリル）で、PT と同じ値（差 0.004 以下）
 - **分光モードの色の保存**：色のついた拡散を白い炉の中で RGB / 分光の両方で描き、チャンネルごとの差が 0.02 + 3% 以内であること（実測 0.0015 以下）
+- **測定値の金属**：金・銅・クロム・オスミウム・真鍮（粗さ 0.3）を白い炉の中で RGB（F0 と F82-tint）・分光（n, k から厳密なフレネル）・分光の BDPT で描き、チャンネルごとの差が 0.01 + 3% 以内であること（実測：金の R で 3%、ほかは 1% 程度）。F82-tint を 0.7 にすると Schlick より暗くなること
 - **積分器の一致**（`integrators.rs`）：面光源・相互反射・光沢のある金属球のシーンを PT（2048 spp）・BDPT・VCM（1024 回）で描いて比べます。平均は 0.09821 / 0.09815 / 0.09820、4x4 画素ごとの相対的な差は PT どうし（種だけ違う）0.010、BDPT 0.009、VCM 0.017
 - **集光模様の収束**（`integrators.rs`）：下記「積分器」
 - **プリズムの分散**（`prism.rs`）：下記「分光レンダリング」
@@ -464,9 +528,9 @@ HDR ─────────────────────────�
 | krbr-kicad | `sexpr`, `parser`, `board`, `resolver`, `stroke_silk` | S 式パーサ → `Board`（外形・層構成・配線・パッド・ビア・ベタ・シルク・穴・部品・3D モデル指定）。座標はすべて基板座標に変換済み。差分（`diff_boards`）。パス解決（`${KIPRJMOD}`, `${KICADn_3DMODEL_DIR}`, `${KISYS3DMOD}`、`kicad_common.json`、`.wrl`→`.step` の差し替え、追加検索フォルダ）。kicad-cli に渡す線フォントだけの基板のコピー |
 | krbr-geom | `shapes`, `board_mesh`, `relief`, `tiles`, `raster`, `svg_reader` | パッド・配線・図形の多角形化（Clipper2、10 nm 単位の整数座標）。Edge.Cuts の輪郭の連結、穴あけ、上下面の三角形分割、側面・穴の内壁（メッキ穴は別材質）。凹凸の形状とタイル、被覆率のラスタライズと距離場。kicad-cli の SVG の読み込み |
 | krbr-model | `library`, `mesh_file`, `part` | 3D モデルの読み込み（メッシュキャッシュ、無ければ STEP 変換器 DLL）、`.krbm`、部位（名前と色） |
-| krbr-scene | `scene`, `config`, `material`, `material_library`, `model_map`, `camera`, `lens`, `spectrum`, `mask_presets` | 設定ファイル、材質（OpenPBR）と割り当て、部品の配置（KiCad 3D ビューアと同じ変換の順序）、代替の箱、カメラの自動調整・レンズ、等色関数と RGB → スペクトルの表 |
+| krbr-scene | `scene`, `config`, `material`, `material_library`, `conductor`, `model_map`, `camera`, `lens`, `spectrum`, `mask_presets` | 設定ファイル、材質（OpenPBR）と割り当て、組み込みの材質（`builtin_materials.toml`）、金属の測定値、部品の配置（KiCad 3D ビューアと同じ変換の順序）、代替の箱、カメラの自動調整・レンズ、等色関数と RGB → スペクトルの表 |
 | krbr-render | `vk`, `gpu_scene`, `env_map`, `integrator`, `kernel`, `renderer`, `tonemapper`, `glow`, `denoiser`, `image_io`, `studio_env` | Vulkan（ash。表示は必要なときだけ）、BLAS/TLAS、環境マップの分布と内蔵のスタジオ、積分器と累積（`Progressive`：オフラインとビューアで共通）、表示用のトーンマッピングとグロー、ノイズ除去、画像の入出力。`build.rs` がシェーダをビルドする |
-| krbr-app | `prepare`, `viewer`, `swapchain`, `selection`, `watch`, `kicad_cli`, `material_cmd`, `kicad_plugin`, `remember` | シーンの準備（render / view / watch 共通）、リアルタイム表示（winit + egui）、部品の選択、保存の監視、kicad-cli の呼び出し、材質の CLI、KiCad のプラグイン、最後に使った環境マップ |
+| krbr-app | `prepare`, `viewer`, `swapchain`, `selection`, `material_editor`, `preview`, `watch`, `kicad_cli`, `material_cmd`, `kicad_plugin`, `remember` | シーンの準備（render / view / watch 共通）、リアルタイム表示（winit + egui）、部品の選択、材質エディタと見本・部品のプレビュー、保存の監視、kicad-cli の呼び出し、材質の CLI、KiCad のプラグイン、最後に使った環境マップ |
 | krbr（exe） | `main.rs` | コマンドライン（clap）。`build.rs` がアイコンを埋め込む |
 | shaders | `pathtrace.comp`, `vcm_light.comp`, `vcm_camera.comp`, `camera.glsl`, `ptcore.glsl`, `bidir.glsl`, `scene.glsl`, `lights.glsl`, `bsdf.glsl`, `spectral.glsl`, `env.glsl`, `sampling.glsl`, `common.glsl` | パストレーサー、BDPT / VCM の光源側・カメラ側、交点と材質の組み立て、光源（環境光・発光面）、BSDF、分光、環境マップの重点的サンプリング |
 | step_dll（C++） | `krbr_step.cpp`, `mesh_file.cpp` | STEP の読み込みと三角形分割（OpenCASCADE）。上の「STEP 変換器 DLL」 |

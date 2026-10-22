@@ -42,6 +42,43 @@ impl std::str::FromStr for BumpPattern {
     }
 }
 
+/// 材質の分類（材質の一覧でのまとまり。描画には使わない）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Category {
+    Metal,
+    Plastic,
+    Rubber,
+    Ceramic,
+    Glass,
+    Gem,
+    Other,
+}
+
+impl Category {
+    /// 一覧に出す順
+    pub const ALL: [Category; 7] = [Category::Metal, Category::Plastic, Category::Rubber, Category::Ceramic, Category::Glass, Category::Gem, Category::Other];
+
+    /// 材質の TOML（[krbr] category）での名前
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Category::Metal => "metal",
+            Category::Plastic => "plastic",
+            Category::Rubber => "rubber",
+            Category::Ceramic => "ceramic",
+            Category::Glass => "glass",
+            Category::Gem => "gem",
+            Category::Other => "other",
+        }
+    }
+}
+
+impl std::str::FromStr for Category {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        Self::ALL.into_iter().find(|c| c.as_str() == s).ok_or_else(|| format!("unknown category '{s}' (metal / plastic / rubber / ceramic / glass / gem / other)"))
+    }
+}
+
 /// Sellmeier の分散式 n²(λ) = 1 + Σ B_i λ² / (λ² − C_i)（λ は µm、C_i は µm²）
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sellmeier {
@@ -131,6 +168,10 @@ pub struct Material {
     pub roughness_variation: f32,
     /// 指定があればアッベ数より優先
     pub sellmeier: Option<Sellmeier>,
+    /// 測定値の複素屈折率を使う金属（crate::conductor の表の番号）。base_color と specular_color はその表から求めた値
+    pub conductor: Option<usize>,
+    /// 一覧での分類。書かなければパラメータから決める（category()）
+    pub category: Option<Category>,
 }
 
 impl Default for Material {
@@ -183,11 +224,34 @@ impl Default for Material {
             bump_scale: 0.2,
             roughness_variation: 0.0,
             sellmeier: None,
+            conductor: None,
+            category: None,
         }
     }
 }
 
 impl Material {
+    /// 測定値の金属にする：金属にし、base_color（F0）と specular_color（F82-tint）を表から求める
+    pub fn set_conductor(&mut self, c: crate::conductor::Conductor) {
+        let (f0, tint) = c.f0_and_f82_tint();
+        self.conductor = Some(c.index);
+        self.base_metalness = 1.0;
+        self.base_color = f0;
+        self.specular_color = tint;
+        self.base_color_from_model = false;
+    }
+
+    /// 一覧での分類（書いていなければ、金属・透明・その他をパラメータから決める）
+    pub fn category(&self) -> Category {
+        self.category.unwrap_or(if self.base_metalness > 0.5 {
+            Category::Metal
+        } else if self.transmission_weight > 0.0 {
+            Category::Glass
+        } else {
+            Category::Other
+        })
+    }
+
     /// 波長 λ（nm）での屈折率。分散がなければ specular_ior
     pub fn ior_at(&self, lambda_nm: f32) -> f32 {
         if let Some(s) = &self.sellmeier {

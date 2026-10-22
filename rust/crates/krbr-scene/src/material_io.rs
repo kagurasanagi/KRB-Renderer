@@ -3,7 +3,8 @@
 use glam::Vec3;
 use toml::Value;
 
-use crate::material::{BumpPattern, Material, Sellmeier};
+use crate::conductor;
+use crate::material::{BumpPattern, Category, Material, Sellmeier};
 
 enum Param {
     F(fn(&mut Material) -> &mut f32),
@@ -88,7 +89,13 @@ pub fn read_color(v: &Value) -> Option<Vec3> {
 }
 
 /// [krbr] の下に書ける項目
-const KRBR_KEYS: &[&str] = &["bump_pattern", "bump_strength", "bump_scale", "roughness_variation", "base_color_from_model", "sellmeier_b", "sellmeier_c"];
+const KRBR_KEYS: &[&str] = &["bump_pattern", "bump_strength", "bump_scale", "roughness_variation", "base_color_from_model", "sellmeier_b", "sellmeier_c", "conductor", "category"];
+
+/// 測定値の金属をやめる（[krbr] conductor に書く名前）
+pub const NO_CONDUCTOR: &str = "none";
+
+/// 測定値の金属の色を決める項目（書くと測定値の金属ではなくなる。conductor も書けばそちらが勝つ）
+const CONDUCTOR_PARAMS: &[&str] = &["base_color", "specular_color", "base_metalness"];
 
 fn sellmeier_coefficients(v: &Value) -> Option<[f32; 3]> {
     match v {
@@ -134,6 +141,10 @@ pub fn read_material(t: &toml::Table, m: &mut Material, problems: &mut Vec<Strin
     if t.contains_key("base_color") {
         m.base_color_from_model = false;
     }
+    // 金属の色を自分で書いたら、測定値の金属ではなくなる（[krbr] conductor を書けばそちらが勝つ）
+    if CONDUCTOR_PARAMS.iter().any(|k| t.contains_key(*k)) {
+        m.conductor = None;
+    }
     match t.get("krbr") {
         Some(Value::Table(k)) => read_krbr(k, m, problems),
         Some(_) => problems.push("'krbr': expected a table; ignored".into()),
@@ -171,6 +182,23 @@ fn read_krbr(k: &toml::Table, m: &mut Material, problems: &mut Vec<String>) {
         (None, None) => {}
         _ => wrong("sellmeier_b / sellmeier_c", "both, as [B1, B2, B3] and [C1, C2, C3]"),
     }
+    match k.get("conductor") {
+        Some(Value::String(v)) if v == NO_CONDUCTOR => m.conductor = None,
+        Some(Value::String(v)) => match conductor::find(v) {
+            Some(c) => m.set_conductor(c),
+            None => wrong("conductor", &format!("one of {} or {NO_CONDUCTOR}", conductor::all().map(|c| c.id).collect::<Vec<_>>().join(" / "))),
+        },
+        Some(_) => wrong("conductor", "a string"),
+        None => {}
+    }
+    match k.get("category") {
+        Some(Value::String(v)) => match v.parse::<Category>() {
+            Ok(c) => m.category = Some(c),
+            Err(e) => wrong("category", &e),
+        },
+        Some(_) => wrong("category", "a string"),
+        None => {}
+    }
     for key in k.keys() {
         if !KRBR_KEYS.contains(&key.as_str()) {
             problems.push(format!("unknown parameter 'krbr.{key}'"));
@@ -178,8 +206,13 @@ fn read_krbr(k: &toml::Table, m: &mut Material, problems: &mut Vec<String>) {
     }
 }
 
+/// f32 を、読み直すと同じ値になる最も短い 10 進の表記の f64 にする（0.3 が 0.30000001192092896 と書かれないように）
+fn float(v: f32) -> Value {
+    Value::Float(v.to_string().parse().unwrap_or(v as f64))
+}
+
 fn color_array(c: Vec3) -> Value {
-    Value::Array(vec![Value::Float(c.x as f64), Value::Float(c.y as f64), Value::Float(c.z as f64)])
+    Value::Array(vec![float(c.x), float(c.y), float(c.z)])
 }
 
 /// 既定値と異なる項目だけを書き出す（[krbr] の拡張を含む）
@@ -189,11 +222,15 @@ pub fn write_material(m: &Material) -> toml::Table {
     let mut mm = m.clone();
     let mut dd = def.clone();
     for (name, p) in params() {
+        // 測定値の金属の色は [krbr] conductor から決まる
+        if m.conductor.is_some() && CONDUCTOR_PARAMS.contains(&name) {
+            continue;
+        }
         match p {
             Param::F(get) => {
                 let (a, b) = (*get(&mut mm), *get(&mut dd));
                 if a != b {
-                    t.insert(name.into(), Value::Float(a as f64));
+                    t.insert(name.into(), float(a));
                 }
             }
             Param::C(get) => {
@@ -219,15 +256,21 @@ pub fn write_material(m: &Material) -> toml::Table {
     }
     if m.bump_pattern != BumpPattern::None {
         k.insert("bump_pattern".into(), Value::String(m.bump_pattern.as_str().into()));
-        k.insert("bump_strength".into(), Value::Float(m.bump_strength as f64));
-        k.insert("bump_scale".into(), Value::Float(m.bump_scale as f64));
+        k.insert("bump_strength".into(), float(m.bump_strength));
+        k.insert("bump_scale".into(), float(m.bump_scale));
     }
     if m.roughness_variation != 0.0 {
-        k.insert("roughness_variation".into(), Value::Float(m.roughness_variation as f64));
+        k.insert("roughness_variation".into(), float(m.roughness_variation));
     }
     if let Some(s) = &m.sellmeier {
-        k.insert("sellmeier_b".into(), Value::Array(s.b.iter().map(|v| Value::Float(*v as f64)).collect()));
-        k.insert("sellmeier_c".into(), Value::Array(s.c.iter().map(|v| Value::Float(*v as f64)).collect()));
+        k.insert("sellmeier_b".into(), Value::Array(s.b.iter().map(|v| float(*v)).collect()));
+        k.insert("sellmeier_c".into(), Value::Array(s.c.iter().map(|v| float(*v)).collect()));
+    }
+    if let Some(c) = m.conductor.and_then(conductor::get) {
+        k.insert("conductor".into(), Value::String(c.id.into()));
+    }
+    if let Some(c) = m.category {
+        k.insert("category".into(), Value::String(c.as_str().into()));
     }
     if !k.is_empty() {
         t.insert("krbr".into(), Value::Table(k));
@@ -260,6 +303,45 @@ mod tests {
         assert_eq!(problems.len(), 4, "{problems:?}");
         assert!(problems[0].contains("'foo'") && problems.iter().any(|p| p.contains("krbr.bump_sclae")));
         assert_eq!((r.base_metalness, r.specular_roughness, r.bump_pattern), (1.0, Material::default().specular_roughness, BumpPattern::Weave));
+    }
+
+    #[test]
+    fn conductor_and_category() {
+        let read = |text: &str, m: &mut Material| {
+            let mut problems = Vec::new();
+            read_material(&toml::from_str(text).unwrap(), m, &mut problems);
+            problems
+        };
+        let mut m = Material { base_color_from_model: true, ..Default::default() };
+        assert!(read("specular_roughness = 0.1
+[krbr]
+conductor = \"Au\"
+category = \"metal\"", &mut m).is_empty());
+        let au = conductor::find("Au").unwrap();
+        assert_eq!((m.conductor, m.category, m.base_metalness, m.base_color_from_model), (Some(au.index), Some(Category::Metal), 1.0, false));
+        assert_eq!(m.base_color, au.f0_and_f82_tint().0);
+        // 書き出すと conductor だけで、色は書かない。読み直すと同じ
+        let t = write_material(&m);
+        assert!(!t.contains_key("base_color") && !t.contains_key("specular_color"));
+        let mut r = Material { base_color_from_model: true, ..Default::default() };
+        read_material(&t, &mut r, &mut Vec::new());
+        assert_eq!(r, m);
+        // 色を書けば測定値の金属ではなくなる。"none" でも外れる。知らない名前は報告する
+        let mut c = m.clone();
+        read("base_color = [1, 0, 0]", &mut c);
+        assert_eq!(c.conductor, None);
+        let mut c = m.clone();
+        read("[krbr]
+conductor = \"none\"", &mut c);
+        assert_eq!(c.conductor, None);
+        let mut c = m.clone();
+        assert_eq!(read("[krbr]
+conductor = \"Unobtainium\"
+category = \"wood\"", &mut c).len(), 2);
+        assert_eq!(c.conductor, m.conductor);
+        // 分類を書かなければパラメータから
+        assert_eq!(Material::default().category(), Category::Other);
+        assert_eq!(Material { transmission_weight: 1.0, ..Default::default() }.category(), Category::Glass);
     }
 
     #[test]

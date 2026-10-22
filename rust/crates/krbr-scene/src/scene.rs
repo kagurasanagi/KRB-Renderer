@@ -259,6 +259,8 @@ pub struct SceneOptions {
     pub silk_color: Vec3,
     pub silk_color_set: bool,
     pub fr4_color: Vec3,
+    /// 基材の材質：材質ライブラリの名前（変種も書ける）。空なら FR4（ガラス繊維とエポキシ）
+    pub substrate: String,
     /// 代替の箱の高さ（mm）。0 なら面積から決める（placeholder_height_for）
     pub placeholder_height: f64,
     /// 代替の水晶の、中を 5 mm 進んだときの透過の色（sRGB）
@@ -285,6 +287,7 @@ impl Default for SceneOptions {
             silk_color: mask.silk_srgb,
             silk_color_set: false,
             fr4_color: Vec3::new(0.62, 0.58, 0.42),
+            substrate: String::new(),
             placeholder_height: 0.0,
             placeholder_color: Vec3::new(0.92, 0.96, 1.0),
             include_dnp: true,
@@ -391,8 +394,21 @@ fn make_silk_material(silk_srgb: Vec3) -> Material {
     }
 }
 
-fn setup_board_materials(s: &mut Scene, board: &Board, o: &SceneOptions) {
-    let fr4 = Material {
+/// 基材の材質：設定の substrate（材質ライブラリの名前）、空か見つからなければ FR4
+fn make_substrate_material(o: &SceneOptions, lib: Option<&crate::material_library::MaterialLibrary>) -> Material {
+    if !o.substrate.is_empty() {
+        match lib.and_then(|l| l.find_variant(&o.substrate)) {
+            Some(mut m) => {
+                if m.base_color_from_model {
+                    m.base_color = srgb_to_linear(o.fr4_color); // モデルの色を使う材質なら、基材の色
+                }
+                m.name = format!("substrate:{}", o.substrate);
+                return m;
+            }
+            None => krbr_core::warn!("substrate '{}' is not in the material library; using FR4", o.substrate),
+        }
+    }
+    Material {
         name: "fr4".into(),
         base_color: srgb_to_linear(o.fr4_color),
         specular_roughness: 0.55,
@@ -406,7 +422,11 @@ fn setup_board_materials(s: &mut Scene, board: &Board, o: &SceneOptions) {
         bump_scale: 0.45,
         roughness_variation: 0.25,
         ..Default::default()
-    };
+    }
+}
+
+fn setup_board_materials(s: &mut Scene, board: &Board, o: &SceneOptions, lib: Option<&crate::material_library::MaterialLibrary>) {
+    let fr4 = make_substrate_material(o, lib);
 
     let copper = Material {
         name: "copper".into(),
@@ -489,6 +509,14 @@ fn resolved_finish(board: &Board, o: &SceneOptions) -> Finish {
         krbr_core::warn!("unknown copper finish '{k}' in the stackup; using ENIG");
         Finish::Enig
     })
+}
+
+/// 基材の材質だけを設定に合わせて作り直す（ビューアでの切り替え用）
+pub fn update_substrate_material(s: &mut Scene, o: &SceneOptions, lib: &crate::material_library::MaterialLibrary) {
+    let i = s.board_mats.fr4 as usize;
+    if i < s.materials.len() {
+        s.materials[i] = make_substrate_material(o, Some(lib));
+    }
 }
 
 /// レジストとシルクの材質だけを設定に合わせて作り直す（ビューアでの色の切り替え用）
@@ -681,7 +709,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
     let board = ctx.board;
     let opts = ctx.options;
     let mut s = Scene::default();
-    setup_board_materials(&mut s, board, opts);
+    setup_board_materials(&mut s, board, opts, Some(ctx.materials.library()));
 
     // 基板
     let mut rp = opts.relief_params;

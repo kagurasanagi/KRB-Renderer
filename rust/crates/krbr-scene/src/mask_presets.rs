@@ -38,6 +38,9 @@ const PRESETS: &[MaskPreset] = &[
     MaskPreset { name: "black", srgb: Vec3::new(0.04, 0.04, 0.04), roughness: 0.18, scatter: 0.7, silk_srgb: W, note: "KiCad" },
     MaskPreset { name: "white", srgb: Vec3::new(0.90, 0.90, 0.88), roughness: 0.22, scatter: 0.9, silk_srgb: K, note: "KiCad" },
     MaskPreset { name: "matte-black", srgb: Vec3::new(0.05, 0.05, 0.05), roughness: 0.55, scatter: 0.8, silk_srgb: W, note: "KiCad" },
+    // 透明なレジスト：色が無く（銅の上で銅の色がそのまま見える sRGB 0.855 = リニア 0.7 = 銅の平均反射率）、顔料も散らさない。
+    // 透明な基材（substrate）と組み合わせると、基板が透けて見える
+    MaskPreset { name: "clear", srgb: Vec3::new(0.855, 0.855, 0.855), roughness: 0.12, scatter: 0.0, silk_srgb: W, note: "Clear coat: no pigment (see-through with a clear substrate)" },
     MaskPreset { name: "jlcpcb-green", srgb: Vec3::new(0.08, 0.40, 0.19), roughness: 0.18, scatter: 0.3, silk_srgb: W, note: "JLCPCB Green: a slightly lighter green, glossy" },
     MaskPreset { name: "jlcpcb-purple", srgb: Vec3::new(0.33, 0.12, 0.46), roughness: 0.18, scatter: 0.4, silk_srgb: W, note: "JLCPCB Purple: a bluish purple" },
     MaskPreset { name: "jlcpcb-red", srgb: Vec3::new(0.60, 0.08, 0.07), roughness: 0.18, scatter: 0.4, silk_srgb: W, note: "JLCPCB Red" },

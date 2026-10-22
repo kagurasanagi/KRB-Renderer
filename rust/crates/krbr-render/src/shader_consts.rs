@@ -31,6 +31,13 @@ pub const BINDING_PATH_HEADS: u32 = 21;
 pub const BINDING_CELL_HEADS: u32 = 22;
 pub const BINDING_COUNTERS: u32 = 23;
 pub const BINDING_SPLAT: u32 = 24;
+/// 金属の測定値の表（shaders/common.glsl）
+pub const BINDING_CONDUCTORS: u32 = 25;
+
+/// 金属の n, k の表の波長の格子（krbr_scene::conductor と同じ値。gpu_types.rs で確かめる）
+pub const CONDUCTOR_LAMBDA_MIN: u32 = 360;
+pub const CONDUCTOR_LAMBDA_STEP: u32 = 5;
+pub const CONDUCTOR_SAMPLES: u32 = 95;
 
 /// VCM の近傍探索の格子（空間ハッシュの表）のセルの数。cell_heads のバッファは u32 がこの数だけ
 pub const VCM_GRID_SIZE: u32 = 1 << 21;
@@ -80,6 +87,8 @@ pub fn glsl_defines() -> Vec<(String, String)> {
         ("BINDING_CELL_HEADS", BINDING_CELL_HEADS),
         ("BINDING_COUNTERS", BINDING_COUNTERS),
         ("BINDING_SPLAT", BINDING_SPLAT),
+        ("BINDING_CONDUCTORS", BINDING_CONDUCTORS),
+        ("CONDUCTOR_SAMPLES", CONDUCTOR_SAMPLES),
         ("VCM_COUNTER_STORED", VCM_COUNTER_STORED),
         ("VCM_COUNTER_CAPACITY", VCM_COUNTER_CAPACITY),
         ("VCM_COUNTER_MERGE_TRUNCATED", VCM_COUNTER_MERGE_TRUNCATED),
@@ -92,6 +101,8 @@ pub fn glsl_defines() -> Vec<(String, String)> {
     // 符号なしの値として比べる・剰余を取るもの
     d.push(("VCM_GRID_SIZE".into(), format!("{VCM_GRID_SIZE}u")));
     d.push(("VCM_MAX_CELL_WALK".into(), format!("{VCM_MAX_CELL_WALK}u")));
+    d.push(("CONDUCTOR_LAMBDA_MIN".into(), format!("{CONDUCTOR_LAMBDA_MIN}.0")));
+    d.push(("CONDUCTOR_LAMBDA_STEP".into(), format!("{CONDUCTOR_LAMBDA_STEP}.0")));
     let w = LUMINANCE_WEIGHTS;
     d.push(("LUMINANCE_WEIGHTS".into(), format!("vec3({:?},{:?},{:?})", w[0], w[1], w[2])));
     d.into_iter().map(|(k, v)| (format!("KRBR_{k}"), v)).collect()

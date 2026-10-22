@@ -22,6 +22,7 @@ mask_roughness = 0.18
 mask_scatter = 0.3           # レジストの顔料自身が光を散らす割合
 # silk_color = [0.93, 0.93, 0.90]   # 省略時は、レジストのプリセットを選んだらそれに合わせた色（黄・白なら黒）、無ければ stackup の色、それも無ければ白
 fr4_color = [0.62, 0.58, 0.42]
+# substrate = "glass_frosted"        # 基材を材質ライブラリの材質にする（省略時は FR4。krbr material list で一覧）
 clip_silk_by_mask = true     # レジストの開口部ではシルクを印刷しない
 texture_px_per_mm = 50       # 銅・レジストの縁からの距離場の解像度（50 = 20 µm/px）
 include_dnp = true

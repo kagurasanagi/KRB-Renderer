@@ -253,8 +253,18 @@ pub fn cmd_material_show(pcb: &Path, ref_filter: &str) -> anyhow::Result<()> {
 
 pub fn cmd_material_list() -> anyhow::Result<()> {
     let lib = MaterialLibrary::load(&krbr_core::platform::config_dir());
-    for n in lib.names() {
-        println!("{:<20} {}", n, lib.source_of(&n));
+    // 分類ごとに、ビューアの一覧と同じ順。測定値の金属は出典、ほかは屈折率（nd）
+    for (cat, names) in crate::material_editor::grouped_names(&lib) {
+        println!("[{}]", cat.as_str());
+        for n in names {
+            let Some(m) = lib.find(&n) else { continue };
+            let optics = match m.conductor.and_then(krbr_scene::conductor::get) {
+                Some(c) => format!("measured: {}", c.source),
+                None if m.base_metalness > 0.5 => if m.base_color_from_model { "F0: color of the 3D model".to_string() } else { format!("F0 {:.2} {:.2} {:.2}", m.base_color.x, m.base_color.y, m.base_color.z) },
+                None => format!("nd {:.3}{}", m.ior_at(587.6), if m.sellmeier.is_some() { " (Sellmeier)" } else { "" }),
+            };
+            println!("  {:<24} rough {:<5.2} {:<52} {}", n, m.specular_roughness, optics, lib.source_of(&n));
+        }
     }
     Ok(())
 }

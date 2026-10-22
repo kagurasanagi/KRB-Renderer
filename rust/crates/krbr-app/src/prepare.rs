@@ -59,6 +59,8 @@ pub struct RenderOptions {
     pub focus_distance: Option<f32>,
     pub blades: Option<i32>,
     pub mask_color: String,
+    /// 基材の材質（材質ライブラリの名前。空なら設定どおり）
+    pub substrate: String,
     /// kicad-cli で線フォントの文字（シルク）を描かない
     pub no_kicad_cli: bool,
     /// 基板の設定ファイル <名前>.krbr のひな形を書く（あれば、無い表だけを足す）
@@ -228,6 +230,9 @@ fn apply_command_line(cfg: &mut ProjectConfig, o: &RenderOptions) {
     if let Some(v) = o.spectral {
         cfg.spectral = v;
     }
+    if !o.substrate.is_empty() {
+        cfg.scene.substrate = if o.substrate == "fr4" { String::new() } else { o.substrate.clone() };
+    }
     if !o.mask_color.is_empty() {
         if let Err(e) = apply_mask_color_spec(&mut cfg.scene, &o.mask_color) {
             warn!("--mask-color: {}", e);
@@ -329,6 +334,28 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
     }
     let dist = build_env_distribution(&env, ENV_DIST_RESOLUTION);
     Some(PreparedScene { board, cfg, scene, env, dist, config_hdr, configured, config_view, remembered_view, kicad_cli, source: Some(source) })
+}
+
+/// 基板を開かずに起動したビューアの状態（環境マップだけ。基板は「ファイル → 開く...」で読む）
+pub fn prepare_empty(o: &RenderOptions) -> Option<PreparedScene> {
+    let mut configured = ProjectConfig::default();
+    apply_command_line(&mut configured, o);
+    let mut cfg = configured.clone();
+    cfg.hdr = if o.hdr.is_empty() { STUDIO.into() } else { o.hdr.clone() };
+    let env = match load_environment_map(&cfg.hdr) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("environment map {}: {} (using the built-in studio instead)", cfg.hdr, e);
+            cfg.hdr = STUDIO.into();
+            load_environment_map(STUDIO).ok()?
+        }
+    };
+    let dist = build_env_distribution(&env, ENV_DIST_RESOLUTION);
+    let config_view = remember::ViewSettings::of(&ProjectConfig::default()).values();
+    // 構図：原点のまわりの 10 cm（基板を開いたら、その基板に合わせ直す）
+    let scene = Scene { framing_points: vec![glam::Vec3::splat(-50.0), glam::Vec3::splat(50.0)], ..Default::default() };
+    info!("no board; open one from the File menu");
+    Some(PreparedScene { board: Board::default(), cfg, scene, env, dist, config_hdr: String::new(), configured, config_view, remembered_view: remember::ViewValues::new(), kicad_cli: None, source: None })
 }
 
 /// 3D モデルのパスの解決：基板のフォルダと、設定ファイル（<名前>.krbr）の [paths] の変数・探す場所

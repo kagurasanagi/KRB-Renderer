@@ -56,6 +56,8 @@ pub struct GpuScene<'a> {
     pub env_pdf: Buffer,
     pub rgb2spec: Buffer,
     pub rgb2spec_scale: Buffer,
+    /// 金属の測定値の n, k（表ごとに CONDUCTOR_SAMPLES 個の vec2）
+    pub conductors: Buffer,
     pub emitters: Buffer,
     pub emitter_cdf: Buffer,
     pub emitter_count: u32,
@@ -103,6 +105,7 @@ impl<'a> GpuScene<'a> {
             env_pdf: Buffer::default(),
             rgb2spec: Buffer::default(),
             rgb2spec_scale: Buffer::default(),
+            conductors: Buffer::default(),
             emitters: Buffer::default(),
             emitter_cdf: Buffer::default(),
             emitter_count: 0,
@@ -486,6 +489,9 @@ impl<'a> GpuScene<'a> {
         let data: Vec<Vec4> = (0..n).map(|i| Vec4::new(t.data[i * 3], t.data[i * 3 + 1], t.data[i * 3 + 2], 0.0)).collect();
         self.rgb2spec = self.ctx.create_device_buffer(as_bytes(&data), vk::BufferUsageFlags::STORAGE_BUFFER)?;
         self.rgb2spec_scale = self.ctx.create_device_buffer(as_bytes(&t.scale), vk::BufferUsageFlags::STORAGE_BUFFER)?;
+        let nk: Vec<[f32; 2]> = krbr_scene::conductor::Conductor::gpu_table();
+        let flat: Vec<f32> = nk.iter().flatten().copied().collect();
+        self.conductors = self.ctx.create_device_buffer(as_bytes(&flat), vk::BufferUsageFlags::STORAGE_BUFFER)?;
         Ok(())
     }
 
@@ -534,7 +540,7 @@ impl Drop for GpuScene<'_> {
         let ctx = self.ctx;
         ctx.wait_idle();
         self.destroy_geometry();
-        for b in [&mut self.env_marginal, &mut self.env_conditional, &mut self.env_pdf, &mut self.rgb2spec, &mut self.rgb2spec_scale] {
+        for b in [&mut self.env_marginal, &mut self.env_conditional, &mut self.env_pdf, &mut self.rgb2spec, &mut self.rgb2spec_scale, &mut self.conductors] {
             ctx.destroy_buffer(b);
         }
         ctx.destroy_image(&mut self.env_image);

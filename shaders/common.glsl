@@ -46,7 +46,7 @@ struct Material {
     vec4 transmission2; // rgb: transmission_color, a: transmission_depth（mm）
     vec4 subsurface;    // rgb: subsurface_color（radius 進んだときの透過率）, a: subsurface_radius（mm）
     vec4 params3;       // x: subsurface_weight, y, z: Cauchy の A, B（λ は nm）, w: 1 なら分散あり
-    // 分光モード用の RGB → スペクトルの係数（xyz）。specEmission.w は倍率
+    // 分光モード用の RGB → スペクトルの係数（xyz）。specEmission.w は倍率、specBase.w は測定値の金属の表の番号 + 1（0 なら無し）
     vec4 specBase;
     vec4 specSpecular;
     vec4 specCoat;
@@ -111,6 +111,9 @@ layout(set = 0, binding = KRBR_BINDING_INSTANCES, std430) readonly buffer Instan
 // RGB → スペクトルの表（Jakob & Hanika 2019）：64 x 64 x (3 x 64) の係数と、明るさの格子
 layout(set = 0, binding = KRBR_BINDING_RGB2SPEC, std430) readonly buffer Rgb2Spec { vec4 rgb2specData[]; };
 layout(set = 0, binding = KRBR_BINDING_RGB2SPEC_SCALE, std430) readonly buffer Rgb2SpecScale { float rgb2specScale[]; };
+// 金属の測定値の複素屈折率 n, k（表ごとに KRBR_CONDUCTOR_SAMPLES 個。波長は KRBR_CONDUCTOR_LAMBDA_MIN nm から
+// KRBR_CONDUCTOR_LAMBDA_STEP nm 刻み）。rust/crates/krbr-scene/src/conductor.rs
+layout(set = 0, binding = KRBR_BINDING_CONDUCTORS, std430) readonly buffer Conductors { vec2 conductorNk[]; };
 
 layout(push_constant) uniform Push {
     uint sampleIndex;

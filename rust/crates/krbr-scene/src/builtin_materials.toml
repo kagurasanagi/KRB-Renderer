@@ -1,0 +1,561 @@
+# krbr 組み込みの材質（OpenPBR Surface）。色はリニア
+# 全体設定の materials/*.toml に同じ名前を書くと、書いた項目だけ上書きされる
+# roughness_variation（粗さのむら）は 0.1〜0.8 mm 周期の模様。引きの画では画素と同じくらいの細かさになり
+# 砂粒のようなノイズに見えるので、部品ではごく弱くしている（部品の質感は specular_roughness で表す）
+# [krbr] conductor は測定値の複素屈折率の金属（krbr-scene の conductor.rs。出典は scripts/gen_conductors.py）。
+# 屈折率は、分散式があるものは Sellmeier の係数（λ は µm、C は µm²。refractiveindex.info の値）、無いものは
+# nd（587.6 nm）の代表値。表示名は krbr-app の i18n（material-<名前>）
+
+# ---------------------------------------------------------------- 金属（測定値）
+
+[material.metal_gold]          # 金めっきの端子（Au：Johnson & Christy 1972）
+specular_roughness = 0.22
+[material.metal_gold.krbr]
+category = "metal"
+conductor = "Au"
+bump_pattern = "noise"
+bump_strength = 0.01
+bump_scale = 0.08
+roughness_variation = 0.03
+
+[material.metal_silver]        # 銀（Ag：Johnson & Christy 1972）
+specular_roughness = 0.15
+[material.metal_silver.krbr]
+category = "metal"
+conductor = "Ag"
+bump_pattern = "noise"
+bump_strength = 0.008
+bump_scale = 0.1
+roughness_variation = 0.03
+
+[material.metal_copper]        # 銅（Cu：Johnson & Christy 1972）
+specular_roughness = 0.2
+[material.metal_copper.krbr]
+category = "metal"
+conductor = "Cu"
+bump_pattern = "noise"
+bump_strength = 0.01
+bump_scale = 0.1
+roughness_variation = 0.03
+
+[material.metal_brass]         # 真鍮（黄銅 Cu70Zn30：Querry 1985）
+specular_roughness = 0.2
+[material.metal_brass.krbr]
+category = "metal"
+conductor = "CuZn30"
+bump_pattern = "noise"
+bump_strength = 0.01
+bump_scale = 0.1
+roughness_variation = 0.03
+
+[material.metal_red_brass]     # 丹銅（Cu85Zn15：Querry 1985）
+specular_roughness = 0.2
+[material.metal_red_brass.krbr]
+category = "metal"
+conductor = "CuZn15"
+bump_pattern = "noise"
+bump_strength = 0.01
+bump_scale = 0.1
+roughness_variation = 0.03
+
+[material.aluminum]            # アルミニウム。電解コンデンサの缶など（Al：Rakić 1995）
+specular_roughness = 0.35
+[material.aluminum.krbr]
+category = "metal"
+conductor = "Al"
+bump_pattern = "noise"
+bump_strength = 0.01
+bump_scale = 0.2
+roughness_variation = 0.03
+
+[material.metal_chrome]        # クロムめっき（鏡面。Cr：Johnson & Christy 1974）
+specular_roughness = 0.04
+[material.metal_chrome.krbr]
+category = "metal"
+conductor = "Cr"
+
+[material.metal_chrome_satin]  # クロム（サテン）
+specular_roughness = 0.3
+[material.metal_chrome_satin.krbr]
+category = "metal"
+conductor = "Cr"
+bump_pattern = "noise"
+bump_strength = 0.012
+bump_scale = 0.05
+roughness_variation = 0.05
+
+[material.metal_nickel]        # ニッケルめっき（Ni：Johnson & Christy 1974）
+specular_roughness = 0.12
+[material.metal_nickel.krbr]
+category = "metal"
+conductor = "Ni"
+bump_pattern = "noise"
+bump_strength = 0.006
+bump_scale = 0.1
+roughness_variation = 0.03
+
+[material.metal_nickel_satin]  # ニッケル（サテン）
+specular_roughness = 0.35
+[material.metal_nickel_satin.krbr]
+category = "metal"
+conductor = "Ni"
+bump_pattern = "noise"
+bump_strength = 0.012
+bump_scale = 0.05
+roughness_variation = 0.05
+
+[material.metal_platinum]      # 白金（Pt：Rakić et al. 1998）
+specular_roughness = 0.1
+[material.metal_platinum.krbr]
+category = "metal"
+conductor = "Pt"
+bump_pattern = "noise"
+bump_strength = 0.006
+bump_scale = 0.1
+roughness_variation = 0.03
+
+[material.metal_palladium]     # パラジウム（Pd：Johnson & Christy 1974）
+specular_roughness = 0.12
+[material.metal_palladium.krbr]
+category = "metal"
+conductor = "Pd"
+bump_pattern = "noise"
+bump_strength = 0.006
+bump_scale = 0.1
+roughness_variation = 0.03
+
+[material.metal_rhodium]       # ロジウムめっき（Rh：Weaver et al. 1977）
+specular_roughness = 0.06
+[material.metal_rhodium.krbr]
+category = "metal"
+conductor = "Rh"
+
+[material.metal_osmium]        # オスミウム（Os：Nemoshkalenko et al. 1968。常光線・異常光線の多結晶の平均）
+specular_roughness = 0.1
+[material.metal_osmium.krbr]
+category = "metal"
+conductor = "Os"
+bump_pattern = "noise"
+bump_strength = 0.006
+bump_scale = 0.1
+roughness_variation = 0.03
+
+[material.metal_iron]          # 鉄（Fe：Johnson & Christy 1974）
+specular_roughness = 0.3
+[material.metal_iron.krbr]
+category = "metal"
+conductor = "Fe"
+bump_pattern = "noise"
+bump_strength = 0.015
+bump_scale = 0.1
+roughness_variation = 0.05
+
+[material.metal_stainless]     # ステンレス鋼（オーステナイト系、SUS304 など：Karlsson & Ribbing 1982）
+specular_roughness = 0.15
+[material.metal_stainless.krbr]
+category = "metal"
+conductor = "SS_austenitic"
+bump_pattern = "noise"
+bump_strength = 0.008
+bump_scale = 0.1
+roughness_variation = 0.03
+
+[material.metal_stainless_satin] # ステンレス鋼（サテン）
+specular_roughness = 0.35
+[material.metal_stainless_satin.krbr]
+category = "metal"
+conductor = "SS_austenitic"
+bump_pattern = "noise"
+bump_strength = 0.012
+bump_scale = 0.05
+roughness_variation = 0.05
+
+[material.metal_cobalt]        # コバルト（Co：Johnson & Christy 1974）
+specular_roughness = 0.15
+[material.metal_cobalt.krbr]
+category = "metal"
+conductor = "Co"
+bump_pattern = "noise"
+bump_strength = 0.008
+bump_scale = 0.1
+roughness_variation = 0.03
+
+[material.metal_titanium]      # チタン（Ti：Johnson & Christy 1974）
+specular_roughness = 0.25
+[material.metal_titanium.krbr]
+category = "metal"
+conductor = "Ti"
+bump_pattern = "noise"
+bump_strength = 0.01
+bump_scale = 0.1
+roughness_variation = 0.03
+
+[material.metal_tungsten]      # タングステン（W：Weaver et al. 1975）
+specular_roughness = 0.2
+[material.metal_tungsten.krbr]
+category = "metal"
+conductor = "W"
+bump_pattern = "noise"
+bump_strength = 0.01
+bump_scale = 0.1
+roughness_variation = 0.03
+
+[material.metal_zinc]          # 亜鉛めっき（Zn：Werner et al. 2009）
+specular_roughness = 0.3
+[material.metal_zinc.krbr]
+category = "metal"
+conductor = "Zn"
+bump_pattern = "noise"
+bump_strength = 0.015
+bump_scale = 0.1
+roughness_variation = 0.05
+
+# 錫は可視域の測定値が見つからない（refractiveindex.info は 0.73 µm から）ので、3D モデルの面の色の金属にする
+[material.metal_tin]           # 錫めっきのリード・端子
+base_metalness = 1.0
+specular_roughness = 0.28
+[material.metal_tin.krbr]
+category = "metal"
+bump_pattern = "noise"
+bump_strength = 0.012
+bump_scale = 0.08
+roughness_variation = 0.03
+
+# ---------------------------------------------------------------- 樹脂（色は 3D モデルの面の色。部位ごとに +color= で変えられる）
+
+[material.plastic]             # 樹脂のボディ
+specular_roughness = 0.45
+specular_ior = 1.5
+[material.plastic.krbr]
+category = "plastic"
+bump_pattern = "noise"
+bump_strength = 0.012
+bump_scale = 0.3
+roughness_variation = 0.02
+
+[material.glossy_plastic]      # 白い樹脂など、つやのあるもの
+specular_roughness = 0.3
+specular_ior = 1.5
+[material.glossy_plastic.krbr]
+category = "plastic"
+bump_pattern = "noise"
+bump_strength = 0.01
+bump_scale = 0.3
+roughness_variation = 0.02
+
+[material.epoxy_black]         # IC のモールド樹脂（つや消しの黒）
+base_color = [0.018, 0.018, 0.018]
+specular_roughness = 0.55
+specular_ior = 1.55
+[material.epoxy_black.krbr]
+category = "plastic"
+bump_pattern = "noise"
+bump_strength = 0.015
+bump_scale = 0.1
+roughness_variation = 0.03
+
+[material.plastic_abs]         # ABS（nd 1.53：データシートの代表値）
+specular_roughness = 0.4
+specular_ior = 1.53
+[material.plastic_abs.krbr]
+category = "plastic"
+bump_pattern = "noise"
+bump_strength = 0.012
+bump_scale = 0.3
+roughness_variation = 0.02
+
+[material.plastic_pc]          # ポリカーボネート（不透明。Sultanova et al. 2009）
+specular_roughness = 0.3
+specular_ior = 1.5848
+[material.plastic_pc.krbr]
+category = "plastic"
+sellmeier_b = [1.4182, 0.0, 0.0]
+sellmeier_c = [0.021304, 0.0, 0.0]
+bump_pattern = "noise"
+bump_strength = 0.01
+bump_scale = 0.3
+roughness_variation = 0.02
+
+[material.plastic_pbt]         # PBT（コネクタのハウジングなど。nd 1.57：データシートの代表値）
+specular_roughness = 0.45
+specular_ior = 1.57
+[material.plastic_pbt.krbr]
+category = "plastic"
+bump_pattern = "noise"
+bump_strength = 0.012
+bump_scale = 0.3
+roughness_variation = 0.02
+
+[material.plastic_pa66]        # ナイロン（PA66。nd 1.53：データシートの代表値）
+specular_roughness = 0.45
+specular_ior = 1.53
+[material.plastic_pa66.krbr]
+category = "plastic"
+bump_pattern = "noise"
+bump_strength = 0.012
+bump_scale = 0.3
+roughness_variation = 0.02
+
+[material.plastic_pom]         # ポリアセタール（POM。nd 1.48：データシートの代表値）
+specular_roughness = 0.35
+specular_ior = 1.48
+[material.plastic_pom.krbr]
+category = "plastic"
+bump_pattern = "noise"
+bump_strength = 0.01
+bump_scale = 0.3
+roughness_variation = 0.02
+
+[material.plastic_pp]          # ポリプロピレン（PP。nd 1.49：データシートの代表値）
+specular_roughness = 0.45
+specular_ior = 1.49
+[material.plastic_pp.krbr]
+category = "plastic"
+bump_pattern = "noise"
+bump_strength = 0.012
+bump_scale = 0.3
+roughness_variation = 0.02
+
+[material.plastic_pvc]         # 塩化ビニル（PVC。電線の被覆など。nd 1.542：Zhang et al. 2020）
+specular_roughness = 0.4
+specular_ior = 1.542
+[material.plastic_pvc.krbr]
+category = "plastic"
+bump_pattern = "noise"
+bump_strength = 0.012
+bump_scale = 0.3
+roughness_variation = 0.02
+
+[material.plastic_pet]         # PET（nd 1.569：Zhang et al. 2020）
+specular_roughness = 0.3
+specular_ior = 1.569
+[material.plastic_pet.krbr]
+category = "plastic"
+bump_pattern = "noise"
+bump_strength = 0.01
+bump_scale = 0.3
+roughness_variation = 0.02
+
+[material.plastic_ptfe]        # フッ素樹脂（PTFE。白。nd 1.35：データシートの代表値）
+base_color = [0.82, 0.82, 0.8]
+specular_roughness = 0.6
+specular_ior = 1.35
+[material.plastic_ptfe.krbr]
+category = "plastic"
+bump_pattern = "noise"
+bump_strength = 0.012
+bump_scale = 0.2
+roughness_variation = 0.02
+
+# ---------------------------------------------------------------- ゴム
+
+[material.rubber_silicone]     # シリコーンゴム（PDMS：Schneider et al. 2009、Sylgard 184）
+specular_roughness = 0.55
+specular_ior = 1.4316
+[material.rubber_silicone.krbr]
+category = "rubber"
+sellmeier_b = [1.0093, 0.0, 0.0]
+sellmeier_c = [0.013185, 0.0, 0.0]
+bump_pattern = "noise"
+bump_strength = 0.015
+bump_scale = 0.2
+roughness_variation = 0.03
+
+[material.rubber_black]        # 黒いゴム（EPDM・NBR など。nd 1.52：代表値）
+base_color = [0.02, 0.02, 0.02]
+specular_roughness = 0.7
+specular_ior = 1.52
+[material.rubber_black.krbr]
+category = "rubber"
+bump_pattern = "noise"
+bump_strength = 0.02
+bump_scale = 0.15
+roughness_variation = 0.04
+
+# ---------------------------------------------------------------- セラミック
+
+[material.ceramic]             # チップ部品のセラミック
+specular_roughness = 0.4
+specular_ior = 1.6
+[material.ceramic.krbr]
+category = "ceramic"
+bump_pattern = "noise"
+bump_strength = 0.015
+bump_scale = 0.05
+roughness_variation = 0.03
+
+[material.ceramic_alumina]     # アルミナ（白。屈折率はサファイアの常光線：Malitson & Dodge 1972）
+base_color = [0.8, 0.8, 0.78]
+specular_roughness = 0.35
+specular_ior = 1.768
+[material.ceramic_alumina.krbr]
+category = "ceramic"
+sellmeier_b = [1.4313493, 0.65054713, 5.3414021]
+sellmeier_c = [0.0052799261, 0.0142382647, 325.0178]
+bump_pattern = "noise"
+bump_strength = 0.015
+bump_scale = 0.05
+roughness_variation = 0.03
+
+# ---------------------------------------------------------------- ガラス・透明な材質
+
+[material.acrylic]             # アクリル（PMMA：Sultanova et al. 2009）
+base_color = [1.0, 1.0, 1.0]
+specular_roughness = 0.0
+specular_ior = 1.4906
+transmission_weight = 1.0
+[material.acrylic.krbr]
+category = "glass"
+sellmeier_b = [1.1819, 0.0, 0.0]
+sellmeier_c = [0.011313, 0.0, 0.0]
+
+[material.polycarbonate]       # ポリカーボネート（透明。Sultanova et al. 2009）
+base_color = [1.0, 1.0, 1.0]
+specular_roughness = 0.0
+specular_ior = 1.5848
+transmission_weight = 1.0
+[material.polycarbonate.krbr]
+category = "glass"
+sellmeier_b = [1.4182, 0.0, 0.0]
+sellmeier_c = [0.021304, 0.0, 0.0]
+
+[material.silicone_clear]      # 透明なシリコーン（LED のレンズなど。PDMS：Schneider et al. 2009）
+base_color = [1.0, 1.0, 1.0]
+specular_roughness = 0.0
+specular_ior = 1.4316
+transmission_weight = 1.0
+[material.silicone_clear.krbr]
+category = "glass"
+sellmeier_b = [1.0093, 0.0, 0.0]
+sellmeier_c = [0.013185, 0.0, 0.0]
+
+[material.glass_bk7]           # 光学ガラス BK7（SCHOTT N-BK7）
+base_color = [1.0, 1.0, 1.0]
+specular_roughness = 0.0
+specular_ior = 1.5168
+transmission_weight = 1.0
+[material.glass_bk7.krbr]
+category = "glass"
+sellmeier_b = [1.03961212, 0.231792344, 1.01046945]
+sellmeier_c = [0.00600069867, 0.0200179144, 103.560653]
+
+[material.glass_fused_silica]  # 石英ガラス（Malitson 1965）
+base_color = [1.0, 1.0, 1.0]
+specular_roughness = 0.0
+specular_ior = 1.4585
+transmission_weight = 1.0
+[material.glass_fused_silica.krbr]
+category = "glass"
+sellmeier_b = [0.6961663, 0.4079426, 0.8974794]
+sellmeier_c = [0.0046791482, 0.0135120631, 97.9340025]
+
+[material.glass_soda_lime]     # ソーダ石灰ガラス（窓ガラス・ガラス管。nd 1.523、アッベ数 64：Rubin 1985）
+base_color = [1.0, 1.0, 1.0]
+specular_roughness = 0.0
+specular_ior = 1.523
+transmission_weight = 1.0
+transmission_dispersion_scale = 1.0
+transmission_dispersion_abbe_number = 64.0
+[material.glass_soda_lime.krbr]
+category = "glass"
+
+[material.glass_sapphire]      # サファイア（常光線：Malitson & Dodge 1972）
+base_color = [1.0, 1.0, 1.0]
+specular_roughness = 0.0
+specular_ior = 1.768
+transmission_weight = 1.0
+[material.glass_sapphire.krbr]
+category = "glass"
+sellmeier_b = [1.4313493, 0.65054713, 5.3414021]
+sellmeier_c = [0.0052799261, 0.0142382647, 325.0178]
+
+[material.pet_clear]           # 透明な PET（ボトル・フィルム。nd 1.569、アッベ数 28：Zhang et al. 2020 の表から）
+base_color = [1.0, 1.0, 1.0]
+specular_roughness = 0.0
+specular_ior = 1.569
+transmission_weight = 1.0
+transmission_dispersion_scale = 1.0
+transmission_dispersion_abbe_number = 28.0
+[material.pet_clear.krbr]
+category = "glass"
+
+# すりガラス：表面を荒らした透明な材質（屈折して通るが、像はぼける）
+[material.glass_frosted]       # すりガラス（ソーダ石灰ガラス：Rubin 1985）
+base_color = [1.0, 1.0, 1.0]
+specular_roughness = 0.35
+specular_ior = 1.523
+transmission_weight = 1.0
+transmission_dispersion_scale = 1.0
+transmission_dispersion_abbe_number = 64.0
+[material.glass_frosted.krbr]
+category = "glass"
+
+[material.acrylic_frosted]     # すりガラス調のアクリル（PMMA：Sultanova et al. 2009）
+base_color = [1.0, 1.0, 1.0]
+specular_roughness = 0.3
+specular_ior = 1.4906
+transmission_weight = 1.0
+[material.acrylic_frosted.krbr]
+category = "glass"
+sellmeier_b = [1.1819, 0.0, 0.0]
+sellmeier_c = [0.011313, 0.0, 0.0]
+
+# ---------------------------------------------------------------- 宝石
+# 屈折率・分散は測定値（Sellmeier の係数）か宝石学の値。色は代表的な宝石の色を、4 mm 進んだときの透過の色として与えた
+# 目安（吸収スペクトルの測定値ではない）
+
+[material.gem_diamond]         # ダイヤモンド（Peter 1923。nd 2.417、B–G の分散 0.044）
+base_color = [1.0, 1.0, 1.0]
+specular_roughness = 0.0
+specular_ior = 2.4175
+transmission_weight = 1.0
+[material.gem_diamond.krbr]
+category = "gem"
+sellmeier_b = [0.3306, 4.3356, 0.0]
+sellmeier_c = [0.030625, 0.011236, 0.0]
+
+[material.gem_ruby]            # ルビー（コランダム＋クロム。屈折率は常光線：Malitson & Dodge 1972。B–G の分散 0.018）
+base_color = [1.0, 1.0, 1.0]
+specular_roughness = 0.0
+specular_ior = 1.768
+transmission_weight = 1.0
+transmission_color = [0.7454, 0.0056, 0.1144]
+transmission_depth = 4.0
+[material.gem_ruby.krbr]
+category = "gem"
+sellmeier_b = [1.4313493, 0.65054713, 5.3414021]
+sellmeier_c = [0.0052799261, 0.0142382647, 325.0178]
+
+[material.gem_sapphire]        # 青いサファイア（コランダム＋鉄・チタン。屈折率はルビーと同じ）
+base_color = [1.0, 1.0, 1.0]
+specular_roughness = 0.0
+specular_ior = 1.768
+transmission_weight = 1.0
+transmission_color = [0.0048, 0.0844, 0.491]
+transmission_depth = 4.0
+[material.gem_sapphire.krbr]
+category = "gem"
+sellmeier_b = [1.4313493, 0.65054713, 5.3414021]
+sellmeier_c = [0.0052799261, 0.0142382647, 325.0178]
+
+[material.gem_emerald]         # エメラルド（ベリル＋クロム。nd 1.577、B–G の分散 0.014 からアッベ数 70.5：宝石学の値）
+base_color = [1.0, 1.0, 1.0]
+specular_roughness = 0.0
+specular_ior = 1.577
+transmission_weight = 1.0
+transmission_color = [0.0802, 0.5776, 0.1878]
+transmission_depth = 4.0
+transmission_dispersion_scale = 1.0
+transmission_dispersion_abbe_number = 70.5
+[material.gem_emerald.krbr]
+category = "gem"
+
+[material.gem_cubic_zirconia]  # キュービックジルコニア（イットリア安定化：Wood & Nassau 1982。nd 2.159、B–G の分散 0.060）
+base_color = [1.0, 1.0, 1.0]
+specular_roughness = 0.0
+specular_ior = 2.1588
+transmission_weight = 1.0
+[material.gem_cubic_zirconia.krbr]
+category = "gem"
+sellmeier_b = [1.347091, 2.117788, 9.452943]
+sellmeier_c = [0.0039116268, 0.0278018941, 591.4901251]

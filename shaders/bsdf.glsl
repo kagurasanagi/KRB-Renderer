@@ -1,4 +1,6 @@
-// OpenPBR Surface の簡易版：コート（誘電体 GGX）＋ベース（金属 GGX / 誘電体 GGX ＋ 拡散 / 誘電体の透過）
+// OpenPBR Surface の簡易版：コート（誘電体 GGX）＋ベース（金属 GGX / 誘電体 GGX ＋ 拡散 / 誘電体の透過）。
+// 金属のフレネルは OpenPBR の F82-tint（base_color が F0、specular_color が 82° での色味）。測定値の金属は、分光モードでは
+// 波長ごとの n, k から厳密に求める（RGB モードの F0 と F82-tint は、同じ表から CPU で求めてある）
 // 局所座標系（法線 = +Z、v は必ず +Z 側）で評価する。eval / pdf / sample は同じ確率分布を使い、MIS に使える。
 // 色は vec4：分光モードでは 4 波長の値、RGB モードでは xyz に RGB（w は使わない）
 #ifndef KRBR_BSDF_GLSL
@@ -30,7 +32,19 @@ struct Shade {
     vec3 baseRgb;
     vec3 coatRgb;
     vec3 transRgb;
+    // 測定値の金属（分光モードだけ）：conductor > 0.5 なら、4 波長の複素屈折率 condEta + i condK でフレネルを求める
+    float conductor;
+    vec4 condEta;
+    vec4 condK;
 };
+
+// 測定値の金属の表 c（0 から）の、波長 λ（nm）での (n, k)。表の間は線形補間
+vec2 conductorNkAt(int c, float lambda) {
+    float x = clamp((lambda - KRBR_CONDUCTOR_LAMBDA_MIN) / KRBR_CONDUCTOR_LAMBDA_STEP, 0.0, float(KRBR_CONDUCTOR_SAMPLES - 1));
+    int i = min(int(x), KRBR_CONDUCTOR_SAMPLES - 2);
+    int base = c * KRBR_CONDUCTOR_SAMPLES;
+    return mix(conductorNk[base + i], conductorNk[base + i + 1], x - float(i));
+}
 
 Shade shadeFromMaterial(Material m) {
     Shade s;
@@ -58,6 +72,18 @@ Shade shadeFromMaterial(Material m) {
     s.baseRgb = m.baseColor.rgb;
     s.coatRgb = m.coatColor.rgb;
     s.transRgb = m.transmission2.rgb;
+    s.conductor = 0.0;
+    s.condEta = vec4(1.0);
+    s.condK = vec4(0.0);
+    if (spectralMode() && m.specBase.w > 0.5) {
+        int c = int(m.specBase.w + 0.5) - 1;
+        for (int i = 0; i < 4; ++i) {
+            vec2 nk = conductorNkAt(c, gLambda[i]);
+            s.condEta[i] = nk.x;
+            s.condK[i] = nk.y;
+        }
+        s.conductor = 1.0;
+    }
     return s;
 }
 
@@ -87,6 +113,36 @@ vec4 fresnelSchlick(vec4 f0, float c) {
     float m = clamp(1.0 - c, 0.0, 1.0);
     float m2 = m * m;
     return f0 + (vec4(1.0) - f0) * (m2 * m2 * m);
+}
+
+// OpenPBR の金属のフレネル（F82-tint、Hoffman 2019）：Schlick から、82°（μ̄ = 1/7）で F0 からの Schlick の値の tint 倍になる
+// ように μ(1−μ)⁶ の項を引く。tint = 1 なら Schlick と同じ
+vec4 fresnelF82(vec4 f0, vec4 tint, float c) {
+    const float MU = 1.0 / 7.0;
+    const float K = MU * 0.39656946;  // μ̄ (1 − μ̄)⁶
+    float mu = clamp(c, 0.0, 1.0);
+    float m = 1.0 - mu;
+    float m3 = m * m * m;
+    vec4 b = fresnelSchlick(f0, MU) * (vec4(1.0) - tint) / K;
+    return clamp(fresnelSchlick(f0, mu) - mu * m3 * m3 * b, 0.0, 1.0);
+}
+
+// 空気から金属（複素屈折率 eta + i k）へ入る、偏光していない光の反射率（厳密な式。4 波長それぞれ）
+vec4 fresnelConductor(float cosi, vec4 eta, vec4 k) {
+    float c = clamp(cosi, 0.0, 1.0);
+    float c2 = c * c, s2 = 1.0 - c2;
+    // |cosθt|² などを実数で書いた形（a² + b² = |η² − sin²θ|、a² − b² = η² の実部 − sin²θ）
+    vec4 e2 = eta * eta, k2 = k * k;
+    vec4 t0 = e2 - k2 - s2;
+    vec4 a2b2 = sqrt(max(t0 * t0 + 4.0 * e2 * k2, vec4(0.0)));
+    vec4 a = sqrt(max(0.5 * (a2b2 + t0), vec4(0.0)));
+    vec4 t1 = a2b2 + c2;
+    vec4 t2 = 2.0 * c * a;
+    vec4 rs = (t1 - t2) / (t1 + t2);
+    vec4 t3 = c2 * a2b2 + s2 * s2;
+    vec4 t4 = t2 * s2;
+    vec4 rp = rs * (t3 - t4) / (t3 + t4);
+    return 0.5 * (rp + rs);
 }
 
 // 粗さ 0 でも、ごく狭い GGX として扱う（α = 1e-4 で 0.006° ほどの広がり）
@@ -204,7 +260,7 @@ vec4 bsdfEval(Shade s, vec3 v, vec3 l) {
     // ベースの鏡面（誘電体と金属で分布は共通、フレネルだけ異なる）
     float spec = ggxD(h, a2) * ggxG2(v.z, l.z, a2) / (4.0 * v.z * l.z);
     vec4 fDiel = vec4(s.specWeight * fresnelDielectric(VoH, s.ior)) * s.specColor;
-    vec4 fMetal = fresnelSchlick(s.baseColor, VoH) * s.specWeight;
+    vec4 fMetal = (s.conductor > 0.5 ? fresnelConductor(VoH, s.condEta, s.condK) : fresnelF82(s.baseColor, s.specColor, VoH)) * s.specWeight * s.baseWeight;
     vec4 base = mix(fDiel, fMetal, s.metalness) * spec;
 
     // 拡散（誘電体の、透過しない部分）

@@ -5,6 +5,8 @@ pub mod i18n;
 pub mod kicad_cli;
 pub mod kicad_plugin;
 pub mod material_cmd;
+pub mod material_editor;
+pub mod preview;
 pub mod prepare;
 pub mod remember;
 pub mod selection;

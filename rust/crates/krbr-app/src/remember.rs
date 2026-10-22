@@ -230,6 +230,8 @@ pub struct ViewSettings<'a> {
     pub bump_intensity: f32,
     /// レジストの色：プリセットの名前、r,g,b、または空（stackup の色・既定）
     pub mask: String,
+    /// 基材の材質の名前（空なら FR4）
+    pub substrate: String,
     pub fov_deg: f64,
     /// 視点の仰角・方位（注視点と距離は camera_of / set_camera で別に扱う）
     pub elevation_deg: f64,
@@ -252,6 +254,7 @@ impl<'a> ViewSettings<'a> {
             spectral: cfg.spectral,
             bump_intensity: cfg.scene.bump_intensity,
             mask: mask_spec(&cfg.scene),
+            substrate: cfg.scene.substrate.clone(),
             fov_deg: cfg.fov_deg,
             elevation_deg: cfg.elevation_deg,
             azimuth_deg: cfg.azimuth_deg,
@@ -294,6 +297,7 @@ impl<'a> ViewSettings<'a> {
         t.insert("integrator".into(), Value::String(self.integrator.as_str().into()));
         t.insert("spectral".into(), Value::Boolean(self.spectral));
         t.insert("mask".into(), Value::String(self.mask.clone()));
+        t.insert("substrate".into(), Value::String(self.substrate.clone()));
         t.insert("lens_model".into(), Value::String(l.model.as_str().into()));
         t.insert("lens_blades".into(), Value::Integer(l.blades as i64));
         t.insert("lens_natural_vignetting".into(), Value::Boolean(l.natural_vignetting));
@@ -369,6 +373,9 @@ pub fn apply_view_values(cfg: &mut ProjectConfig, v: &ViewValues) {
     }
     if let Some(b) = v.get("spectral").and_then(|x| x.as_bool()) {
         cfg.spectral = b;
+    }
+    if let Some(s) = v.get("substrate").and_then(|x| x.as_str()) {
+        cfg.scene.substrate = s.to_string();
     }
     if let Some(m) = v.get("mask").and_then(|x| x.as_str()).filter(|m| !m.is_empty()) {
         if let Err(e) = apply_mask_color_spec(&mut cfg.scene, m) {
@@ -526,6 +533,34 @@ fn remember_ui_language_in(t: &mut Table, lang: Option<&str>) {
     }
 }
 
+fn last_board_in(t: &Table) -> Option<PathBuf> {
+    t.get("ui")?.get("last_board")?.as_str().filter(|s| !s.is_empty()).map(PathBuf::from)
+}
+
+fn remember_last_board_in(t: &mut Table, pcb: &Path) {
+    let ui = t.entry("ui").or_insert_with(|| Value::Table(Table::new()));
+    if let Some(ui) = ui.as_table_mut() {
+        ui.insert("last_board".into(), Value::String(pcb.to_string_lossy().into_owned()));
+    }
+}
+
+/// 最後にビューアで開いた基板（state.toml の [ui] last_board）。引数なしで起動したときに開く
+pub fn last_board() -> Option<PathBuf> {
+    last_board_in(&load(&state_file()))
+}
+
+/// ビューアで開いた基板を覚える（絶対パス）
+pub fn remember_last_board(pcb: &Path) {
+    let pcb = std::path::absolute(pcb).unwrap_or_else(|_| pcb.to_path_buf());
+    let file = state_file();
+    let mut t = load(&file);
+    if last_board_in(&t).as_deref() == Some(pcb.as_path()) {
+        return;
+    }
+    remember_last_board_in(&mut t, &pcb);
+    save(&file, &t);
+}
+
 /// ビューアのメニューで選んだ表示の言語（state.toml の [ui] language）。None なら自動（KiCad、OS の順）
 pub fn ui_language() -> Option<String> {
     ui_language_in(&load(&state_file()))
@@ -542,6 +577,16 @@ pub fn remember_ui_language(lang: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn last_board_round_trip() {
+        let mut t = Table::new();
+        assert_eq!(last_board_in(&t), None);
+        remember_ui_language_in(&mut t, Some("ja"));
+        remember_last_board_in(&mut t, Path::new("C:/pcb/a.kicad_pcb"));
+        assert_eq!(last_board_in(&t), Some(PathBuf::from("C:/pcb/a.kicad_pcb")));
+        assert_eq!(ui_language_in(&t).as_deref(), Some("ja")); // 同じ [ui] の言語は残る
+    }
 
     #[test]
     fn ui_language_round_trip() {

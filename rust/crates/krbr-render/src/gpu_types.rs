@@ -6,7 +6,7 @@ use glam::{UVec4, Vec3, Vec4};
 use krbr_scene::material::{Material, MaterialKind};
 use krbr_scene::spectrum::Rgb2SpecTable;
 
-use crate::shader_consts::{LUMINANCE_WEIGHTS, MAX_LENS_SURFACES};
+use crate::shader_consts::{CONDUCTOR_LAMBDA_MIN, CONDUCTOR_LAMBDA_STEP, CONDUCTOR_SAMPLES, LUMINANCE_WEIGHTS, MAX_LENS_SURFACES};
 use crate::vk::GpuPod;
 
 #[repr(C)]
@@ -119,9 +119,11 @@ pub fn to_gpu(m: &Material, spec: Option<&Rgb2SpecTable>) -> GpuMaterial {
         params3: Vec4::new(m.subsurface_weight, a, b, if dispersive { 1.0 } else { 0.0 }),
         ..Default::default()
     };
+    // 測定値の金属：表の番号 + 1（0 なら無し）。分光モードのシェーダが波長ごとの n, k を引く
+    g.spec_base.w = m.conductor.map(|i| i as f32 + 1.0).unwrap_or(0.0);
     if let Some(t) = spec {
         let coef = |c: Vec3| t.lookup(c).extend(0.0);
-        g.spec_base = coef(m.base_color);
+        g.spec_base = coef(m.base_color).truncate().extend(g.spec_base.w);
         g.spec_specular = coef(m.specular_color);
         g.spec_coat = coef(m.coat_color);
         g.spec_trans = coef(m.transmission_color);
@@ -174,6 +176,9 @@ const _: () = assert!(std::mem::size_of::<GpuEmitter>() == 48);
 const _: () = assert!(std::mem::size_of::<GpuLightVertex>() == 96);
 const _: () = assert!(std::mem::size_of::<FrameUbo>() == (22 + MAX_LENS_SURFACES) * 16);
 const _: () = assert!(std::mem::size_of::<PushConstants>() == 8);
+// 金属の表の波長の格子は krbr-scene の表と同じ
+const _: () = assert!(CONDUCTOR_SAMPLES as usize == krbr_scene::conductor::SAMPLES);
+const _: () = assert!(CONDUCTOR_LAMBDA_MIN as f32 == krbr_scene::conductor::LAMBDA_MIN && CONDUCTOR_LAMBDA_STEP as f32 == krbr_scene::conductor::LAMBDA_STEP);
 
 // 安全性：どれも repr(C) で、上の assert により隙間が無い（パディングはフィールドとして明示してある）
 unsafe impl GpuPod for GpuVertex {}

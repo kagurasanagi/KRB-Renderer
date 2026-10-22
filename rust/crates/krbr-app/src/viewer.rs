@@ -18,8 +18,8 @@ use krbr_render::vk::{image_barrier, memory_barrier, Buffer};
 use krbr_render::studio_env::STUDIO;
 use krbr_render::{build_env_distribution, describe_environment, is_builtin, load_environment_map, Context, ContextOptions, DenoiseQuality, Denoiser, EnvDistribution, EnvironmentName, GpuScene, Progressive};
 use krbr_scene::config::apply_mask_color_spec;
-use krbr_scene::scene::{load_material_setup, raycast, raycast_pick, update_mask_material, MaterialAssignment};
-use krbr_scene::{mask_presets, orbit_camera, Camera, InstanceOwner, IntegratorKind, LensModel, MaterialStage, Scene, SceneOptions};
+use krbr_scene::scene::{load_material_setup, raycast, raycast_pick, update_mask_material, update_substrate_material, MaterialAssignment};
+use krbr_scene::{mask_presets, orbit_camera, Camera, InstanceOwner, IntegratorKind, LensModel, MaterialLibrary, MaterialStage, Scene, SceneOptions};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -33,10 +33,11 @@ use crate::kicad_cli::SilkJob;
 use crate::material_cmd::{clear_material, set_material, MaterialSetOptions};
 use crate::selection::{unproject, Outline, Selected};
 use krbr_scene::board_file;
-use krbr_scene::material_library::{parse_variant, split_variant, with_emission, with_smooth, Emission};
+use krbr_scene::material_library::{save_user_material, split_variant, with_emission, with_smooth, Emission, Variant};
+use crate::material_editor::{self, Action as EditorAction, MaterialEditor, PartInfo, PartRow};
 use crate::prepare::{ReloadStats, SceneSource};
 use crate::remember;
-use crate::prepare::{frame_params, framed_camera, initial_camera, prepare_scene, progressive_or_pt, trace_method_name, PreparedScene, RenderOptions, ENV_DIST_RESOLUTION};
+use crate::prepare::{frame_params, framed_camera, initial_camera, prepare_empty, prepare_scene, progressive_or_pt, trace_method_name, PreparedScene, RenderOptions, ENV_DIST_RESOLUTION};
 use crate::swapchain::Swapchain;
 
 #[derive(Debug, Clone, Default)]
@@ -79,6 +80,12 @@ pub struct TestOptions {
     pub save_as: Option<PathBuf>,
     /// テスト中に、メニューの「設定をすべて既定に戻す」を押したことにする
     pub reset_settings: bool,
+    /// テストの初めから材質エディタを開いておく
+    pub material_editor: bool,
+    /// テスト中にこの部品番号の部品を選ぶ（クリックの代わり。pick より後）
+    pub select: String,
+    /// テスト中に「ファイル → 開く...」でこの基板を選んだことにする
+    pub open: Option<PathBuf>,
 }
 
 /// テストのパネルの操作（レジストの色・すべて既定に戻す）をするフレーム（0 から数える）。
@@ -93,6 +100,9 @@ const TEST_SAVE_AS_BEFORE_END: u32 = 2;
 #[derive(Default)]
 struct TestHooks {
     o: TestOptions,
+    open_done: bool,
+    /// --test-open の基板に切り替えたフレーム（その後も何フレームか描いてから終える）
+    opened_at: Option<u32>,
     reload_started: bool,
     pick_done: bool,
 }
@@ -115,10 +125,22 @@ impl TestHooks {
                 st.changed.mask = true;
             }
             st.req.reset_all |= self.o.reset_settings;
+            st.req.material_editor |= self.o.material_editor;
+        }
+        if let Some(p) = self.o.open.clone().filter(|_| !self.open_done && frame >= TEST_SCENE_FRAME) {
+            self.open_done = true;
+            st.req.open_path = Some(p);
         }
         if self.o.reload && !self.reload_started && frame >= TEST_SCENE_FRAME {
             self.reload_started = true;
             st.req.reload = true;
+        }
+        if !self.o.select.is_empty() && !self.pick_done && frame >= TEST_SCENE_FRAME {
+            self.pick_done = true;
+            st.req.select_reference = Some(self.o.select.clone());
+            if !self.o.assign.is_empty() {
+                st.req.assign_all = Some(self.o.assign.clone());
+            }
         }
         if let Some((x, y)) = self.o.pick.filter(|_| !self.pick_done && frame >= TEST_SCENE_FRAME) {
             self.pick_done = true;
@@ -135,7 +157,8 @@ impl TestHooks {
 
     /// このフレーム（frame 番目）で終えてよいか：決めたフレーム数に達し、裏の処理（busy）が無く、頼んだ読み直し・クリックが済んだ
     fn finished(&self, frame: u32, busy: bool, saved_reloads: u32) -> bool {
-        self.active() && frame + 1 >= self.o.frames && !busy && (!self.o.reload || saved_reloads > 0) && (self.o.pick.is_none() || self.pick_done)
+        self.active() && frame + 1 >= self.o.frames && !busy && (!self.o.reload || saved_reloads > 0) && ((self.o.pick.is_none() && self.o.select.is_empty()) || self.pick_done)
+            && (self.o.open.is_none() || self.opened_at.is_some_and(|f| frame >= f + 10))
     }
 
     fn screenshot(&self) -> Option<&PathBuf> {
@@ -315,6 +338,14 @@ struct Requests {
     reload: bool,
     /// 選んだ部品の全部位にこの材質を割り当てる（テスト）
     assign_all: Option<String>,
+    /// 材質エディタを開く（テスト）
+    material_editor: bool,
+    /// 「ファイル → 開く...」
+    open_board: bool,
+    /// この基板を開く（テスト。ダイアログの代わり）
+    open_path: Option<PathBuf>,
+    /// この部品番号の部品を選ぶ（テスト）
+    select_reference: Option<String>,
 }
 
 /// 変わったもの（GPU へ送るまで立てておく）
@@ -427,6 +458,15 @@ impl ViewerSettings {
 }
 
 /// 設定のレジストの色に当たるプリセット（無ければ None ＝「設定どおり」）
+/// 材質を書き込む先（この部品・このモデル・全基板）を選ぶ。設定パネルと材質エディタで同じものを出す
+fn scope_radios(ui: &mut egui::Ui, scope: &mut AssignScope) {
+    ui.horizontal(|ui| {
+        ui.radio_value(scope, AssignScope::Part, fl!("scope-part")).on_hover_text(fl!("scope-part-tip"));
+        ui.radio_value(scope, AssignScope::ModelProject, fl!("scope-model")).on_hover_text(fl!("scope-model-tip"));
+        ui.radio_value(scope, AssignScope::ModelGlobal, fl!("scope-all-boards")).on_hover_text(fl!("scope-all-boards-tip"));
+    });
+}
+
 fn mask_choice_of(s: &SceneOptions) -> Option<usize> {
     if s.mask_preset.is_empty() {
         None
@@ -460,6 +500,8 @@ enum KeyAction {
     /// 環境マップを回す（度）
     RotateEnvironment(f32),
     Mode(DisplayMode),
+    MaterialEditor,
+    OpenBoard,
 }
 
 /// キーの割り当ての 1 行（ヘルプの 1 行）
@@ -506,6 +548,8 @@ const KEY_BINDINGS: &[KeyBinding] = &[
         help: "key-display-mode",
         log: "image/albedo/normal",
     },
+    KeyBinding { label: "M", keys: &[(KeyCode::KeyM, KeyAction::MaterialEditor)], help: "key-material-editor", log: "material editor" },
+    KeyBinding { label: "O", keys: &[(KeyCode::KeyO, KeyAction::OpenBoard)], help: "key-open-board", log: "open a board" },
     KeyBinding { label: "Esc", keys: &[(KeyCode::Escape, KeyAction::Quit)], help: "key-quit", log: "quit" },
 ];
 
@@ -669,6 +713,9 @@ struct App {
     save_dialog: Option<(SaveFormat, mpsc::Receiver<Option<PathBuf>>)>,
     save_as_target: Option<(SaveFormat, PathBuf)>,
     env_job: Option<EnvJob>,
+    /// 「ファイル → 開く...」：基板を選ぶダイアログ（別スレッド）と、選んだ基板の読み込み（別スレッド）
+    board_dialog: Option<mpsc::Receiver<Option<PathBuf>>>,
+    board_job: Option<(PathBuf, mpsc::Receiver<Option<PreparedScene>>)>,
     env_error: String,
     /// 保存の監視（--no-watch なら None）
     watcher: Option<FileWatcher>,
@@ -688,8 +735,16 @@ struct App {
     materials_dirty_files: bool,
     /// 選んだ部品の材質を書き込む先
     assign_scope: AssignScope,
-    material_names: Vec<String>,
+    /// 材質ライブラリの写し（パネルと材質エディタの一覧。自分の材質を書いたらここも直す）
+    library: MaterialLibrary,
     material_error: String,
+    /// 材質エディタ（別の窓）と、そこからの頼みごと（次のフレームの初めに反映する）
+    editor: MaterialEditor,
+    editor_actions: Vec<EditorAction>,
+    /// シーンを組み直した・材質を差し替えた回数（材質エディタの部品のプレビューを作り直す目安）
+    scene_epoch: u64,
+    /// 選んだ部品の輪郭線を重ねるか
+    show_outline: bool,
     /// 発光の色・明るさの編集中の値（ドラッグ中に毎回書き込まないよう、止まってから書く）
     emit_edit: Option<EmitEdit>,
     /// ノイズ除去：作ってみたか（失敗したら作り直さない）、累積をやり直した回数、どの累積をいくつのサンプルで除去したか
@@ -996,7 +1051,7 @@ impl App {
             self.view_seen = cur;
             self.view_changed_at = Instant::now();
         }
-        if self.view_seen != self.view_saved && (now || self.view_changed_at.elapsed() >= Duration::from_secs(1)) {
+        if self.has_board() && self.view_seen != self.view_saved && (now || self.view_changed_at.elapsed() >= Duration::from_secs(1)) {
             remember::remember_view(&self.prep.board.file, &self.view_seen, &self.prep.config_view);
             self.view_saved = self.view_seen.clone();
         }
@@ -1004,7 +1059,9 @@ impl App {
 
     /// パネルの設定をすべて既定（設定ファイルとコマンドライン）に戻し、この基板について覚えたものを忘れる
     fn reset_all_settings(&mut self) {
-        remember::forget_board(&self.prep.board.file);
+        if self.has_board() {
+            remember::forget_board(&self.prep.board.file);
+        }
         let c = self.prep.configured.clone();
         let st = &mut self.st;
         st.exposure = c.exposure_ev;
@@ -1027,6 +1084,10 @@ impl App {
         }
         self.prep.cfg.lens = c.lens.clone();
         self.apply_mask_choice();
+        if self.prep.cfg.scene.substrate != c.scene.substrate {
+            self.prep.cfg.scene.substrate = c.scene.substrate.clone();
+            update_substrate_material(&mut self.prep.scene, &self.prep.cfg.scene, &self.library);
+        }
         // 視点（自動の構図）は描画サイズの縦横比で決まるので、戻したサイズで表示の矩形を決め直した後
         // （apply_view_requests）に合わせる。覚える値の基準もそこで取り直す
         self.st.req.reset_view = true;
@@ -1359,6 +1420,41 @@ impl App {
             });
             ui.weak(fl!("mask-hint"));
         }
+        {
+            // 基材：FR4 か、材質ライブラリの透明な材質・セラミック・宝石
+            let current = self.prep.cfg.scene.substrate.clone();
+            let label = if current.is_empty() { fl!("substrate-fr4") } else { material_editor::material_label(&current) };
+            let mut chosen: Option<String> = None;
+            ui.horizontal(|ui| {
+                ui.label(fl!("substrate"));
+                egui::ComboBox::from_id_salt("substrate").width(180.0).selected_text(label).height(480.0).show_ui(ui, |ui| {
+                    if ui.selectable_label(current.is_empty(), fl!("substrate-fr4")).clicked() {
+                        chosen = Some(String::new());
+                    }
+                    for (cat, names) in material_editor::grouped_names(&self.library) {
+                        if !matches!(cat, krbr_scene::Category::Glass | krbr_scene::Category::Gem | krbr_scene::Category::Ceramic) {
+                            continue;
+                        }
+                        ui.weak(material_editor::category_label(cat));
+                        for n in names {
+                            if ui.selectable_label(n == current, material_editor::material_label(&n)).on_hover_text(n.as_str()).clicked() {
+                                chosen = Some(n.clone());
+                            }
+                        }
+                    }
+                });
+            });
+            if let Some(n) = chosen.filter(|n| *n != current) {
+                self.prep.cfg.scene.substrate = n;
+                update_substrate_material(&mut self.prep.scene, &self.prep.cfg.scene, &self.library);
+                st.changed.materials = true;
+                self.scene_epoch += 1;
+            }
+            let clear = self.library.find(&self.prep.cfg.scene.substrate).is_some_and(|m| m.transmission_weight > 0.0);
+            if clear && self.prep.cfg.scene.mask_preset != "clear" {
+                ui.weak(fl!("substrate-clear-hint"));
+            }
+        }
 
         ui.separator();
         ui.strong(fl!("panel-display"));
@@ -1513,7 +1609,7 @@ impl App {
     /// 選んだ部品の輪郭線を 3D 表示の上に重ねる（画像には入らない）。実レンズは投影が違うので描かない
     fn draw_outline(&self, root: &mut egui::Ui, central: egui::Rect) {
         let Some(o) = &self.outline else { return };
-        if self.prep.cfg.lens.model == LensModel::Realistic || !central.is_positive() {
+        if !self.show_outline || self.prep.cfg.lens.model == LensModel::Realistic || !central.is_positive() {
             return;
         }
         let vp = self.st.display;
@@ -1567,6 +1663,118 @@ impl App {
         }
     }
 
+    /// 選んだ部品の、材質エディタに見せるもの（部品のインスタンスすべてと、選んだ 3D モデルの部位）
+    fn part_info(&self) -> Option<PartInfo> {
+        let sel = self.selected.as_ref()?;
+        let scene = &self.prep.scene;
+        let fp = self.prep.board.footprints.iter().position(|f| f.reference == sel.reference)? as u32;
+        let instances: Vec<usize> = scene
+            .instances
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| match i.owner {
+                InstanceOwner::Model { footprint, .. } | InstanceOwner::Placeholder { footprint } => footprint == fp,
+                InstanceOwner::Board => false,
+            })
+            .map(|(k, _)| k)
+            .collect();
+        let mut rows = Vec::new();
+        if let Some(i) = sel.find_instance(scene, &self.prep.board) {
+            let inst = &scene.instances[i];
+            if let InstanceOwner::Model { assignments, .. } = inst.owner {
+                let a = &scene.assignments;
+                let start = assignments as usize;
+                if let Some(first) = a.get(start) {
+                    for (k, r) in a[start..].iter().take_while(|r| r.reference == sel.reference && r.model_spec == first.model_spec).enumerate() {
+                        rows.push(PartRow { key: r.part_keys.split(' ').next().unwrap_or("").to_string(), material: r.material.clone(), scene_material: inst.material_base + k as u32 });
+                    }
+                }
+            }
+        }
+        Some(PartInfo { reference: sel.reference.clone(), model: sel.model, instances, rows })
+    }
+
+    /// 材質エディタの頼みごと（割り当て、自分の材質の保存・削除）
+    fn apply_editor_actions(&mut self) {
+        for a in std::mem::take(&mut self.editor_actions) {
+            match a {
+                EditorAction::Assign { part, material } => {
+                    // 設定パネルで発光を編集中なら先に書く（同じ部位の書き込みが前後しないように）
+                    self.flush_emit_edit(true);
+                    self.emit_edit = None;
+                    self.assign_material(&part, &material, false);
+                }
+                EditorAction::SaveUser { name, material } => self.save_user_material(&name, Some(*material)),
+                EditorAction::DeleteUser(name) => self.save_user_material(&name, None),
+            }
+        }
+    }
+
+    /// 自分の材質を全体設定の materials/user.toml に書き（None なら消し）、材質ライブラリとシーンにも反映する
+    fn save_user_material(&mut self, name: &str, m: Option<krbr_scene::Material>) {
+        let dir = krbr_core::platform::config_dir();
+        let file = match save_user_material(&dir, name, m.as_ref()) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("material {name}: {e}");
+                self.last_update = fl!("mated-save-failed", error = e);
+                return;
+            }
+        };
+        let source = file.to_string_lossy().into_owned();
+        match &m {
+            Some(m) => {
+                self.library.insert(name, m.clone(), &source);
+                info!("material {name}: saved to {source}");
+                self.last_update = fl!("mated-saved", name = name, file = source.as_str());
+            }
+            None => {
+                self.library.remove(name);
+                info!("material {name}: removed from {source}");
+                self.last_update = fl!("mated-deleted", name = name);
+            }
+        }
+        // 組み立ての状態のライブラリも直す（読み直し中なら、終わってからファイルを読み直す）
+        match self.prep.source.as_mut() {
+            Some(src) => match &m {
+                Some(m) => src.materials.library.insert(name, m.clone(), &source),
+                None => src.materials.library.remove(name),
+            },
+            None => self.materials_dirty_files = true,
+        }
+        if m.is_none() || !self.patch_scene_materials(name) {
+            self.materials_dirty_files = true; // 部位の材質を決め直す（消した材質・モデルの色の使い方を変えた材質）
+        }
+    }
+
+    /// シーンの中の、自分の材質 name を使う材質を、ライブラリの新しい値に差し替える（形状は組み直さない）。
+    /// 組み直しが要る変更（3D モデルの色を使うかどうか、発光）なら false
+    fn patch_scene_materials(&mut self, name: &str) -> bool {
+        let mut changed = false;
+        for m in &mut self.prep.scene.materials {
+            // モデルの材質の名前は "<モデルのファイル>:<割り当てた材質名>"
+            let Some((_, assigned)) = m.name.split_once(':') else { continue };
+            if Variant::parse(assigned).0 != name {
+                continue;
+            }
+            let Some(mut n) = self.library.find_variant(assigned) else { return false };
+            if n.base_color_from_model != m.base_color_from_model || n.emission_luminance != m.emission_luminance || n.emission_color != m.emission_color {
+                return false;
+            }
+            if n.base_color_from_model {
+                n.base_color = m.base_color; // 3D モデルの面の色
+            }
+            n.name = m.name.clone();
+            *m = n;
+            changed = true;
+        }
+        if changed {
+            self.st.changed.materials = true;
+            self.scene_epoch += 1;
+        }
+        true
+    }
+
     /// 発光の色・明るさの編集が止まっていれば（now なら待たずに）書き込む。
     /// 書き込んだ後は、組み直しが終わるまで表示に編集中の値を使い、終わったら捨てる
     fn flush_emit_edit(&mut self, now: bool) {
@@ -1601,7 +1809,11 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(&sel.reference).strong().color(egui::Color32::from_rgb(255, 170, 40)));
             deselect = ui.small_button(fl!("sel-deselect")).clicked();
+            ui.checkbox(&mut self.show_outline, fl!("sel-outline")).on_hover_text(fl!("sel-outline-tip"));
         });
+        if ui.button(fl!("sel-open-editor")).on_hover_text(fl!("sel-open-editor-tip")).clicked() {
+            self.editor.open = true;
+        }
         if deselect {
             self.flush_emit_edit(true);
             self.emit_edit = None;
@@ -1647,11 +1859,7 @@ impl App {
                 _ => None,
             })
             .unwrap_or_default();
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut self.assign_scope, AssignScope::Part, fl!("scope-part")).on_hover_text(fl!("scope-part-tip"));
-            ui.radio_value(&mut self.assign_scope, AssignScope::ModelProject, fl!("scope-model")).on_hover_text(fl!("scope-model-tip"));
-            ui.radio_value(&mut self.assign_scope, AssignScope::ModelGlobal, fl!("scope-all-boards")).on_hover_text(fl!("scope-all-boards-tip"));
-        });
+        scope_radios(ui, &mut self.assign_scope);
         // 書き込む先より優先される上書きがあると、書いても見た目は変わらない
         let decided_by = |stage: MaterialStage| rows.iter().any(|r| r.stage() == Some(stage));
         let shadowed_by_ref = self.assign_scope != AssignScope::Part && decided_by(MaterialStage::ProjectRef);
@@ -1663,13 +1871,16 @@ impl App {
         }
         // 書き込むもの：(部位（空なら全部位）, 材質, 上書きを消すか)
         let mut actions: Vec<(String, String, bool)> = Vec::new();
-        let names = self.material_names.clone();
+        let groups = material_editor::grouped_names(&self.library);
         let combo = |ui: &mut egui::Ui, id: String, current: &str, label: String| -> Option<String> {
             let mut chosen = None;
-            egui::ComboBox::from_id_salt(id).width(105.0).selected_text(label).show_ui(ui, |ui| {
-                for n in &names {
-                    if ui.selectable_label(n == current, n).clicked() {
-                        chosen = Some(n.clone());
+            egui::ComboBox::from_id_salt(id).width(105.0).selected_text(label).height(480.0).show_ui(ui, |ui| {
+                for (cat, names) in &groups {
+                    ui.weak(material_editor::category_label(*cat));
+                    for n in names {
+                        if ui.selectable_label(n == current, material_editor::material_label(n)).on_hover_text(n.as_str()).clicked() {
+                            chosen = Some(n.clone());
+                        }
                     }
                 }
             });
@@ -1687,12 +1898,14 @@ impl App {
                     Some((part, m)) if *part == key => m.clone(),
                     _ => r.material.clone(),
                 };
-                let (base, smooth, emission) = parse_variant(&material);
+                let (base, variant) = Variant::parse(&material);
+                let (smooth, emission) = (variant.smooth, variant.emission);
                 // 表示では "kicad:" を省く（カーソルを乗せると全体が出る）
                 let shown = if key.is_empty() { fl!("part-whole") } else { key.strip_prefix("kicad:").unwrap_or(&key).to_string() };
                 ui.label(shown).on_hover_text(fl!("part-source-tip", keys = r.part_keys.as_str(), source = r.source.as_str()));
                 // 材質を選び直しても、模様のあり・なしと発光は保つ
-                if let Some(m) = combo(ui, format!("part{i}"), base, base.to_string()) {
+                if let Some(m) = combo(ui, format!("part{i}"), base, material_editor::material_label(base)) {
+                    // 色・粗さの調整は前の材質に合わせたものなので外す
                     actions.push((key.clone(), with_emission(&with_smooth(&m, smooth), emission), false));
                 }
                 let mut pattern = !smooth;
@@ -1792,6 +2005,7 @@ impl App {
             }
         };
         self.reload_job = None;
+        self.library = d.source.materials.library.clone();
         self.prep.source = Some(d.source);
         if d.saved {
             self.saved_reloads += 1;
@@ -1811,6 +2025,7 @@ impl App {
                 // 読み直しの間に変えたレジストの色も反映する
                 update_mask_material(&mut scene, &self.prep.board, &self.prep.cfg.scene);
                 self.prep.scene = scene;
+                self.scene_epoch += 1;
                 self.refresh_outline();
                 let t0 = Instant::now();
                 let g = self.gpu.as_mut().unwrap();
@@ -1866,6 +2081,134 @@ impl App {
             let _ = tx.send(dlg.pick_file());
         });
         self.open_dialog = Some(rx);
+    }
+
+    /// 基板を開いているか（基板なしで起動して、まだ開いていなければ false）
+    fn has_board(&self) -> bool {
+        !self.prep.board.file.as_os_str().is_empty()
+    }
+
+    /// 「ファイル → 開く...」：基板を選ぶダイアログを別スレッドで開く（その間も描画を続ける）
+    fn start_board_dialog(&mut self) {
+        if self.board_dialog.is_some() || self.board_job.is_some() {
+            return;
+        }
+        let mut dlg = rfd::FileDialog::new().set_title(fl!("dlg-open-board-title")).add_filter(fl!("dlg-board-filter"), &["kicad_pcb"]);
+        let near = if self.has_board() { Some(self.prep.board.file.clone()) } else { remember::last_board() };
+        if let Some(dir) = near.as_deref().and_then(|p| p.parent()).filter(|d| d.is_dir()) {
+            dlg = dlg.set_directory(dir);
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(dlg.pick_file());
+        });
+        self.board_dialog = Some(rx);
+    }
+
+    /// 基板を裏のスレッドで読み込む（読み終えるまで、今の基板を表示し続ける）
+    fn start_board_load(&mut self, pcb: PathBuf) {
+        let pcb = std::path::absolute(&pcb).unwrap_or(pcb);
+        info!("opening {}", pcb.display());
+        // コマンドラインの指定のうち、前の基板のためのもの（環境マップ・注視点・拡大率・保存先）は持ち越さない
+        let o = RenderOptions { pcb: pcb.clone(), hdr: String::new(), look_at: Vec::new(), zoom: None, init: false, out: PathBuf::new(), ..self.vo.common.clone() };
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            krbr_core::platform::lower_thread_priority();
+            let _ = tx.send(prepare_scene(&o));
+        });
+        self.last_update = fl!("board-loading", name = pcb.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default());
+        self.board_job = Some((pcb, rx));
+    }
+
+    /// 基板を選ぶダイアログ・読み込みの結果を見る。読み終えていれば、その基板に切り替える
+    fn poll_board_open(&mut self) -> Result<(), String> {
+        if std::mem::take(&mut self.st.req.open_board) {
+            self.start_board_dialog();
+        }
+        if let Some(p) = self.st.req.open_path.take() {
+            self.start_board_load(p);
+        }
+        if let Some(rx) = &self.board_dialog {
+            match rx.try_recv() {
+                Ok(picked) => {
+                    self.board_dialog = None;
+                    if let Some(p) = picked {
+                        self.start_board_load(p);
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => self.board_dialog = None,
+            }
+        }
+        let Some((pcb, rx)) = &self.board_job else { return Ok(()) };
+        let prep = match rx.try_recv() {
+            Ok(p) => p,
+            Err(mpsc::TryRecvError::Empty) => return Ok(()),
+            Err(mpsc::TryRecvError::Disconnected) => None,
+        };
+        let pcb = pcb.clone();
+        self.board_job = None;
+        match prep {
+            Some(prep) => self.switch_board(prep),
+            None => {
+                warn!("cannot open {}", pcb.display());
+                self.last_update = fl!("board-open-failed", path = pcb.display().to_string());
+                Ok(())
+            }
+        }
+    }
+
+    /// 読み込んだ基板に切り替える：起動し直したのと同じ状態を作り、ウィンドウ・GPU・egui・材質エディタは引き継ぐ
+    fn switch_board(&mut self, prep: PreparedScene) -> Result<(), String> {
+        self.flush_emit_edit(true);
+        self.save_view(true); // 前の基板のパネルの設定を覚える
+        let pcb = prep.board.file.clone();
+        if !self.test.active() {
+            remember::remember_last_board(&pcb);
+        }
+        let stem = pcb.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "board".into());
+        let mut vo = ViewOptions { test: TestOptions::default(), ..self.vo.clone() };
+        vo.common = RenderOptions { pcb: pcb.clone(), hdr: String::new(), look_at: Vec::new(), zoom: None, init: false, out: board_file::base_dir(&pcb).join(format!("{stem}.png")), ..self.vo.common.clone() };
+        let mut fresh = new_app(vo, prep);
+        fresh.window = self.window.take();
+        fresh.egui_ctx = self.egui_ctx.clone();
+        fresh.egui_state = self.egui_state.take();
+        fresh.gpu = self.gpu.take();
+        fresh.editor = std::mem::take(&mut self.editor);
+        fresh.test = std::mem::take(&mut self.test);
+        fresh.win_start = self.win_start.clone();
+        fresh.win_seen = self.win_seen.clone();
+        fresh.win_saved = self.win_saved.clone();
+        fresh.panel_width = self.panel_width;
+        fresh.st.show_panel = self.st.show_panel;
+        fresh.frames = self.frames;
+        let g = fresh.gpu.as_mut().unwrap();
+        g.ctx.wait_idle();
+        g.gpu.rebuild_geometry(&fresh.prep.scene, fresh.st.bump_intensity).map_err(|e| format!("cannot send the board to the GPU: {e}"))?;
+        g.gpu.set_environment(&fresh.prep.env, &fresh.prep.dist).map_err(|e| format!("cannot send the environment map to the GPU: {e}"))?;
+        fresh.prep.env.rgba = Vec::new();
+        let kind = fresh.prep.cfg.integrator;
+        if g.prog.integrator_kind() != kind {
+            if let Err(e) = g.prog.set_integrator(kind) {
+                warn!("integrator {kind}: {e}; using pt instead");
+                fresh.prep.cfg.integrator = IntegratorKind::Pt;
+                g.prog.set_integrator(IntegratorKind::Pt)?;
+            }
+        } else {
+            g.prog.rebuild_integrator()?;
+        }
+        if let Some(w) = &fresh.window {
+            w.set_title(&fresh.base_title);
+        }
+        // 3D 表示の大きさは今のウィンドウのまま。視点はこの基板で覚えたもの（無ければ全体が入る構図）
+        fresh.st.req.start_view = true;
+        fresh.st.req.fit_window = fresh.st.size_mode.is_some();
+        fresh.st.changed.frame = true;
+        fresh.last_update = fl!("board-opened", name = fresh.prep.board.project_name.as_str());
+        fresh.test.opened_at = Some(fresh.frames);
+        info!("opened {}", pcb.display());
+        *self = fresh;
+        Ok(())
     }
 
     /// 基板の設定ファイルの置き場所を変え、この基板のファイルを今すぐ移す（ほかの基板のものは次に開いたときに移る）
@@ -1995,10 +2338,17 @@ impl App {
 
     fn menu_bar(&mut self, root: &mut egui::Ui) {
         let language_choice = self.language_choice.clone();
+        let editor_open = self.editor.open;
+        let mut toggle_editor = false;
         let st = &mut self.st;
         egui::Panel::top("menu").show(root, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button(fl!("menu-file"), |ui| {
+                    if ui.add(egui::Button::new(fl!("menu-open-board")).shortcut_text("O")).on_hover_text(fl!("menu-open-board-tip")).clicked() {
+                        st.req.open_board = true;
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui.add(egui::Button::new(fl!("menu-save-image")).shortcut_text("S")).on_hover_text(fl!("menu-save-image-tip")).clicked() {
                         st.req.save = true;
                         ui.close();
@@ -2039,6 +2389,10 @@ impl App {
                 ui.menu_button(fl!("menu-view"), |ui| {
                     if ui.add(egui::Button::new(fl!("menu-settings-panel")).selected(st.show_panel).shortcut_text("F1 / Tab")).clicked() {
                         st.show_panel = !st.show_panel;
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new(fl!("menu-material-editor")).selected(editor_open).shortcut_text("M")).clicked() {
+                        toggle_editor = true;
                         ui.close();
                     }
                     if ui.add(egui::Button::new(fl!("menu-pause")).selected(st.paused).shortcut_text("P")).clicked() {
@@ -2117,6 +2471,9 @@ impl App {
                 });
             });
         });
+        if toggle_editor {
+            self.editor.open = !self.editor.open;
+        }
     }
 
     /// 右端に上下いっぱいで固定する設定パネル（幅は境目のドラッグで変えられる、× で閉じる）
@@ -2168,7 +2525,7 @@ impl App {
 
     /// 裏の処理（環境マップの読み込み・基板の読み直し・書き換えた材質の反映）が残っているか
     fn busy(&self) -> bool {
-        self.env_job.is_some() || self.reload_job.is_some() || self.materials_dirty_files
+        self.env_job.is_some() || self.reload_job.is_some() || self.materials_dirty_files || self.board_job.is_some() || self.board_dialog.is_some()
     }
 
     /// メニューと操作パネルを描く（egui）。残りの領域が 3D 表示になる
@@ -2185,6 +2542,19 @@ impl App {
             }
             central = root.available_rect_before_wrap();
             self.draw_outline(root, central);
+            if !self.has_board() {
+                let text = match &self.board_job {
+                    Some((p, _)) => fl!("board-loading", name = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()),
+                    None => fl!("no-board-hint"),
+                };
+                let galley = root.painter().layout(text, egui::FontId::proportional(18.0), egui::Color32::from_gray(220), (central.width() - 40.0).max(100.0));
+                let pos = central.center() - galley.size() / 2.0;
+                root.painter().with_clip_rect(central).galley(pos, galley, egui::Color32::from_gray(220));
+            }
+            let info = self.part_info();
+            let scope = &mut self.assign_scope;
+            let actions = self.editor.ui(root.ctx(), &self.library, info.as_ref(), &mut |ui| scope_radios(ui, scope));
+            self.editor_actions.extend(actions);
         });
         self.egui_state.as_mut().unwrap().handle_platform_output(self.window.as_ref().unwrap(), full.platform_output);
         let primitives = egui_ctx.tessellate(full.shapes, full.pixels_per_point);
@@ -2199,12 +2569,17 @@ impl App {
             self.reset_all_settings();
         }
         self.apply_reload()?;
+        self.poll_board_open()?;
         self.poll_silk();
         self.flush_emit_edit(false);
+        self.apply_editor_actions();
         self.start_reload_if_needed();
         self.apply_menu_requests();
         self.poll_environment()?;
         self.apply_scene_changes()?;
+        let ctx = self.gpu.as_ref().unwrap().ctx;
+        let info = self.part_info();
+        self.editor.render(ctx, &self.prep.scene, info.as_ref(), &self.library, self.st.spectral, self.scene_epoch);
         self.update_targets(ui, fbw, fbh)?;
         self.fit_window();
         self.apply_view_requests();
@@ -2230,7 +2605,7 @@ impl App {
         if let Some(loc) = self.st.req.settings_location.take() {
             self.set_settings_location(loc);
         }
-        if std::mem::take(&mut self.st.req.reveal_settings) {
+        if std::mem::take(&mut self.st.req.reveal_settings) && self.has_board() {
             krbr_core::platform::reveal_in_file_manager(&board_file::resolve(&self.prep.board.file));
         }
         if let Some((f, rx)) = &self.save_dialog {
@@ -2284,7 +2659,8 @@ impl App {
         match g.gpu.set_environment(&d.image, &d.dist) {
             Ok(()) => {
                 self.env_path = remember::normalize_hdr(&d.path);
-                if remember_it {
+                // 基板を開いていなければ、覚える先（基板の設定ファイル）が無い
+                if remember_it && !self.prep.board.file.as_os_str().is_empty() {
                     remember::remember_hdr(&self.prep.board.file, &self.env_path, &self.prep.config_hdr);
                 }
                 info!("environment: {} ({}x{})", self.env_path, d.image.width, d.image.height);
@@ -2373,6 +2749,15 @@ impl App {
     fn apply_view_requests(&mut self) {
         if let Some(p) = self.st.req.part_pick.take() {
             self.pick_part(p);
+        }
+        if std::mem::take(&mut self.st.req.material_editor) {
+            self.editor.open = true;
+        }
+        if let Some(r) = self.st.req.select_reference.take() {
+            let model = self.prep.board.footprints.iter().find(|f| f.reference == r).map(|f| if f.models.is_empty() { None } else { Some(0) });
+            self.selected = model.map(|model| Selected { reference: r.clone(), model });
+            self.refresh_outline();
+            info!("selected {r} (test)");
         }
         if let Some(m) = self.st.req.assign_all.take() {
             self.assign_material("", &m, false);
@@ -2613,6 +2998,13 @@ impl App {
 
     /// S キー（番号を付けた PNG と EXR）と「名前を付けて保存」
     fn handle_saves(&mut self, show_denoised: bool) {
+        if !self.has_board() {
+            // 基板が無いと保存先（基板のフォルダ）が決まらない
+            if std::mem::take(&mut self.st.req.save) || self.save_as_target.take().is_some() {
+                self.last_update = fl!("save-no-board");
+            }
+            return;
+        }
         if std::mem::take(&mut self.st.req.save) {
             self.save_numbered(show_denoised);
         }
@@ -2835,6 +3227,8 @@ impl ApplicationHandler for App {
                         st.changed.frame = true;
                     }
                     KeyAction::Mode(m) => st.mode = m,
+                    KeyAction::MaterialEditor => self.editor.open = !self.editor.open,
+                    KeyAction::OpenBoard => st.req.open_board = true,
                 }
             }
             WindowEvent::RedrawRequested => {} // 描画は about_to_wait で行う
@@ -2857,7 +3251,7 @@ impl ApplicationHandler for App {
             el.exit();
             return;
         }
-        let idle = self.gpu.as_ref().map(|g| g.prog.samples() >= self.st.max_spp || (self.st.paused && g.prog.samples() > 0)).unwrap_or(false) && !self.st.changed.frame && self.env_job.is_none() && self.reload_job.is_none() && !self.silk_job.busy() && !self.silk_dirty && !self.test.active();
+        let idle = self.gpu.as_ref().map(|g| g.prog.samples() >= self.st.max_spp || (self.st.paused && g.prog.samples() > 0)).unwrap_or(false) && !self.st.changed.frame && self.env_job.is_none() && self.reload_job.is_none() && !self.silk_job.busy() && !self.silk_dirty && !self.test.active() && !self.editor.busy();
         if idle {
             // 収束したら GPU を休ませ、入力と保存を待つ
             let wait = if self.watcher.is_some() || self.prep.scene.pending_models > 0 { 100 } else { 250 };
@@ -2868,8 +3262,8 @@ impl ApplicationHandler for App {
     }
 }
 
-pub fn run_viewer(mut vo: ViewOptions) -> anyhow::Result<i32> {
-    let Some(prep) = prepare_scene(&vo.common) else { anyhow::bail!("scene preparation failed") };
+/// 基板（または基板なし）の状態からビューアを作る（ウィンドウと GPU は、まだ無い）
+fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
     let cfg = &prep.cfg;
     let win = remember::window_state();
     let mut st = ViewState {
@@ -2916,16 +3310,16 @@ pub fn run_viewer(mut vo: ViewOptions) -> anyhow::Result<i32> {
     let stem = out_png.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "view".into());
     let env_path = cfg.hdr.clone();
     let env_list = list_environments(&env_path);
-    let watcher = vo.watch.then(|| FileWatcher::with_defaults(&prep.board.file));
+    let watcher = (vo.watch && !prep.board.file.as_os_str().is_empty()).then(|| FileWatcher::with_defaults(&prep.board.file));
     if watcher.is_some() {
         info!("watching {} for saves", prep.board.file.display());
     }
     let models_seen = prep.source.as_ref().map(|s| s.library.completed()).unwrap_or(0);
-    let material_names = prep.source.as_ref().map(|s| s.materials.library.names()).unwrap_or_default();
+    let library = prep.source.as_ref().map(|s| s.materials.library.clone()).unwrap_or_else(MaterialLibrary::builtin);
     let silk_job = SilkJob::new(prep.kicad_cli.clone(), &prep.board.file, &prep.board.project_name);
     let test = TestHooks { o: std::mem::take(&mut vo.test), ..Default::default() };
     let mut app = App {
-        base_title: format!("krbr - {}", prep.board.project_name),
+        base_title: if prep.board.file.as_os_str().is_empty() { "krbr".to_string() } else { format!("krbr - {}", prep.board.project_name) },
         scene_as_configured: prep.configured.scene.clone(),
         vo,
         prep,
@@ -2940,6 +3334,8 @@ pub fn run_viewer(mut vo: ViewOptions) -> anyhow::Result<i32> {
         save_dialog: None,
         save_as_target: None,
         env_job: None,
+        board_dialog: None,
+        board_job: None,
         env_error: String::new(),
         watcher,
         reload_job: None,
@@ -2951,7 +3347,11 @@ pub fn run_viewer(mut vo: ViewOptions) -> anyhow::Result<i32> {
         outline: None,
         materials_dirty_files: false,
         assign_scope: AssignScope::Part,
-        material_names,
+        library,
+        editor: MaterialEditor::default(),
+        editor_actions: Vec::new(),
+        scene_epoch: 0,
+        show_outline: true,
         material_error: String::new(),
         emit_edit: None,
         denoiser_tried: false,
@@ -2992,6 +3392,17 @@ pub fn run_viewer(mut vo: ViewOptions) -> anyhow::Result<i32> {
     };
     app.view_seen = app.current_view();
     app.view_saved = app.view_seen.clone();
+    app
+}
+
+pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
+    let prep = if vo.common.pcb.as_os_str().is_empty() { prepare_empty(&vo.common) } else { prepare_scene(&vo.common) };
+    let Some(prep) = prep else { anyhow::bail!("scene preparation failed") };
+    // 引数なしで起動したときに開く基板（テストでは覚えない）
+    if vo.test.frames == 0 && !vo.hidden && !prep.board.file.as_os_str().is_empty() {
+        remember::remember_last_board(&prep.board.file);
+    }
+    let mut app = new_app(vo, prep);
     let event_loop = EventLoop::new().map_err(|e| anyhow::anyhow!("event loop: {e}"))?;
     event_loop.run_app(&mut app).map_err(|e| anyhow::anyhow!("event loop: {e}"))?;
     // GPU の資源はコンテキストより先に捨てる

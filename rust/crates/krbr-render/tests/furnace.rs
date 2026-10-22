@@ -151,6 +151,32 @@ fn spectral_color_constancy() {
     }
 }
 
+/// 測定値の金属：分光モード（波長ごとの n, k から厳密なフレネル）と RGB モード（同じ表から求めた F0 と F82-tint）で
+/// 同じ色になる。BDPT でも分光モードの金属の表を引ける。F82-tint（specular_color < 1）は Schlick より暗くなる
+#[test]
+#[ignore = "needs a Vulkan GPU with ray tracing"]
+fn measured_metals_rgb_matches_spectral() {
+    let _g = gpu_lock();
+    let ctx = context();
+    for id in ["Au", "Cu", "Cr", "Os", "CuZn30"] {
+        let mut m = Material { specular_roughness: 0.3, ..Default::default() };
+        m.set_conductor(krbr_scene::conductor::find(id).unwrap());
+        let rgb = furnace(&ctx, &m, 128, false, IntegratorKind::Pt).mean_rgb;
+        let spec = furnace(&ctx, &m, 128, true, IntegratorKind::Pt).mean_rgb;
+        let bdpt = furnace(&ctx, &m, 64, true, IntegratorKind::Bdpt).mean_rgb;
+        println!("  {id:<7} RGB {:.4} {:.4} {:.4}, spectral {:.4} {:.4} {:.4}, spectral BDPT {:.4} {:.4} {:.4}", rgb.x, rgb.y, rgb.z, spec.x, spec.y, spec.z, bdpt.x, bdpt.y, bdpt.z);
+        for k in 0..3 {
+            assert!((spec[k] - rgb[k]).abs() < 0.01 + 0.03 * rgb[k], "{id} channel {k}: spectral {} vs RGB {}", spec[k], rgb[k]);
+            assert!((bdpt[k] - spec[k]).abs() < 0.01 + 0.03 * spec[k], "{id} channel {k}: BDPT {} vs PT {}", bdpt[k], spec[k]);
+        }
+    }
+    let schlick = Material { base_color: Vec3::splat(0.6), base_metalness: 1.0, specular_roughness: 0.3, ..Default::default() };
+    let tinted = Material { specular_color: Vec3::splat(0.7), ..schlick.clone() };
+    let (a, b) = (furnace(&ctx, &schlick, 128, false, IntegratorKind::Pt).mean, furnace(&ctx, &tinted, 128, false, IntegratorKind::Pt).mean);
+    println!("  F82-tint 1.0: {a:.4}, 0.7: {b:.4}");
+    assert!(b < a - 0.01 && b > 0.5 * a, "F82-tint: {a} -> {b}");
+}
+
 /// 双方向の積分器（BDPT / VCM）でも、白い炉の中で 1 になる（MIS の重みの和が 1 であることの確かめにもなる）
 #[test]
 #[ignore = "needs a Vulkan GPU with ray tracing"]

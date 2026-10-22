@@ -448,6 +448,9 @@ fn read_into(c: &mut ProjectConfig, r: &mut Reader, base: &Path) {
     r.num(&["board", "mask_scatter"], R::UNIT, &mut o.mask_scatter);
     r.color(&["board", "silk_color"], &mut o.silk_color, Some(&mut o.silk_color_set));
     r.color(&["board", "fr4_color"], &mut o.fr4_color, None);
+    if let Some(v) = r.string(&["board", "substrate"]) {
+        o.substrate = v.trim().to_string();
+    }
     r.boolean(&["board", "clip_silk_by_mask"], &mut o.layer_art.clip_silk_by_mask);
     r.num_f64(&["board", "texture_px_per_mm"], R::POSITIVE, &mut o.layer_art.px_per_mm);
     r.boolean(&["board", "include_dnp"], &mut o.include_dnp);

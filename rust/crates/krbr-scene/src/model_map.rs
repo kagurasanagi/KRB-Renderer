@@ -612,6 +612,10 @@ impl<'a> MaterialResolver<'a> {
         Self { lib, project, global, warned: Mutex::new(BTreeSet::new()) }
     }
 
+    pub fn library(&self) -> &'a MaterialLibrary {
+        self.lib
+    }
+
     /// 名前が材質ライブラリにあれば材質を作る（base_color をモデルの色にする処理も行う）。
     /// 無ければ警告して None（次の段階へ）。"+emit=" の書き方の誤りは、ライブラリに無いのとは別に知らせる
     fn make(&self, name: &str, stage: MaterialStage, q: &MaterialQuery) -> Option<ResolvedMaterial> {

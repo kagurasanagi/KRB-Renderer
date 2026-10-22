@@ -12,6 +12,11 @@ use crate::material_io::read_material;
 pub const SMOOTH_SUFFIX: &str = "+smooth";
 /// 材質名の後ろに付けると、発光する版になる（例 "plastic+emit=#ff2010,5000"：sRGB の色と輝度 cd/m²）。LED の点灯など
 pub const EMIT_PREFIX: &str = "+emit=";
+/// 材質名の後ろに付けると、色を変えた版になる（例 "plastic_abs+color=#c03020"：sRGB）。誘電体は地の色、透明な材質は
+/// 透過の色、金属は F0 の色（測定値の金属なら、測定値をやめて指定の色の金属にする）
+pub const COLOR_PREFIX: &str = "+color=";
+/// 材質名の後ろに付けると、粗さ（specular_roughness、0..1）を変えた版になる（例 "metal_nickel+rough=0.4"）
+pub const ROUGH_PREFIX: &str = "+rough=";
 
 /// 発光する部位の地の色（拡散の反射率）：発光の色を最も明るい成分がこの値になるようにしたもの
 pub const EMISSIVE_BASE_ALBEDO: f32 = 0.7;
@@ -35,155 +40,220 @@ impl Emission {
     }
 
     pub fn suffix(&self) -> String {
-        let [r, g, b] = self.srgb;
-        format!("{EMIT_PREFIX}#{r:02x}{g:02x}{b:02x},{}", self.luminance)
+        format!("{EMIT_PREFIX}{},{}", hex_rgb(self.srgb), self.luminance)
     }
 
     /// 発光の色（リニア）
     pub fn linear_color(&self) -> Vec3 {
-        srgb_to_linear(Vec3::new(self.srgb[0] as f32, self.srgb[1] as f32, self.srgb[2] as f32) / 255.0)
+        srgb8_to_linear(self.srgb)
     }
 }
 
-/// 材質名の変種の書き方の誤り（"+emit=" の後ろが "#rrggbb,<cd/m²>" になっていない）の説明。誤りが無ければ None。
-/// parse_variant は誤った指定を名前の一部とみなす（ライブラリに無い名前になる）ので、見つからなかったときの警告に使う
-pub fn variant_error(name: &str) -> Option<String> {
-    let (base, _, _) = parse_variant(name);
-    let (_, spec) = base.rsplit_once(EMIT_PREFIX)?;
-    Some(format!("malformed '{EMIT_PREFIX}{spec}' (expected {EMIT_PREFIX}#rrggbb,<cd/m²>)"))
+fn hex_rgb([r, g, b]: [u8; 3]) -> String {
+    format!("#{r:02x}{g:02x}{b:02x}")
 }
 
-/// 材質名を（ライブラリの材質名, 模様なしか, 発光）に分ける。後ろに付いた "+smooth" と "+emit=..." を外す
-pub fn parse_variant(name: &str) -> (&str, bool, Option<Emission>) {
-    let (mut base, mut smooth, mut emission) = (name, false, None);
-    loop {
-        if let Some(b) = base.strip_suffix(SMOOTH_SUFFIX) {
-            (base, smooth) = (b, true);
-        } else if let Some((b, e)) = base.rsplit_once(EMIT_PREFIX).and_then(|(b, s)| Emission::parse(s).map(|e| (b, e))) {
-            (base, emission) = (b, emission.or(Some(e)));
-        } else {
-            return (base, smooth, emission);
+fn srgb8_to_linear(c: [u8; 3]) -> Vec3 {
+    srgb_to_linear(Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32) / 255.0)
+}
+
+fn parse_color(s: &str) -> Option<[u8; 3]> {
+    parse_hex_rgb(s.trim().trim_start_matches('#'))
+}
+
+fn parse_roughness(s: &str) -> Option<f32> {
+    s.trim().parse().ok().filter(|v: &f32| (0.0..=1.0).contains(v))
+}
+
+/// 材質名の後ろに付ける変種（部位ごとの調整）。名前は "<材質>[+smooth][+color=..][+rough=..][+emit=..]" の順に組み立てる
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Variant {
+    /// 表面の模様を無くす
+    pub smooth: bool,
+    /// 色（sRGB）
+    pub color: Option<[u8; 3]>,
+    /// 粗さ（0..1）
+    pub roughness: Option<f32>,
+    pub emission: Option<Emission>,
+}
+
+impl Variant {
+    /// 材質名を（ライブラリの材質名, 変種）に分ける。書き方の誤った指定は名前の一部とみなす（ライブラリに無い名前になる）
+    pub fn parse(name: &str) -> (&str, Variant) {
+        let mut v = Variant::default();
+        let mut base = name;
+        loop {
+            if let Some(b) = base.strip_suffix(SMOOTH_SUFFIX) {
+                (base, v.smooth) = (b, true);
+                continue;
+            }
+            // 後ろから外すので、同じ指定が 2 つあれば後ろのものを使う
+            if let Some((b, e)) = base.rsplit_once(EMIT_PREFIX).and_then(|(b, s)| Emission::parse(s).map(|e| (b, e))) {
+                (base, v.emission) = (b, v.emission.or(Some(e)));
+            } else if let Some((b, c)) = base.rsplit_once(COLOR_PREFIX).and_then(|(b, s)| parse_color(s).map(|c| (b, c))) {
+                (base, v.color) = (b, v.color.or(Some(c)));
+            } else if let Some((b, r)) = base.rsplit_once(ROUGH_PREFIX).and_then(|(b, s)| parse_roughness(s).map(|r| (b, r))) {
+                (base, v.roughness) = (b, v.roughness.or(Some(r)));
+            } else {
+                return (base, v);
+            }
+        }
+    }
+
+    /// 材質名を組み立てる
+    pub fn name(&self, base: &str) -> String {
+        let mut s = base.to_string();
+        if self.smooth {
+            s += SMOOTH_SUFFIX;
+        }
+        if let Some(c) = self.color {
+            s += COLOR_PREFIX;
+            s += &hex_rgb(c);
+        }
+        if let Some(r) = self.roughness {
+            s += &format!("{ROUGH_PREFIX}{}", (r * 1000.0).round() / 1000.0);
+        }
+        if let Some(e) = self.emission {
+            s += &e.suffix();
+        }
+        s
+    }
+
+    /// 材質に当てはめる
+    pub fn apply(&self, m: &mut Material) {
+        if self.smooth {
+            m.bump_pattern = crate::material::BumpPattern::None;
+            m.bump_strength = 0.0;
+            m.roughness_variation = 0.0;
+        }
+        if let Some(c) = self.color {
+            let c = srgb8_to_linear(c);
+            if m.transmission_weight > 0.0 && m.base_metalness < 0.5 {
+                m.transmission_color = c;
+            } else {
+                m.base_color = c;
+                m.base_color_from_model = false;
+                if m.conductor.take().is_some() {
+                    m.specular_color = Vec3::ONE; // 色を決めた金属は Schlick（F82-tint なし）
+                }
+            }
+        }
+        if let Some(r) = self.roughness {
+            m.specular_roughness = r;
+        }
+        if let Some(e) = self.emission {
+            m.emission_color = e.linear_color();
+            m.emission_luminance = e.luminance;
+            // 光っている部位の地の色は発光の色にする（色のついた拡散レンズ）。白い地のままだと、周りの光を白く返して発光の色を薄める
+            let c = m.emission_color;
+            m.base_color = c / c.max_element().max(1e-6) * EMISSIVE_BASE_ALBEDO;
+            m.base_color_from_model = false;
         }
     }
 }
 
-/// 材質名を組み立てる（"<材質>[+smooth][+emit=...]"）
-pub fn variant_name(base: &str, smooth: bool, emission: Option<Emission>) -> String {
-    let mut s = base.to_string();
-    if smooth {
-        s += SMOOTH_SUFFIX;
+/// 材質名の変種の書き方の誤り（"+emit=" の後ろが "#rrggbb,<cd/m²>" になっていない、など）の説明。誤りが無ければ None。
+/// Variant::parse は誤った指定を名前の一部とみなす（ライブラリに無い名前になる）ので、見つからなかったときの警告に使う
+pub fn variant_error(name: &str) -> Option<String> {
+    let (base, _) = Variant::parse(name);
+    for (prefix, expected) in [(EMIT_PREFIX, "#rrggbb,<cd/m²>"), (COLOR_PREFIX, "#rrggbb"), (ROUGH_PREFIX, "a number in 0..1")] {
+        if let Some((_, spec)) = base.rsplit_once(prefix) {
+            return Some(format!("malformed '{prefix}{spec}' (expected {prefix}{expected})"));
+        }
     }
-    if let Some(e) = emission {
-        s += &e.suffix();
-    }
-    s
+    None
 }
 
-/// 名前を（ライブラリの材質名, 模様なしか）に分ける（発光の指定は外す）
+/// 名前を（ライブラリの材質名, 模様なしか）に分ける
 pub fn split_variant(name: &str) -> (&str, bool) {
-    let (base, smooth, _) = parse_variant(name);
-    (base, smooth)
+    let (base, v) = Variant::parse(name);
+    (base, v.smooth)
 }
 
-/// 模様のあり・なしを切り替えた名前（発光の指定は保つ）
+/// 変種の一部を変えた名前（ほかの指定は保つ）
+pub fn with_variant(name: &str, f: impl FnOnce(&mut Variant)) -> String {
+    let (base, mut v) = Variant::parse(name);
+    f(&mut v);
+    v.name(base)
+}
+
+/// 模様のあり・なしを切り替えた名前（ほかの指定は保つ）
 pub fn with_smooth(name: &str, smooth: bool) -> String {
-    let (base, _, emission) = parse_variant(name);
-    variant_name(base, smooth, emission)
+    with_variant(name, |v| v.smooth = smooth)
 }
 
-/// 発光を付け替えた名前（None なら外す。模様のあり・なしは保つ）
+/// 発光を付け替えた名前（None なら外す。ほかの指定は保つ）
 pub fn with_emission(name: &str, emission: Option<Emission>) -> String {
-    let (base, smooth, _) = parse_variant(name);
-    variant_name(base, smooth, emission)
+    with_variant(name, |v| v.emission = emission)
+}
+
+/// 材質を差し替えた名前（変種の指定は保つ）
+pub fn with_base(name: &str, base: &str) -> String {
+    Variant::parse(name).1.name(base)
 }
 
 /// krbr 組み込みの材質（OpenPBR Surface）。色はリニア。base_color を書かなければ 3D モデルの面の色を使う
-pub const BUILTIN_MATERIALS: &str = r#"# krbr 組み込みの材質（OpenPBR Surface）。色はリニア
-# 全体設定の materials/*.toml に同じ名前を書くと、書いた項目だけ上書きされる
-# roughness_variation（粗さのむら）は 0.1〜0.8 mm 周期の模様。引きの画では画素と同じくらいの細かさになり
-# 砂粒のようなノイズに見えるので、部品ではごく弱くしている（部品の質感は specular_roughness で表す）
+pub const BUILTIN_MATERIALS: &str = include_str!("builtin_materials.toml");
 
-[material.metal_tin]           # 錫めっきのリード・端子
-base_metalness = 1.0
-specular_roughness = 0.28
-[material.metal_tin.krbr]
-bump_pattern = "noise"
-bump_strength = 0.012
-bump_scale = 0.08
-roughness_variation = 0.03
+/// ビューアの材質エディタで作った材質を書くファイル（全体設定の materials/ の中）
+pub const USER_MATERIALS_FILE: &str = "user.toml";
 
-[material.metal_gold]          # 金めっきの端子
-base_metalness = 1.0
-specular_roughness = 0.22
-[material.metal_gold.krbr]
-bump_pattern = "noise"
-bump_strength = 0.01
-bump_scale = 0.08
-roughness_variation = 0.03
+/// 組み込みの材質の名前（ビューアの一覧で、編集できない材質の印に使う）
+pub fn builtin_names() -> &'static std::collections::BTreeSet<String> {
+    static N: std::sync::OnceLock<std::collections::BTreeSet<String>> = std::sync::OnceLock::new();
+    N.get_or_init(|| match toml::from_str::<toml::Table>(BUILTIN_MATERIALS) {
+        Ok(t) => t.get("material").and_then(|m| m.as_table()).map(|m| m.keys().cloned().collect()).unwrap_or_default(),
+        Err(_) => Default::default(),
+    })
+}
 
-[material.plastic]             # 樹脂のボディ
-specular_roughness = 0.45
-specular_ior = 1.5
-[material.plastic.krbr]
-bump_pattern = "noise"
-bump_strength = 0.012
-bump_scale = 0.3
-roughness_variation = 0.02
+/// 組み込みの材質の名前の、ファイル（builtin_materials.toml）に書いた順（ビューアの一覧の順）
+pub fn builtin_order() -> &'static Vec<String> {
+    static O: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    O.get_or_init(|| {
+        let doc: Result<toml_edit::DocumentMut, _> = BUILTIN_MATERIALS.parse();
+        doc.ok().and_then(|d| d.get("material").and_then(|m| m.as_table()).map(|t| t.iter().map(|(k, _)| k.to_string()).collect())).unwrap_or_default()
+    })
+}
 
-[material.glossy_plastic]      # 白い樹脂など、つやのあるもの
-specular_roughness = 0.3
-specular_ior = 1.5
-[material.glossy_plastic.krbr]
-bump_pattern = "noise"
-bump_strength = 0.01
-bump_scale = 0.3
-roughness_variation = 0.02
+/// 材質の名前として使えるか（空でなく、変種の区切りの '+' と、TOML のキーで困る文字を含まない）
+pub fn valid_material_name(name: &str) -> bool {
+    !name.trim().is_empty() && name.trim() == name && !name.contains(['+', '.', '"', '\\', '\n', '[', ']', '#'])
+}
 
-[material.epoxy_black]         # IC のモールド樹脂（つや消しの黒）
-base_color = [0.018, 0.018, 0.018]
-specular_roughness = 0.55
-specular_ior = 1.55
-[material.epoxy_black.krbr]
-bump_pattern = "noise"
-bump_strength = 0.015
-bump_scale = 0.1
-roughness_variation = 0.03
+/// materials/user.toml に材質を書く（同じ名前があれば置き換え、ほかの材質とコメントは残す）。None なら消す
+pub fn save_user_material(config_dir: &Path, name: &str, m: Option<&Material>) -> Result<std::path::PathBuf, String> {
+    let dir = config_dir.join("materials");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let file = dir.join(USER_MATERIALS_FILE);
+    // 先頭の説明は、材質を置き換えると最初の表の飾り（コメント）と一緒に消えるので、外して書くたびに付け直す
+    const HEADER: &str = "# krbr のビューアの材質エディタで作った材質（OpenPBR Surface。色はリニア）
 
-[material.ceramic]             # チップ部品のセラミック
-specular_roughness = 0.4
-specular_ior = 1.6
-[material.ceramic.krbr]
-bump_pattern = "noise"
-bump_strength = 0.015
-bump_scale = 0.05
-roughness_variation = 0.03
-
-[material.aluminum]            # 電解コンデンサの缶など
-base_color = [0.91, 0.92, 0.92]
-base_metalness = 1.0
-specular_roughness = 0.35
-[material.aluminum.krbr]
-bump_pattern = "noise"
-bump_strength = 0.01
-bump_scale = 0.2
-roughness_variation = 0.03
-
-[material.acrylic]             # アクリル（PMMA）
-base_color = [1.0, 1.0, 1.0]
-specular_roughness = 0.0
-specular_ior = 1.491
-transmission_weight = 1.0
-transmission_dispersion_scale = 1.0
-transmission_dispersion_abbe_number = 57.0
-
-[material.polycarbonate]       # ポリカーボネート
-base_color = [1.0, 1.0, 1.0]
-specular_roughness = 0.0
-specular_ior = 1.585
-transmission_weight = 1.0
-transmission_dispersion_scale = 1.0
-transmission_dispersion_abbe_number = 30.0
-"#;
+";
+    let text = if file.exists() { std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))? } else { String::new() };
+    let text = text.strip_prefix(HEADER).unwrap_or(&text);
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|e| format!("{}: {e}", file.display()))?;
+    if !doc.contains_key("material") {
+        let mut t = toml_edit::Table::new();
+        t.set_implicit(true);
+        doc.insert("material", toml_edit::Item::Table(t));
+    }
+    let mats = doc["material"].as_table_mut().ok_or_else(|| format!("{}: 'material' is not a table", file.display()))?;
+    match m {
+        Some(m) => {
+            let text = toml::to_string(&toml::Value::Table(crate::material_io::write_material(m))).map_err(|e| e.to_string())?;
+            let parsed: toml_edit::DocumentMut = text.parse().map_err(|e| format!("{e}"))?;
+            let mut t = parsed.as_table().clone();
+            t.set_implicit(false);
+            mats.insert(name, toml_edit::Item::Table(t));
+        }
+        None => {
+            mats.remove(name);
+        }
+    }
+    std::fs::write(&file, format!("{HEADER}{}", doc.to_string().trim_start())).map_err(|e| format!("{}: {e}", file.display()))?;
+    Ok(file)
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct MaterialLibrary {
@@ -246,25 +316,25 @@ impl MaterialLibrary {
         self.materials.get(name)
     }
 
-    /// 名前の材質を作る。名前の後ろの「+smooth」は、表面の模様（凹凸と粗さのむら）を無くした版、
-    /// 「+emit=#rrggbb,<cd/m²>」は、その色と輝度で光る版
+    /// 名前の材質を作る。名前の後ろの変種（Variant：「+smooth」は表面の模様を無くした版、「+color=#rrggbb」は色、
+    /// 「+rough=<0..1>」は粗さを変えた版、「+emit=#rrggbb,<cd/m²>」はその色と輝度で光る版）を当てはめる
     pub fn find_variant(&self, name: &str) -> Option<Material> {
-        let (base, smooth, emission) = parse_variant(name);
+        let (base, v) = Variant::parse(name);
         let mut m = self.materials.get(base)?.clone();
-        if smooth {
-            m.bump_pattern = crate::material::BumpPattern::None;
-            m.bump_strength = 0.0;
-            m.roughness_variation = 0.0;
-        }
-        if let Some(e) = emission {
-            m.emission_color = e.linear_color();
-            m.emission_luminance = e.luminance;
-            // 光っている部位の地の色は発光の色にする（色のついた拡散レンズ）。白い地のままだと、周りの光を白く返して発光の色を薄める
-            let c = m.emission_color;
-            m.base_color = c / c.max_element().max(1e-6) * EMISSIVE_BASE_ALBEDO;
-            m.base_color_from_model = false;
-        }
+        v.apply(&mut m);
         Some(m)
+    }
+
+    /// 材質を足す・置き換える（ビューアの材質エディタ）。source は表示用
+    pub fn insert(&mut self, name: &str, mut m: Material, source: &str) {
+        m.name = name.to_string();
+        self.materials.insert(name.to_string(), m);
+        self.sources.insert(name.to_string(), source.to_string());
+    }
+
+    pub fn remove(&mut self, name: &str) {
+        self.materials.remove(name);
+        self.sources.remove(name);
     }
 
     pub fn names(&self) -> Vec<String> {
@@ -308,8 +378,8 @@ mod tests {
         assert!((m.base_color.x - EMISSIVE_BASE_ALBEDO).abs() < 1e-6 && m.base_color.z == 0.0);
         // # は省略可。模様なしと組み合わせられる（どちらの順でも）
         for name in ["plastic+smooth+emit=ff8000,5000", "plastic+emit=#FF8000,5000+smooth"] {
-            let (base, smooth, e) = parse_variant(name);
-            assert_eq!((base, smooth, e), ("plastic", true, Some(Emission { srgb: [255, 128, 0], luminance: 5000.0 })));
+            let (base, v) = Variant::parse(name);
+            assert_eq!((base, v.smooth, v.emission), ("plastic", true, Some(Emission { srgb: [255, 128, 0], luminance: 5000.0 })));
         }
         // 書き方の誤りは材質名の一部とみなす（ライブラリに無いので見つからない）
         for bad in ["plastic+emit=#ff80,5000", "plastic+emit=#ff8000", "plastic+emit=#ff8000,-1", "plastic+emit=#gg8000,1", "plastic+emit=#ffあ000,1"] {
@@ -320,12 +390,86 @@ mod tests {
         assert_eq!(variant_error("no_such"), None);
         // 組み立てと付け替え
         let e = Emission { srgb: [0x20, 0xff, 0x40], luminance: 2500.0 };
-        assert_eq!(variant_name("plastic", true, Some(e)), "plastic+smooth+emit=#20ff40,2500");
+        assert_eq!(Variant { smooth: true, emission: Some(e), ..Default::default() }.name("plastic"), "plastic+smooth+emit=#20ff40,2500");
         assert_eq!(with_emission("plastic+smooth", Some(e)), "plastic+smooth+emit=#20ff40,2500");
         assert_eq!(with_emission("plastic+smooth+emit=#20ff40,2500", None), "plastic+smooth");
         assert_eq!(with_smooth("plastic+emit=#20ff40,2500", false), "plastic+emit=#20ff40,2500");
         assert_eq!(split_variant("plastic+smooth+emit=#20ff40,2500"), ("plastic", true));
         assert_eq!(Emission::parse("#20ff40,0.5").unwrap().suffix(), "+emit=#20ff40,0.5");
+    }
+
+    #[test]
+    fn color_and_roughness_variants() {
+        let lib = MaterialLibrary::builtin();
+        // 誘電体：地の色（モデルの色は使わない）と粗さ
+        let m = lib.find_variant("plastic_abs+color=#ff0000+rough=0.2").unwrap();
+        assert_eq!((m.base_color, m.base_color_from_model, m.specular_roughness), (Vec3::new(1.0, 0.0, 0.0), false, 0.2));
+        // 透明な材質：透過の色
+        let g = lib.find_variant("acrylic+color=#00ff00").unwrap();
+        assert_eq!((g.transmission_color, g.base_color), (Vec3::new(0.0, 1.0, 0.0), Vec3::ONE));
+        // 測定値の金属に色を付けると、測定値をやめてその色の金属（Schlick）になる。粗さだけなら測定値のまま
+        let au = lib.find_variant("metal_gold+color=#808080").unwrap();
+        assert_eq!((au.conductor, au.specular_color), (None, Vec3::ONE));
+        assert!(lib.find_variant("metal_gold+rough=0.5").unwrap().conductor.is_some());
+        // 組み立ての順は決まっていて、読み直すと同じ。後ろの指定が勝つ
+        let v = Variant { smooth: true, color: Some([1, 2, 3]), roughness: Some(0.25), emission: Some(Emission { srgb: [4, 5, 6], luminance: 10.0 }) };
+        let name = v.name("plastic");
+        assert_eq!(name, "plastic+smooth+color=#010203+rough=0.25+emit=#040506,10");
+        assert_eq!(Variant::parse(&name), ("plastic", v));
+        assert_eq!(Variant::parse("plastic+rough=0.1+rough=0.3").1.roughness, Some(0.3));
+        assert_eq!(with_base(&name, "plastic_abs"), name.replacen("plastic", "plastic_abs", 1));
+        // 書き方の誤り
+        for bad in ["plastic+color=#ff00", "plastic+rough=1.5", "plastic+rough=x"] {
+            assert!(lib.find_variant(bad).is_none(), "{bad}");
+            assert!(variant_error(bad).is_some(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn builtin_presets() {
+        let lib = MaterialLibrary::builtin();
+        // どの組み込みの材質にも分類があり、金属は（錫を除いて）測定値。透明な材質の屈折率は分散式の nd と合っている
+        for name in builtin_names() {
+            let m = lib.find(name).unwrap();
+            assert!(m.category.is_some(), "{name}");
+            if m.category() == crate::material::Category::Metal && name != "metal_tin" {
+                assert!(m.conductor.is_some(), "{name}");
+            }
+            if m.sellmeier.is_some() {
+                assert!((m.ior_at(587.6) - m.specular_ior).abs() < 2e-3, "{name}: {} vs {}", m.ior_at(587.6), m.specular_ior);
+            }
+        }
+        assert!(builtin_names().len() >= 40);
+        assert!(valid_material_name("my red ABS") && valid_material_name("赤い樹脂"));
+        for bad in ["", " x", "a+b", "a.b", "a\"b"] {
+            assert!(!valid_material_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn user_materials_file() {
+        let dir = std::env::temp_dir().join(format!("krbr_user_mat_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut lib = MaterialLibrary::builtin();
+        let mut m = lib.find_variant("plastic_abs+color=#c03020").unwrap();
+        m.category = Some(crate::material::Category::Plastic);
+        let file = save_user_material(&dir, "赤い ABS", Some(&m)).unwrap();
+        save_user_material(&dir, "other", Some(&lib.find("metal_nickel").unwrap().clone())).unwrap();
+        save_user_material(&dir, "赤い ABS", Some(&m)).unwrap(); // 置き換え
+        let loaded = MaterialLibrary::load(&dir);
+        let r = loaded.find("赤い ABS").unwrap();
+        assert_eq!((r.base_color, r.specular_ior, r.category), (m.base_color, m.specular_ior, m.category));
+        assert_eq!(loaded.find("other").unwrap().conductor, lib.find("metal_nickel").unwrap().conductor);
+        save_user_material(&dir, "other", None).unwrap();
+        assert!(MaterialLibrary::load(&dir).find("other").is_none());
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.starts_with("# krbr") && text.contains("specular_ior = 1.53
+"), "{text}");
+        lib.insert("x", m.clone(), "test");
+        assert_eq!(lib.find("x").unwrap().name, "x");
+        lib.remove("x");
+        assert!(lib.find("x").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
