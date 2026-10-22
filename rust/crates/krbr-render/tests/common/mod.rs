@@ -10,6 +10,7 @@ use glam::{Mat4, Vec2, Vec3};
 use krbr_core::mesh::Mesh;
 use krbr_render::{build_env_distribution, render_offscreen, Context, ContextOptions, FrameParams, GpuScene, ImageF, RenderOutput, RenderSettings};
 use krbr_scene::camera::Camera;
+pub use krbr_scene::IntegratorKind;
 use krbr_scene::material::Material;
 use krbr_scene::scene::{Instance, InstanceOwner, Scene, SceneMesh};
 
@@ -132,7 +133,7 @@ pub fn uniform_env(v: f32, w: u32, h: u32) -> ImageF {
 
 pub fn gpu_scene<'a>(ctx: &'a Context, s: &Scene, env: &ImageF) -> GpuScene<'a> {
     let mut gpu = GpuScene::new(ctx);
-    gpu.build(s, env, &build_env_distribution(env, 2048), 1.0);
+    gpu.try_build(s, env, &build_env_distribution(env, 2048), 1.0).expect("GPU scene");
     gpu
 }
 
@@ -141,8 +142,8 @@ pub fn frame(camera: Camera, max_depth: u32) -> FrameParams {
     FrameParams { camera, max_depth, radiance_clamp: 0.0, ..Default::default() }
 }
 
-pub fn render(ctx: &Context, gpu: &GpuScene<'_>, w: u32, h: u32, spp: u32, integrator: &str, frame: FrameParams) -> RenderOutput {
-    let rs = RenderSettings { width: w, height: h, spp, integrator: integrator.into(), frame, denoise: None };
+pub fn render(ctx: &Context, gpu: &GpuScene<'_>, w: u32, h: u32, spp: u32, integrator: IntegratorKind, frame: FrameParams) -> RenderOutput {
+    let rs = RenderSettings { width: w, height: h, spp, integrator, frame, denoise: None };
     render_offscreen(ctx, gpu, &rs).expect("render")
 }
 

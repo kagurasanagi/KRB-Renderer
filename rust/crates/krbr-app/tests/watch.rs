@@ -76,7 +76,7 @@ fn save_updates_the_image_and_rebuilds_only_nearby_tiles() {
     std::fs::copy(common::test_board(), &pcb).unwrap();
     let out = ws.join("out").join("watch.png");
     let o = WatchOptions {
-        common: RenderOptions { pcb: pcb.clone(), hdr: "builtin:studio".into(), out: out.clone(), spp: Some(32), width: Some(1920), height: Some(1080), zoom: 1.0, ..Default::default() },
+        common: RenderOptions { pcb: pcb.clone(), hdr: "builtin:studio".into(), out: out.clone(), spp: Some(32), width: Some(1920), height: Some(1080), ..Default::default() },
         max_updates: 0,
     };
     let (fp, at_from, at_to) = find_target(&pcb);

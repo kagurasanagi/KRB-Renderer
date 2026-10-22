@@ -32,14 +32,14 @@ fn test_image(w: u32, h: u32) -> ImageF {
 
 fn gpu_tonemap(ctx: &krbr_render::Context, img: &ImageF, exposure_ev: f32, glow: &GlowParams) -> Vec<u8> {
     let (w, h) = (img.width, img.height);
-    let mut color = ctx.create_image_2d(w, h, 1, vk::Format::R32G32B32A32_SFLOAT, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_DST);
+    let mut color = ctx.try_create_image_2d(w, h, 1, vk::Format::R32G32B32A32_SFLOAT, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_DST).expect("image");
     let bytes: Vec<u8> = img.rgba.iter().flat_map(|v| v.to_le_bytes()).collect();
-    ctx.upload_image(&color, &bytes, vk::ImageLayout::GENERAL);
-    let mut rb = ctx.create_buffer((w * h * 4) as u64, vk::BufferUsageFlags::TRANSFER_DST, true, true);
+    ctx.try_upload_image(&color, &bytes, vk::ImageLayout::GENERAL).expect("upload");
+    let mut rb = ctx.try_create_buffer((w * h * 4) as u64, vk::BufferUsageFlags::TRANSFER_DST, true, true).expect("readback buffer");
     {
         let tm = Tonemapper::with_views(ctx, color.view, color.view, color.view, w, h).expect("tonemapper");
         let (out, buf) = (tm.output().image, rb.buffer);
-        ctx.submit_and_wait(|dev, cmd| {
+        ctx.try_submit_and_wait(|dev, cmd| {
             tm.record(cmd, exposure_ev, DisplayMode::Beauty, false, glow);
             memory_barrier(dev, cmd, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_READ);
             let region = vk::BufferImageCopy::default()
@@ -47,7 +47,8 @@ fn gpu_tonemap(ctx: &krbr_render::Context, img: &ImageF, exposure_ev: f32, glow:
                 .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
             unsafe { dev.cmd_copy_image_to_buffer(cmd, out, vk::ImageLayout::GENERAL, buf, &[region]) };
             memory_barrier(dev, cmd, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, vk::PipelineStageFlags2::HOST, vk::AccessFlags2::HOST_READ);
-        });
+        })
+        .expect("submit");
     }
     let px = rb.mapped_bytes().unwrap().to_vec();
     assert_eq!(px.len(), (w * h * 4) as usize);

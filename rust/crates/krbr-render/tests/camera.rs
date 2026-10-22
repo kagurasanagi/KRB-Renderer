@@ -35,7 +35,7 @@ fn thin_lens(f_number: f32, focus: f32) -> LensParams {
 }
 
 /// 小さな正方形の光源（放射輝度 1）を、画面の正規化座標 ndc の位置に置いて描く
-fn render_lights(ctx: &Context, ndc: &[Vec2], size_mm: f32, lens: &LensParams, spectral: bool, spp: u32, integrator: &str) -> RenderOutput {
+fn render_lights(ctx: &Context, ndc: &[Vec2], size_mm: f32, lens: &LensParams, spectral: bool, spp: u32, integrator: IntegratorKind) -> RenderOutput {
     let mut m = Mesh::default();
     let h = 0.5 * size_mm;
     for &n in ndc {
@@ -57,7 +57,7 @@ fn render_uniform_env(ctx: &Context, lens: &LensParams, spp: u32) -> RenderOutpu
     let s = scene_of(vec![Material::default()], m);
     let gpu = gpu_scene(ctx, &s, &uniform_env(1.0, 16, 8));
     let f = krbr_render::FrameParams { camera: test_camera(), lens: lens.clone(), ..Default::default() };
-    render(ctx, &gpu, W, H, spp, "pt", f)
+    render(ctx, &gpu, W, H, spp, IntegratorKind::Pt, f)
 }
 
 /// チャンネル k（3 なら輝度）の値（3x3 の平均でならす）
@@ -164,7 +164,7 @@ fn thin_lens_bokeh_aperture_blades() {
     // 絞り F2（半径 12.5 mm）、ピント 250 mm、光源 1000 mm：ボケの直径は約 2a(1/250 − 1/1000) = 0.075（tan）≈ 60 画素
     for (blades, rotation, file) in [(0, 0.0f32, "p7_bokeh_circle.png"), (6, 0.0, "p7_bokeh_hex.png"), (6, 30.0, "p7_bokeh_hex_rot30.png")] {
         let lens = LensParams { blades, blade_rotation_deg: rotation, ..thin_lens(2.0, 250.0) };
-        let out = render_lights(&ctx, &[Vec2::ZERO], 4.0, &lens, false, 2048, "pt");
+        let out = render_lights(&ctx, &[Vec2::ZERO], 4.0, &lens, false, 2048, IntegratorKind::Pt);
         save_png(file, &out.color, 5.0);
         let b = measure_bokeh(&out.color, pixel_of(0.0, 0.0), 60, 3);
         let r_max = b.radius.iter().copied().fold(f32::MIN, f32::max) as f64;
@@ -190,7 +190,7 @@ fn thin_lens_cats_eye_and_natural_vignetting() {
     let mut ratio = [0.0f64; 2];
     for (i, r) in ratio.iter_mut().enumerate() {
         let lens = LensParams { optical_vignetting: if i == 0 { 0.0 } else { 0.6 }, ..thin_lens(2.0, 250.0) };
-        let out = render_lights(&ctx, &[Vec2::new(0.8, 0.75)], 4.0, &lens, false, 2048, "pt");
+        let out = render_lights(&ctx, &[Vec2::new(0.8, 0.75)], 4.0, &lens, false, 2048, IntegratorKind::Pt);
         if i == 1 {
             save_png("p7_cats_eye.png", &out.color, 5.0);
         }
@@ -220,7 +220,7 @@ fn thin_lens_chromatic_aberration_in_spectral_mode() {
     let mut ratio = [0.0f64; 2];
     for (i, r) in ratio.iter_mut().enumerate() {
         let lens = LensParams { abbe_number: if i == 0 { 0.0 } else { 20.0 }, ..thin_lens(2.0, 250.0) };
-        let out = render_lights(&ctx, &[Vec2::ZERO], 4.0, &lens, true, 4096, "pt");
+        let out = render_lights(&ctx, &[Vec2::ZERO], 4.0, &lens, true, 4096, IntegratorKind::Pt);
         if i == 1 {
             save_png("p7_axial_ca.png", &out.color, 5.0);
         }
@@ -235,7 +235,7 @@ fn thin_lens_chromatic_aberration_in_spectral_mode() {
     let mut shift = [0.0f64; 2];
     for (i, s) in shift.iter_mut().enumerate() {
         let lens = LensParams { lateral_ca: if i == 0 { 0.0 } else { 0.01 }, ..thin_lens(16.0, 1000.0) };
-        let out = render_lights(&ctx, &[Vec2::new(0.85, 0.0)], 2.0, &lens, true, 1024, "pt");
+        let out = render_lights(&ctx, &[Vec2::new(0.85, 0.0)], 2.0, &lens, true, 1024, IntegratorKind::Pt);
         if i == 1 {
             save_png("p7_lateral_ca.png", &out.color, 5.0);
         }
@@ -263,7 +263,7 @@ fn thin_lens_integrators_agree_and_realistic_lens() {
         let s = scene_of(vec![floor, light], m);
         let gpu = gpu_scene(&ctx, &s, &uniform_env(0.02, 16, 8));
         let lens = LensParams { blades: 6, natural_vignetting: true, optical_vignetting: 0.5, ..thin_lens(4.0, 260.0) };
-        let mean: Vec<f64> = [("pt", 2048), ("bdpt", 1024), ("vcm", 1024)]
+        let mean: Vec<f64> = [(IntegratorKind::Pt, 2048), (IntegratorKind::Bdpt, 1024), (IntegratorKind::Vcm, 1024)]
             .iter()
             .map(|&(integ, spp)| {
                 let mut f = frame(test_camera(), 8);
@@ -294,7 +294,7 @@ fn thin_lens_integrators_agree_and_realistic_lens() {
         let mut peak = [0.0f32; 2];
         for (i, p) in peak.iter_mut().enumerate() {
             let lens = LensParams { model: LensModel::Realistic, focus_distance_mm: if i == 0 { 1000.0 } else { 300.0 }, ..Default::default() };
-            let out = render_lights(&ctx, &[Vec2::ZERO], 2.0, &lens, false, 1024, "pt");
+            let out = render_lights(&ctx, &[Vec2::ZERO], 2.0, &lens, false, 1024, IntegratorKind::Pt);
             save_png(if i == 0 { "p7_real_focused.png" } else { "p7_real_defocused.png" }, &out.color, 5.0);
             for y in H as i32 / 2 - 30..H as i32 / 2 + 30 {
                 for x in W as i32 / 2 - 30..W as i32 / 2 + 30 {
@@ -325,6 +325,6 @@ fn camera_showcase_image() {
         lateral_ca: 0.006,
         ..thin_lens(2.0, 300.0)
     };
-    let out = render_lights(&ctx, &ndc, 6.0, &lens, true, 32768, "pt");
+    let out = render_lights(&ctx, &ndc, 6.0, &lens, true, 32768, IntegratorKind::Pt);
     save_png("p7_showcase.png", &out.color, 4.0);
 }

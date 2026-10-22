@@ -4,6 +4,7 @@
 use ash::vk;
 use krbr_scene::camera::Camera;
 use krbr_scene::lens::LensParams;
+use krbr_scene::IntegratorKind;
 
 use crate::gpu_scene::GpuScene;
 use crate::gpu_types::{FrameUbo, GpuLightVertex, PushConstants};
@@ -329,12 +330,11 @@ impl Drop for Bidirectional<'_> {
     }
 }
 
-fn create_integrator<'a>(ctx: &'a Context, sc: &'a GpuScene<'a>, targets: &RenderTargets, fp: &FrameParams, name: &str) -> Result<Box<dyn Integrator + 'a>, String> {
-    match name {
-        "pt" | "path" => Ok(Box::new(PathTracer::new(ctx, sc, targets, fp)?)),
-        "bdpt" => Ok(Box::new(Bidirectional::new(ctx, sc, targets, fp, false)?)),
-        "vcm" => Ok(Box::new(Bidirectional::new(ctx, sc, targets, fp, true)?)),
-        other => Err(format!("unknown integrator: {other}")),
+fn create_integrator<'a>(ctx: &'a Context, sc: &'a GpuScene<'a>, targets: &RenderTargets, fp: &FrameParams, kind: IntegratorKind) -> Result<Box<dyn Integrator + 'a>, String> {
+    match kind {
+        IntegratorKind::Pt => Ok(Box::new(PathTracer::new(ctx, sc, targets, fp)?)),
+        IntegratorKind::Bdpt => Ok(Box::new(Bidirectional::new(ctx, sc, targets, fp, false)?)),
+        IntegratorKind::Vcm => Ok(Box::new(Bidirectional::new(ctx, sc, targets, fp, true)?)),
     }
 }
 
@@ -360,7 +360,7 @@ pub fn xyz_to_linear_srgb(img: &mut ImageF) {
 pub struct Progressive<'a> {
     ctx: &'a Context,
     scene: &'a GpuScene<'a>,
-    integrator_name: String,
+    kind: IntegratorKind,
     integrator: Option<Box<dyn Integrator + 'a>>,
     targets: RenderTargets,
     frame: FrameParams,
@@ -368,8 +368,8 @@ pub struct Progressive<'a> {
 }
 
 impl<'a> Progressive<'a> {
-    pub fn new(ctx: &'a Context, scene: &'a GpuScene<'a>, integrator: &str, width: u32, height: u32, frame: FrameParams) -> Result<Self, String> {
-        let mut p = Self { ctx, scene, integrator_name: integrator.to_string(), integrator: None, targets: RenderTargets { width, height, ..Default::default() }, frame, samples: 0 };
+    pub fn new(ctx: &'a Context, scene: &'a GpuScene<'a>, kind: IntegratorKind, width: u32, height: u32, frame: FrameParams) -> Result<Self, String> {
+        let mut p = Self { ctx, scene, kind, integrator: None, targets: RenderTargets { width, height, ..Default::default() }, frame, samples: 0 };
         p.create_targets()?;
         Ok(p)
     }
@@ -389,7 +389,7 @@ impl<'a> Progressive<'a> {
                 image_barrier(dev, cmd, img, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE, trace, vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE, 1);
             }
         })?;
-        self.integrator = Some(create_integrator(self.ctx, self.scene, &self.targets, &self.frame, &self.integrator_name)?);
+        self.integrator = Some(create_integrator(self.ctx, self.scene, &self.targets, &self.frame, self.kind)?);
         self.samples = 0;
         Ok(())
     }
@@ -417,16 +417,17 @@ impl<'a> Progressive<'a> {
     pub fn rebuild_integrator(&mut self) -> Result<(), String> {
         self.ctx.wait_idle();
         self.integrator = None;
-        self.integrator = Some(create_integrator(self.ctx, self.scene, &self.targets, &self.frame, &self.integrator_name)?);
+        self.integrator = Some(create_integrator(self.ctx, self.scene, &self.targets, &self.frame, self.kind)?);
         self.samples = 0;
         Ok(())
     }
 
-    pub fn set_integrator(&mut self, name: &str) -> Result<(), String> {
-        if name == self.integrator_name {
+    /// 積分器を替える（累積は 0 から）。作れなければ Err（積分器は無いままになり、record は何もしない。別の種類で呼び直せる）
+    pub fn set_integrator(&mut self, kind: IntegratorKind) -> Result<(), String> {
+        if kind == self.kind && self.integrator.is_some() {
             return Ok(());
         }
-        self.integrator_name = name.to_string();
+        self.kind = kind;
         self.rebuild_integrator()
     }
 
@@ -471,8 +472,12 @@ impl<'a> Progressive<'a> {
     pub fn xyz_output(&self) -> bool {
         self.frame.spectral
     }
+    /// 使っている積分器の種類（作れていなければ、最後に指定した種類）
+    pub fn integrator_kind(&self) -> IntegratorKind {
+        self.kind
+    }
     pub fn integrator_name(&self) -> &str {
-        self.integrator.as_ref().map(|i| i.name()).unwrap_or("?")
+        self.kind.as_str()
     }
 
     /// 現在の累積を読み戻す（GPU が待機中に呼ぶこと）。分光モードでも RGB に変換して返す。

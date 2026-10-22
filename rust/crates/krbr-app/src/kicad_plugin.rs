@@ -68,11 +68,21 @@ pub fn cmd_uninstall(dir: Option<&Path>) -> anyhow::Result<()> {
         Some(d) => vec![d.to_path_buf()],
         None => kicad_plugin_dirs(),
     };
-    for t in targets {
+    let mut removed = 0;
+    for t in &targets {
         let d = t.join(DIR_NAME);
         if d.is_dir() {
             std::fs::remove_dir_all(&d)?;
             info!("removed {}", d.display());
+            removed += 1;
+        }
+    }
+    if removed == 0 {
+        let looked: Vec<String> = targets.iter().map(|t| t.display().to_string()).collect();
+        if looked.is_empty() {
+            info!("the KiCad plugin is not installed (no KiCad 9+ user folder found under Documents\\KiCad); nothing removed");
+        } else {
+            info!("the KiCad plugin is not installed in {}; nothing removed", looked.join(", "));
         }
     }
     Ok(())

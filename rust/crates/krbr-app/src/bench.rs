@@ -9,8 +9,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use krbr_core::{info, warn};
 use krbr_render::{render_offscreen, Context, ContextOptions, GpuScene, RenderSettings};
+use krbr_scene::{IntegratorKind, LensModel};
 
-use crate::prepare::{frame_params, initial_camera, prepare_scene, RenderOptions};
+use crate::prepare::{frame_params, initial_camera, prepare_scene, trace_method_name, RenderOptions};
 
 #[derive(Debug, Clone)]
 pub struct BenchOptions {
@@ -25,7 +26,7 @@ pub struct BenchOptions {
 const WARMUP_SPP: u32 = 8;
 
 /// 測る場合：(表示名, 積分器, 分光)
-const CASES: [(&str, &str, bool); 4] = [("PT", "pt", false), ("PT spectral", "pt", true), ("BDPT", "bdpt", false), ("VCM", "vcm", false)];
+const CASES: [(&str, IntegratorKind, bool); 4] = [("PT", IntegratorKind::Pt, false), ("PT spectral", IntegratorKind::Pt, true), ("BDPT", IntegratorKind::Bdpt, false), ("VCM", IntegratorKind::Vcm, false)];
 
 const CSV_HEADER: &str = "date,gpu,driver,method,board,board_hash,width,height,spp,max_depth,case,ms_per_spp";
 
@@ -50,9 +51,8 @@ pub fn cmd_bench(b: &BenchOptions) -> anyhow::Result<()> {
         exposure: Some(0.0),
         env_intensity: Some(1.0),
         env_rotation: Some(0.0),
-        zoom: 1.0,
-        lens: "pinhole".into(),
-        integrator: "pt".into(),
+        lens: Some(LensModel::Pinhole),
+        integrator: Some(IntegratorKind::Pt),
         spectral: Some(false),
         denoise: Some(false),
         ignore_remembered: true,
@@ -64,10 +64,10 @@ pub fn cmd_bench(b: &BenchOptions) -> anyhow::Result<()> {
     let cfg = &prep.cfg;
     let cam = initial_camera(&prep, &o, b.width, b.height);
     let ctx = Context::new(&ContextOptions { low_queue_priority: true, ..Default::default() }).map_err(|e| anyhow::anyhow!(e))?;
-    let method = if ctx.use_rt_pipeline { "ray tracing pipeline" } else { "ray query" };
+    let method = trace_method_name(&ctx);
     let driver = driver_string(&ctx.info.name, ctx.info.driver_version);
     let mut gpu = GpuScene::new(&ctx);
-    gpu.build(&prep.scene, &prep.env, &prep.dist, cfg.scene.bump_intensity);
+    gpu.try_build(&prep.scene, &prep.env, &prep.dist, cfg.scene.bump_intensity).map_err(|e| anyhow::anyhow!("GPU scene: {e}"))?;
     let board_hash = std::fs::read(&prep.board.file).map(|d| krbr_core::to_hex(krbr_core::xxh64(&d))).unwrap_or_default();
     let board_name = prep.board.file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
     info!("bench: {} ({}, driver {}), {}x{}, {} spp per case after {} warm-up, max depth {}, scene prepared in {:.1} s", ctx.info.name, method, driver, b.width, b.height, b.spp, WARMUP_SPP, cfg.max_depth, prepare_s);
@@ -76,7 +76,7 @@ pub fn cmd_bench(b: &BenchOptions) -> anyhow::Result<()> {
     for (name, integrator, spectral) in CASES {
         let mut frame = frame_params(cfg, cam, 0);
         frame.spectral = spectral;
-        let mut rs = RenderSettings { width: b.width, height: b.height, spp: WARMUP_SPP, integrator: integrator.into(), frame, denoise: None };
+        let mut rs = RenderSettings { width: b.width, height: b.height, spp: WARMUP_SPP, integrator, frame, denoise: None };
         render_offscreen(&ctx, &gpu, &rs).map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
         rs.spp = b.spp;
         let out = render_offscreen(&ctx, &gpu, &rs).map_err(|e| anyhow::anyhow!("{name}: {e}"))?;

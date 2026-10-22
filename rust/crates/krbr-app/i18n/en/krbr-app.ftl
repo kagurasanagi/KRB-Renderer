@@ -39,9 +39,16 @@ help-select = Click: select a part (change its materials in the settings panel)
 help-pan = Right / middle drag: pan
 help-zoom = Wheel: zoom
 help-focus = Ctrl + click: focus on that point
-help-keys = F1 / Tab: settings panel    R: reset view    S: save    P: pause
-help-keys-2 = + / -: exposure    [ / ]: rotate the environment    1 / 2 / 3: image / albedo / normal
-help-quit = Esc: quit
+# Keys (the key names come from the program; these are the descriptions)
+key-panel = settings panel
+key-reset-view = reset view
+key-save = save the image
+key-pause = pause
+key-denoise = denoise now (when denoising runs on the CPU)
+key-exposure = exposure
+key-env-rotation = rotate the environment
+key-display-mode = image / albedo / normal
+key-quit = quit
 
 ## Toolbar
 toolbar-done = ✔ Done
@@ -79,8 +86,10 @@ panel-help-mouse = Left drag: rotate  Right drag: pan  Wheel: zoom  Click: selec
 panel-help-toggle = F1 / Tab: show or hide this panel
 
 panel-environment = Environment map
-env-studio = Studio (built-in)
-env-studio-tip = A grey photo booth with a large softbox
+env-builtin = { $id } (built-in)
+env-builtin-studio = Studio (built-in)
+env-builtin-studio-tip = A grey photo booth with a large softbox
+env-gpu-failed = Could not send the environment map to the GPU, so the built-in studio is used: { $error }
 env-open = Open...
 env-open-tip = Choose a .hdr / .exr (you can also drop one onto the window)
 env-remember-hint = The choice is also used the next time this board is shown
@@ -110,6 +119,7 @@ panel-integrator = Integrator
 integrator-pt-hint = Unidirectional (fast)
 integrator-bdpt-hint = Bidirectional (connects to paths from the lights)
 integrator-vcm-hint = Bidirectional + vertex merging (also converges caustics through transparent objects)
+integrator-failed = { $integrator } is not available, so PT is used: { $error }
 
 panel-lens = Lens
 lens-pinhole = Pinhole
@@ -229,3 +239,5 @@ saved-denoised-too = . The denoised image was saved too (_denoised)
 saved-as = Saved: { $path } ({ $spp } spp{ $denoised })
 saved-as-denoised = , denoised
 save-failed = Could not save: { $error }
+readback-failed = Could not read the image back from the GPU: { $error }
+materials-failed = Could not send the materials to the GPU: { $error }

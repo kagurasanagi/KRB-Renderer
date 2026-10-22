@@ -39,9 +39,16 @@ help-select = クリック: 部品を選ぶ（設定パネルで材質を変え�
 help-pan = 右 / 中ドラッグ: 移動
 help-zoom = ホイール: 拡大・縮小
 help-focus = Ctrl + クリック: その点にピントを合わせる
-help-keys = F1 / Tab: 設定パネル    R: 視点を戻す    S: 保存    P: 一時停止
-help-keys-2 = + / -: 露出    [ / ]: 環境マップの回転    1 / 2 / 3: 画像 / アルベド / 法線
-help-quit = Esc: 終了
+# キー（キーの名前はプログラムが出す。ここは説明）
+key-panel = 設定パネル
+key-reset-view = 視点を戻す
+key-save = 画像を保存
+key-pause = 一時停止
+key-denoise = 今ノイズ除去をかける（ノイズ除去が CPU のとき）
+key-exposure = 露出
+key-env-rotation = 環境マップの回転
+key-display-mode = 画像 / アルベド / 法線
+key-quit = 終了
 
 ## ツールバー
 toolbar-done = ✔ 完了
@@ -79,8 +86,10 @@ panel-help-mouse = 左ドラッグ: 回転  右ドラッグ: 移動  ホイー�
 panel-help-toggle = F1 / Tab: このパネルの表示切り替え
 
 panel-environment = 環境マップ
-env-studio = スタジオ（内蔵）
-env-studio-tip = 灰色の撮影ブースと大きなソフトボックス
+env-builtin = { $id }（内蔵）
+env-builtin-studio = スタジオ（内蔵）
+env-builtin-studio-tip = 灰色の撮影ブースと大きなソフトボックス
+env-gpu-failed = 環境マップを GPU へ送れなかったので、内蔵のスタジオにした：{ $error }
 env-open = 開く...
 env-open-tip = .hdr / .exr を選ぶ（ウィンドウへのドラッグ＆ドロップでも可）
 env-remember-hint = 選んだものは、この基板の次回の表示にも使う
@@ -110,6 +119,7 @@ panel-integrator = 積分器
 integrator-pt-hint = 単方向（速い）
 integrator-bdpt-hint = 双方向（光源側の経路とつなぐ）
 integrator-vcm-hint = 双方向＋近傍のまとめ（透明な物体越しの集光模様も収束）
+integrator-failed = { $integrator } が使えないので、PT にした：{ $error }
 
 panel-lens = レンズ
 lens-pinhole = ピンホール
@@ -229,3 +239,5 @@ saved-denoised-too = 。ノイズ除去した画像も保存した（_denoised�
 saved-as = 保存した：{ $path }（{ $spp } spp{ $denoised }）
 saved-as-denoised = 、ノイズ除去済み
 save-failed = 保存できなかった：{ $error }
+readback-failed = GPU から画像を読み戻せなかった：{ $error }
+materials-failed = 材質を GPU へ送れなかった：{ $error }

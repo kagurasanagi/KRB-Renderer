@@ -14,12 +14,12 @@ use krbr_kicad::Board;
 use krbr_render::image_io::{self, ImageF};
 use krbr_render::glow::GlowParams;
 use krbr_render::tonemapper::{DisplayMode, Tonemapper};
-use krbr_render::vk::{image_barrier, Buffer};
+use krbr_render::vk::{image_barrier, memory_barrier, Buffer};
 use krbr_render::studio_env::STUDIO;
-use krbr_render::{build_env_distribution, environment_label, DenoiseQuality, Denoiser, is_builtin, load_environment_map, Context, ContextOptions, EnvDistribution, GpuScene, Progressive};
+use krbr_render::{build_env_distribution, describe_environment, is_builtin, load_environment_map, Context, ContextOptions, DenoiseQuality, Denoiser, EnvDistribution, EnvironmentName, GpuScene, Progressive};
 use krbr_scene::config::apply_mask_color_spec;
 use krbr_scene::scene::{load_material_setup, raycast, raycast_pick, update_mask_material, MaterialAssignment};
-use krbr_scene::{mask_presets, orbit_camera, InstanceOwner, LensModel, Scene, SceneOptions};
+use krbr_scene::{mask_presets, orbit_camera, Camera, InstanceOwner, IntegratorKind, LensModel, MaterialStage, Scene, SceneOptions};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -29,49 +29,118 @@ use winit::window::{Window, WindowId};
 
 use crate::fl;
 use crate::i18n;
-use crate::kicad_cli::{plot_stroke_silk, SilkPlot};
+use crate::kicad_cli::SilkJob;
 use crate::material_cmd::{clear_material, set_material, MaterialSetOptions};
-use crate::selection::{Outline, Selected};
+use crate::selection::{unproject, Outline, Selected};
 use krbr_scene::board_file;
 use krbr_scene::material_library::{parse_variant, split_variant, with_emission, with_smooth, Emission};
 use crate::prepare::{ReloadStats, SceneSource};
 use crate::remember;
-use crate::prepare::{frame_params, framed_camera, initial_camera, prepare_scene, PreparedScene, RenderOptions};
+use crate::prepare::{frame_params, framed_camera, initial_camera, prepare_scene, progressive_or_pt, trace_method_name, PreparedScene, RenderOptions, ENV_DIST_RESOLUTION};
 use crate::swapchain::Swapchain;
 
 #[derive(Debug, Clone, Default)]
 pub struct ViewOptions {
     pub common: RenderOptions,
-    /// >0: このフレーム数を描いたら screenshot を保存して終了（開発用）
-    pub test_frames: u32,
-    /// test_frames 用の保存先（表示中の画像そのもの）
-    pub screenshot: Option<PathBuf>,
-    /// ウィンドウを表示しない（test_frames 指定時は自動）
+    /// ウィンドウを表示しない（test.frames 指定時は自動）
     pub hidden: bool,
-    /// 開発用：毎フレームこの角度だけカメラを回す
-    pub test_orbit_deg: f64,
     /// .kicad_pcb の保存を監視して描き直す（--no-watch で無効）
     pub watch: bool,
-    /// 開発用：テスト中に一度だけ基板を読み直す（保存の代わり）
-    pub test_reload: bool,
-    /// 開発用：テスト中にこの画素（3D 表示の中の位置）をクリックしたことにする
-    pub test_pick: Option<(f64, f64)>,
-    /// 開発用：test_pick で選んだ部品の全部位に、この材質を割り当てる（この部品だけ）
-    pub test_assign: String,
-    /// 開発用：テスト中に、パネルでこのレジストの色（プリセット）を選んだことにする
-    pub test_mask: String,
-    /// 開発用：テストの終わり近くに「名前を付けて保存」でこのファイル（.png / .exr）を選んだことにする
-    pub test_save_as: Option<PathBuf>,
-    /// 開発用：テスト中に、メニューの「設定をすべて既定に戻す」を押したことにする
-    pub test_reset_settings: bool,
     /// レンダリングを一時停止した状態で開く（GPU の弱い PC 向け）
     pub paused: bool,
-    /// 描画のサイズ："WxH"（決まったサイズ。3D 表示の領域がそれ ÷ 比率になるようウィンドウの大きさを変える）か "fit"（ウィンドウに合わせる）。空なら覚えたもの
-    pub render_size: String,
+    /// 描画のサイズ（--render-size）。None なら覚えたもの
+    pub render_size: Option<RenderSize>,
     /// レンダリングの比率（レンダリングの解像度 ÷ 表示の大きさ）。None なら覚えたもの
     pub render_ratio: Option<f32>,
     /// 表示の言語（--lang。"ja" など）。None なら環境変数 KRBR_LANG、メニューで選んだもの、KiCad、OS の順
     pub language: Option<String>,
+    /// 開発用のテストの操作（--test-*）
+    pub test: TestOptions,
+}
+
+/// 開発用（--test-*）：表示しないウィンドウで決まった数のフレームを描き、その途中で UI の操作をしたことにする
+#[derive(Debug, Clone, Default)]
+pub struct TestOptions {
+    /// >0: このフレーム数を描いたら screenshot を保存して終了
+    pub frames: u32,
+    /// frames 用の保存先（表示中の画像そのもの）
+    pub screenshot: Option<PathBuf>,
+    /// 毎フレームこの角度だけカメラを回す
+    pub orbit_deg: f64,
+    /// テスト中に一度だけ基板を読み直す（保存の代わり）
+    pub reload: bool,
+    /// テスト中にこの画素（3D 表示の中の位置）をクリックしたことにする
+    pub pick: Option<(f64, f64)>,
+    /// pick で選んだ部品の全部位に、この材質を割り当てる（この部品だけ）
+    pub assign: String,
+    /// テスト中に、パネルでこのレジストの色（プリセット）を選んだことにする
+    pub mask: String,
+    /// テストの終わり近くに「名前を付けて保存」でこのファイル（.png / .exr）を選んだことにする
+    pub save_as: Option<PathBuf>,
+    /// テスト中に、メニューの「設定をすべて既定に戻す」を押したことにする
+    pub reset_settings: bool,
+}
+
+/// テストのパネルの操作（レジストの色・すべて既定に戻す）をするフレーム（0 から数える）。
+/// 最初のフレームで 3D 表示の大きさが決まって視点を合わせ直し、パネルも描き終えた後
+const TEST_PANEL_FRAME: u32 = 3;
+/// テストの読み直しとクリックをするフレーム（これ以降で、裏の読み直しが終わっているとき）。パネルの操作の結果が反映した後
+const TEST_SCENE_FRAME: u32 = 5;
+/// テストの「名前を付けて保存」は、終わりのこのフレーム数前（保存したフレームの後に、最後のフレームを描いて終わる）
+const TEST_SAVE_AS_BEFORE_END: u32 = 2;
+
+/// テストの操作の進み具合。本番の処理は test_* を見ず、ここが UI の要求（ViewState::req）として流し込む
+#[derive(Default)]
+struct TestHooks {
+    o: TestOptions,
+    reload_started: bool,
+    pick_done: bool,
+}
+
+impl TestHooks {
+    /// テストで動かしているか（ウィンドウを表示せず、状態も覚えない）
+    fn active(&self) -> bool {
+        self.o.frames > 0
+    }
+
+    /// フレームの初めに、このフレーム（frame 番目、0 から）でする操作を要求として入れる
+    fn inject(&mut self, frame: u32, st: &mut ViewState, save_as_target: &mut Option<(SaveFormat, PathBuf)>) {
+        if self.o.orbit_deg != 0.0 {
+            st.azimuth += self.o.orbit_deg;
+            st.changed.frame = true;
+        }
+        if frame == TEST_PANEL_FRAME {
+            if let Some(i) = mask_presets().iter().position(|p| !self.o.mask.is_empty() && p.name == self.o.mask) {
+                st.mask_choice = Some(i);
+                st.changed.mask = true;
+            }
+            st.req.reset_all |= self.o.reset_settings;
+        }
+        if self.o.reload && !self.reload_started && frame >= TEST_SCENE_FRAME {
+            self.reload_started = true;
+            st.req.reload = true;
+        }
+        if let Some((x, y)) = self.o.pick.filter(|_| !self.pick_done && frame >= TEST_SCENE_FRAME) {
+            self.pick_done = true;
+            st.req.part_pick = Some((x + st.viewport.x as f64, y + st.viewport.y as f64));
+            if !self.o.assign.is_empty() {
+                st.req.assign_all = Some(self.o.assign.clone());
+            }
+        }
+        if let Some(p) = self.o.save_as.as_ref().filter(|_| self.active() && frame + TEST_SAVE_AS_BEFORE_END == self.o.frames) {
+            let format = if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exr")) { SaveFormat::Exr } else { SaveFormat::Png };
+            *save_as_target = Some((format, p.clone()));
+        }
+    }
+
+    /// このフレーム（frame 番目）で終えてよいか：決めたフレーム数に達し、裏の処理（busy）が無く、頼んだ読み直し・クリックが済んだ
+    fn finished(&self, frame: u32, busy: bool, saved_reloads: u32) -> bool {
+        self.active() && frame + 1 >= self.o.frames && !busy && (!self.o.reload || saved_reloads > 0) && (self.o.pick.is_none() || self.pick_done)
+    }
+
+    fn screenshot(&self) -> Option<&PathBuf> {
+        self.o.screenshot.as_ref()
+    }
 }
 
 /// 描画のサイズの候補（幅, 高さ）
@@ -92,24 +161,59 @@ fn size_label(w: u32, h: u32) -> String {
     fl!("size-preset", size = format!("{w}×{h}"), name = name)
 }
 
-/// 環境マップの表示名（内蔵のスタジオは翻訳した名前、ほかはファイル名）
+/// 環境マップの表示名：内蔵のものは翻訳した名前（i18n の env-builtin-<ID>。無ければ「<ID>（内蔵）」）、ほかはファイル名
 fn env_label(spec: &str) -> String {
-    if spec == STUDIO {
-        fl!("env-studio")
-    } else {
-        environment_label(spec)
+    match describe_environment(spec) {
+        EnvironmentName::Builtin(id) => i18n::get(&format!("env-builtin-{id}")).unwrap_or_else(|| fl!("env-builtin", id = id)),
+        EnvironmentName::File(name) => name,
     }
 }
 
-/// レンダリングの比率の候補（レンダリングの解像度 ÷ 表示の大きさ）
-const RATIOS: [f32; 5] = [0.25, 0.5, 1.0, 1.5, 2.0];
+/// 環境マップの一覧のヒント：内蔵のものは説明（env-builtin-<ID>-tip）、ほかはパス
+fn env_tip(spec: &str) -> String {
+    match describe_environment(spec) {
+        EnvironmentName::Builtin(id) => i18n::get(&format!("env-builtin-{id}-tip")).unwrap_or_default(),
+        EnvironmentName::File(_) => spec.to_string(),
+    }
+}
 
-/// "WxH" を読む（"fit" や空は None）
-fn parse_size(s: &str) -> Option<(u32, u32)> {
-    let lower = s.to_lowercase();
-    let (w, h) = lower.split_once(['x', '×'])?;
-    let (w, h) = (w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?);
-    (w > 0 && h > 0 && w <= 16384 && h <= 16384).then_some((w, h))
+/// レンダリングの比率の候補（レンダリングの解像度 ÷ 表示の大きさ）。メニューとパネルで選べるもの
+const RATIOS: [f32; 5] = [0.25, 0.5, 1.0, 1.5, 2.0];
+/// --render-ratio と覚えた比率で使える範囲。0.1 未満は粗すぎて形が分からず、4 を超えると画素数（16 倍）と時間に見合う違いが無い。
+/// メニューの候補（RATIOS）に無い値も、コマンドラインからは使える
+pub const RENDER_RATIO_RANGE: std::ops::RangeInclusive<f32> = 0.1..=4.0;
+
+/// 描画のサイズの指定（--render-size）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderSize {
+    /// ウィンドウに合わせる（"fit"）
+    Fit,
+    /// 決まったサイズ（"WxH"）
+    Fixed(u32, u32),
+}
+
+/// --render-size の値を読む："fit" か "WxH"（"1920x1080"。"×" も可）。読めない・範囲外なら Err（黙って「ウィンドウに合わせる」にしない）
+pub fn parse_render_size(s: &str) -> Result<RenderSize, String> {
+    let lower = s.trim().to_lowercase();
+    if lower == "fit" {
+        return Ok(RenderSize::Fit);
+    }
+    let bad = || format!("'{s}' is not a rendering size (WxH such as 1920x1080, or fit)");
+    let (w, h) = lower.split_once(['x', '×']).ok_or_else(bad)?;
+    let (w, h) = (w.trim().parse::<i64>().map_err(|_| bad())?, h.trim().parse::<i64>().map_err(|_| bad())?);
+    if !remember::valid_render_size(w, h) {
+        return Err(format!("rendering size {w}x{h} is out of range (1 .. {} per side)", remember::MAX_RENDER_SIZE));
+    }
+    Ok(RenderSize::Fixed(w as u32, h as u32))
+}
+
+/// --render-ratio の値を読む（RENDER_RATIO_RANGE の中の数）
+pub fn parse_render_ratio(s: &str) -> Result<f32, String> {
+    let r: f32 = s.trim().parse().map_err(|_| format!("'{s}' is not a number"))?;
+    if !RENDER_RATIO_RANGE.contains(&r) {
+        return Err(format!("rendering ratio {r} is out of range ({} .. {})", RENDER_RATIO_RANGE.start(), RENDER_RATIO_RANGE.end()));
+    }
+    Ok(r)
 }
 
 /// w x h の画像を、縦横比を保って領域 vp の中央に収めた矩形
@@ -177,6 +281,52 @@ struct ReloadDone {
     materials: bool,
 }
 
+/// UI（メニュー・パネル・キー・マウス）とテストからの要求。フレームの中でまとめて処理し、処理したものは戻す
+#[derive(Default)]
+struct Requests {
+    /// S キー・メニュー：番号を付けて PNG と EXR を保存する
+    save: bool,
+    /// メニュー「PNG / EXR として保存...」：保存のダイアログを開く
+    save_as: Option<SaveFormat>,
+    /// メニュー：基板の設定ファイルの置き場所を変える・ファイルを表示する
+    settings_location: Option<board_file::Location>,
+    reveal_settings: bool,
+    /// 視点を戻す（R）
+    reset_view: bool,
+    auto_exposure: bool,
+    /// メニュー：パネルの設定をすべて既定（設定ファイルとコマンドライン）に戻し、覚えたものを忘れる
+    reset_all: bool,
+    /// 最初のフレーム：3D 表示の大きさが決まったので、最初の視点（覚えた視点、無ければ自動の構図）を合わせ直す
+    start_view: bool,
+    quit: bool,
+    /// 決まったサイズに合わせてウィンドウの大きさを変える
+    fit_window: bool,
+    /// メニューで表示の言語を選んだ（Some(None)：自動）
+    language: Option<Option<String>>,
+    /// D キー／ボタン：ノイズ除去が CPU のとき、手動で 1 回かける
+    denoise_now: bool,
+    /// Ctrl + クリック：その点にピントを合わせる
+    focus_pick: Option<(f64, f64)>,
+    /// クリック：その点の部品を選ぶ
+    part_pick: Option<(f64, f64)>,
+    /// 保存を待たずに基板を読み直す（テスト）
+    reload: bool,
+    /// 選んだ部品の全部位にこの材質を割り当てる（テスト）
+    assign_all: Option<String>,
+}
+
+/// 変わったもの（GPU へ送るまで立てておく）
+#[derive(Default)]
+struct Changes {
+    /// カメラ・照明・レンズ・色の計算が変わった（累積をやり直す）
+    frame: bool,
+    /// 材質（凹凸の強さ・レジストの色）を GPU へ送り直す
+    materials: bool,
+    /// パネルでレジストの色を選び直した
+    mask: bool,
+    integrator: bool,
+}
+
 /// 入力・操作パネルで変わる表示の状態
 struct ViewState {
     target: Vec3,
@@ -197,43 +347,19 @@ struct ViewState {
     mode: DisplayMode,
     /// 右側の設定パネルを出すか（閉じてもメニューの「表示」や F1 / Tab で再表示）
     show_panel: bool,
-    /// カメラ・照明が変わった（累積をやり直す）
-    dirty: bool,
-    materials_dirty: bool,
     /// レジストの色：None = 設定どおり、Some = プリセットの添字
     mask_choice: Option<usize>,
-    mask_changed: bool,
-    save_requested: bool,
-    /// メニュー「PNG / EXR として保存...」：保存のダイアログを開く
-    save_as_requested: Option<SaveFormat>,
-    /// メニュー：基板の設定ファイルの置き場所を変える・ファイルを表示する
-    settings_location_requested: Option<board_file::Location>,
-    reveal_settings_requested: bool,
-    reset_requested: bool,
-    auto_exposure_requested: bool,
-    /// メニュー：パネルの設定をすべて既定（設定ファイルとコマンドライン）に戻し、覚えたものを忘れる
-    reset_all_requested: bool,
-    /// 最初のフレーム：3D 表示の大きさが決まったので、最初の視点（覚えた視点、無ければ自動の構図）を合わせ直す
-    start_requested: bool,
-    quit_requested: bool,
     /// レンダリングを一時停止する（サンプルを積み足さない。GPU の弱い PC で操作を軽くする）
     paused: bool,
     spectral: bool,
-    integrator_changed: bool,
     rotating: bool,
     panning: bool,
-    /// Ctrl + クリック：その点にピントを合わせる
-    focus_pick: Option<(f64, f64)>,
     /// 左ボタンを押した位置と、そこから動いた量（ほとんど動かさずに離したらクリック）
     press_at: Option<(f64, f64)>,
     press_moved: f64,
-    /// クリック：その点の部品を選ぶ
-    part_pick: Option<(f64, f64)>,
     /// ノイズ除去（OIDN）した画像を表示する。強さは元の画像と混ぜる割合（1 で OIDN の結果そのまま）
     denoise: bool,
     denoise_strength: f32,
-    /// D キー／ボタン：ノイズ除去が CPU のとき、手動で 1 回かける
-    denoise_requested: bool,
     last_cursor: (f64, f64),
     ctrl: bool,
     /// 3D 表示の領域（ウィンドウのうちメニューとパネルを除いた所、物理ピクセル）
@@ -244,17 +370,145 @@ struct ViewState {
     size_mode: Option<(u32, u32)>,
     /// レンダリングの比率（レンダリングの解像度 ÷ 表示の大きさ）
     render_ratio: f32,
-    /// 決まったサイズに合わせてウィンドウの大きさを変える
-    fit_window_requested: bool,
-    /// メニューで表示の言語を選んだ（Some(None)：自動）
-    language_requested: Option<Option<String>>,
     tan_half_fov_y: f32,
+    req: Requests,
+    changed: Changes,
 }
 
 impl ViewState {
     fn glow_params(&self) -> GlowParams {
         GlowParams { strength: self.glow, threshold: self.glow_threshold, spread: self.glow_spread }
     }
+}
+
+/// ビューアだけの設定（パネルの表示の欄など）の初めの値：コマンドライン、覚えた値、既定の順に決める。
+/// 起動時は覚えた値で、「すべて既定に戻す」では空の値で作る（どちらも同じ決め方になる）
+struct ViewerSettings {
+    max_spp: u32,
+    denoise: bool,
+    denoise_strength: f32,
+    mode: DisplayMode,
+    size_mode: Option<(u32, u32)>,
+    render_ratio: f32,
+}
+
+/// 最大のサンプル数の既定値
+const DEFAULT_MAX_SPP: u32 = 4096;
+
+impl ViewerSettings {
+    fn new(vo: &ViewOptions, remembered: &remember::ViewValues) -> Self {
+        let r = remember::ViewerValues::of(remembered);
+        let size_mode = match vo.render_size {
+            Some(RenderSize::Fit) => None,
+            Some(RenderSize::Fixed(w, h)) => Some((w, h)),
+            None => remember::render_size_of(remembered),
+        };
+        Self {
+            max_spp: pow2_spp(vo.common.spp.or(r.max_spp).unwrap_or(DEFAULT_MAX_SPP)),
+            denoise: vo.common.denoise.or(r.denoise).unwrap_or(false),
+            denoise_strength: vo.common.denoise_strength.or(r.denoise_strength).unwrap_or(1.0),
+            mode: r.display_mode.as_deref().map(display_mode_of).unwrap_or(DisplayMode::Beauty),
+            size_mode,
+            render_ratio: vo.render_ratio.or(r.render_ratio).map(|x| x.clamp(*RENDER_RATIO_RANGE.start(), *RENDER_RATIO_RANGE.end())).unwrap_or(1.0),
+        }
+    }
+
+    fn apply(&self, st: &mut ViewState) {
+        st.max_spp = self.max_spp;
+        st.denoise = self.denoise;
+        st.denoise_strength = self.denoise_strength;
+        st.mode = self.mode;
+        st.size_mode = self.size_mode;
+        st.render_ratio = self.render_ratio;
+        st.req.fit_window = self.size_mode.is_some();
+    }
+}
+
+/// 設定のレジストの色に当たるプリセット（無ければ None ＝「設定どおり」）
+fn mask_choice_of(s: &SceneOptions) -> Option<usize> {
+    if s.mask_preset.is_empty() {
+        None
+    } else {
+        mask_presets().iter().position(|p| p.name == s.mask_preset)
+    }
+}
+
+/// 選んだ部品の材質を書き込む先
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssignScope {
+    /// この部品だけ（<名前>.krbr の [ref.<部品番号>]）
+    Part,
+    /// このモデル（このプロジェクトの <名前>.krbr）
+    ModelProject,
+    /// このモデル（全体設定の model_map.toml）
+    ModelGlobal,
+}
+
+/// キー操作
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum KeyAction {
+    Quit,
+    TogglePanel,
+    ResetView,
+    Save,
+    Pause,
+    DenoiseNow,
+    /// 露出を変える（EV）
+    Exposure(f32),
+    /// 環境マップを回す（度）
+    RotateEnvironment(f32),
+    Mode(DisplayMode),
+}
+
+/// キーの割り当ての 1 行（ヘルプの 1 行）
+struct KeyBinding {
+    /// 表示するキーの名前
+    label: &'static str,
+    keys: &'static [(KeyCode, KeyAction)],
+    /// ヘルプの説明（i18n の id）と、起動時のログの説明（英語）
+    help: &'static str,
+    log: &'static str,
+}
+
+/// +/- で変える露出（EV）と、[ / ] で回す環境マップの角度（度）
+const EXPOSURE_STEP_EV: f32 = 0.25;
+const ENV_ROTATION_STEP_DEG: f32 = 15.0;
+
+/// キーの割り当て。キー処理・ヘルプのメニュー・起動時のログは、どれもこの表から作る
+const KEY_BINDINGS: &[KeyBinding] = &[
+    KeyBinding { label: "F1 / Tab", keys: &[(KeyCode::F1, KeyAction::TogglePanel), (KeyCode::Tab, KeyAction::TogglePanel)], help: "key-panel", log: "panel" },
+    KeyBinding { label: "R / F", keys: &[(KeyCode::KeyR, KeyAction::ResetView), (KeyCode::KeyF, KeyAction::ResetView)], help: "key-reset-view", log: "reset view" },
+    KeyBinding { label: "S", keys: &[(KeyCode::KeyS, KeyAction::Save)], help: "key-save", log: "save" },
+    KeyBinding { label: "P", keys: &[(KeyCode::KeyP, KeyAction::Pause)], help: "key-pause", log: "pause" },
+    KeyBinding { label: "D", keys: &[(KeyCode::KeyD, KeyAction::DenoiseNow)], help: "key-denoise", log: "denoise now (CPU)" },
+    KeyBinding {
+        label: "+ / -",
+        keys: &[
+            (KeyCode::Equal, KeyAction::Exposure(EXPOSURE_STEP_EV)),
+            (KeyCode::NumpadAdd, KeyAction::Exposure(EXPOSURE_STEP_EV)),
+            (KeyCode::Minus, KeyAction::Exposure(-EXPOSURE_STEP_EV)),
+            (KeyCode::NumpadSubtract, KeyAction::Exposure(-EXPOSURE_STEP_EV)),
+        ],
+        help: "key-exposure",
+        log: "exposure",
+    },
+    KeyBinding {
+        label: "[ / ]",
+        keys: &[(KeyCode::BracketLeft, KeyAction::RotateEnvironment(-ENV_ROTATION_STEP_DEG)), (KeyCode::BracketRight, KeyAction::RotateEnvironment(ENV_ROTATION_STEP_DEG))],
+        help: "key-env-rotation",
+        log: "rotate environment",
+    },
+    KeyBinding {
+        label: "1 / 2 / 3",
+        keys: &[(KeyCode::Digit1, KeyAction::Mode(DisplayMode::Beauty)), (KeyCode::Digit2, KeyAction::Mode(DisplayMode::Albedo)), (KeyCode::Digit3, KeyAction::Mode(DisplayMode::Normal))],
+        help: "key-display-mode",
+        log: "image/albedo/normal",
+    },
+    KeyBinding { label: "Esc", keys: &[(KeyCode::Escape, KeyAction::Quit)], help: "key-quit", log: "quit" },
+];
+
+fn key_action(code: KeyCode) -> Option<KeyAction> {
+    KEY_BINDINGS.iter().flat_map(|b| b.keys).find(|(k, _)| *k == code).map(|(_, a)| *a)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -279,10 +533,18 @@ struct EnvData {
     error: String,
 }
 
+/// 読み込み中の環境マップ
+struct EnvJob {
+    path: String,
+    rx: mpsc::Receiver<EnvData>,
+    /// 読み終えたら、この基板で使ったものとして覚える（「すべて既定に戻す」で設定ファイルのものに戻すときは覚えない）
+    remember: bool,
+}
+
 fn load_environment(path: String) -> EnvData {
     match load_environment_map(&path) {
         Ok(image) => {
-            let dist = build_env_distribution(&image, 2048);
+            let dist = build_env_distribution(&image, ENV_DIST_RESOLUTION);
             EnvData { path, image, dist, error: String::new() }
         }
         Err(e) => EnvData { path, image: ImageF::default(), dist: EnvDistribution::default(), error: e },
@@ -293,21 +555,12 @@ fn is_env_file(p: &Path) -> bool {
     matches!(p.extension().map(|e| e.to_string_lossy().to_lowercase()).as_deref(), Some("hdr") | Some("exr"))
 }
 
-/// 同じ環境マップか（Windows では大文字・小文字と区切り文字の違いを無視する）
-fn same_env(a: &str, b: &str) -> bool {
-    if cfg!(windows) {
-        a.replace('\\', "/").eq_ignore_ascii_case(&b.replace('\\', "/"))
-    } else {
-        a == b
-    }
-}
-
 /// 選べる環境マップ：内蔵のスタジオ、最近使ったもの、今のものと同じフォルダの .hdr / .exr（重なりは除く）
 fn list_environments(current: &str) -> Vec<Vec<String>> {
     let mut groups: Vec<Vec<String>> = vec![vec![STUDIO.to_string()]];
     let mut seen: Vec<String> = vec![STUDIO.to_string()];
     let mut add = |groups: &mut Vec<Vec<String>>, items: Vec<String>| {
-        let items: Vec<String> = items.into_iter().filter(|p| !seen.iter().any(|s| same_env(s, p))).collect();
+        let items: Vec<String> = items.into_iter().filter(|p| !seen.iter().any(|s| remember::same_hdr(s, p))).collect();
         seen.extend(items.iter().cloned());
         if !items.is_empty() {
             groups.push(items);
@@ -413,19 +666,17 @@ struct App {
     /// 「名前を付けて保存」のダイアログ（別スレッド）の結果と、選ばれた保存先（次のフレームで書く）
     save_dialog: Option<(SaveFormat, mpsc::Receiver<Option<PathBuf>>)>,
     save_as_target: Option<(SaveFormat, PathBuf)>,
-    env_job: Option<(String, mpsc::Receiver<EnvData>)>,
+    env_job: Option<EnvJob>,
     env_error: String,
     /// 保存の監視（--no-watch なら None）
     watcher: Option<FileWatcher>,
     reload_job: Option<mpsc::Receiver<ReloadDone>>,
+    /// 保存による読み直しを終えた回数（読めなかったときも数える）
+    saved_reloads: u32,
     /// 前回シーンを組み立てたときの、裏で分割し終えた 3D モデルの数（増えたら組み直す）
     models_seen: usize,
-    test_reload_started: bool,
-    test_reload_applied: bool,
     /// 線フォントの文字の書き出し（kicad-cli、裏のスレッド）
-    silk_job: Option<mpsc::Receiver<SilkPlot>>,
-    /// 書き出しの間にまた文字が変わった（終わったらもう一度書き出す）
-    silk_rerun: bool,
+    silk_job: SilkJob,
     /// 新しいシルクを受け取った（凹凸タイルを全部作り直す）
     silk_dirty: bool,
     /// クリックで選んだ部品と、その輪郭線
@@ -433,13 +684,12 @@ struct App {
     outline: Option<Outline>,
     /// 材質の割り当てを書き換えた（材質の設定を読み直して組み直す）
     materials_dirty_files: bool,
-    /// 選んだ部品の材質を書き込む先：0 この部品だけ、1 このモデル（このプロジェクト）、2 このモデル（全体設定）
-    assign_scope: usize,
+    /// 選んだ部品の材質を書き込む先
+    assign_scope: AssignScope,
     material_names: Vec<String>,
     material_error: String,
     /// 発光の色・明るさの編集中の値（ドラッグ中に毎回書き込まないよう、止まってから書く）
     emit_edit: Option<EmitEdit>,
-    test_pick_done: bool,
     /// ノイズ除去：作ってみたか（失敗したら作り直さない）、累積をやり直した回数、どの累積をいくつのサンプルで除去したか
     denoiser_tried: bool,
     denoise_error: String,
@@ -453,6 +703,7 @@ struct App {
     samples_per_frame: u32,
     need_recreate: bool,
     frames: u32,
+    /// S キーの保存の次の番号の候補（実際の番号は、既存のファイルと重ならないところまで進める）
     save_index: u32,
     /// 今の累積の計測：サンプルを描いたフレームの時間の合計（一時停止・完了の間は増えない）、GPU がサンプルを描いた時間の合計、そのサンプル数
     accum_wall: Duration,
@@ -461,12 +712,10 @@ struct App {
     last_change_at: Instant,
     last_frame_ms: f64,
     last_gpu_ms: f64,
-    /// パネルの設定：最後に見た値、最後に覚えた（state.toml に書いた）値、最後に変わった時刻。変わってから 1 秒たったら書く
+    /// パネルの設定：最後に見た値、最後に覚えた（<名前>.krbr に書いた）値、最後に変わった時刻。変わってから 1 秒たったら書く
     view_seen: remember::ViewValues,
     view_saved: remember::ViewValues,
     view_changed_at: Instant,
-    /// 「すべて既定に戻す」の直後：戻した値が反映されたら、それを覚えずに基準にする（覚えていない状態のままにする）
-    view_rebase: bool,
     /// ウィンドウの状態（基板によらず 1 つ）：起動時に読んだもの・最後に見たもの・最後に覚えたもの・最後に変わった時刻
     win_start: remember::WindowState,
     win_seen: remember::WindowState,
@@ -476,15 +725,60 @@ struct App {
     panel_width: f32,
     /// 決まったサイズに合わせてウィンドウの大きさを変えている途中：あと何フレーム合わせ直すか
     fit_frames: u32,
-    /// 次に読み終えた環境マップを覚えない（「すべて既定に戻す」で設定ファイルのものに戻したとき）
-    env_no_remember: bool,
     /// 表示の言語（決まった言語タグ）と、メニューで選んだもの（None：自動）
     language: String,
     language_choice: Option<String>,
     out_dir: PathBuf,
     stem: String,
+    /// 開発用のテストの操作
+    test: TestHooks,
     rc: i32,
     done: bool,
+}
+
+/// egui の UI を描いた結果（テクスチャの更新、描くもの、3D 表示の領域）
+struct UiFrame {
+    textures: egui::TexturesDelta,
+    primitives: Vec<egui::ClippedPrimitive>,
+    pixels_per_point: f32,
+    central: egui::Rect,
+}
+
+/// 表示したフレームの結果
+struct Presented {
+    /// ノイズ除去した画像を表示した
+    denoised: bool,
+    /// テストの最後のフレームで読み戻した、表示した画像（スワップチェーンの画像）
+    screenshot: Option<Buffer>,
+    extent: vk::Extent2D,
+}
+
+/// S キーで保存する 1 回分のファイル
+struct SavePaths {
+    png: PathBuf,
+    exr: PathBuf,
+    denoised_png: PathBuf,
+    denoised_exr: PathBuf,
+}
+
+impl SavePaths {
+    fn any_exists(&self) -> bool {
+        [&self.png, &self.exr, &self.denoised_png, &self.denoised_exr].iter().any(|p| p.exists())
+    }
+}
+
+/// 表示している画像（リニア sRGB）を読み戻す：denoised ならノイズ除去して元の画像と混ぜたもの、それ以外は累積。GPU が待機中に呼ぶこと
+fn read_image(g: &Gpu, denoised: bool) -> Result<ImageF, String> {
+    match g.denoiser.as_ref().filter(|_| denoised) {
+        Some(d) => {
+            let mut img = d.try_read_output()?;
+            if g.prog.xyz_output() {
+                krbr_render::integrator::xyz_to_linear_srgb(&mut img);
+            }
+            Ok(img)
+        }
+        None => Ok(g.prog.try_readback()?.color),
+    }
 }
 
 /// egui の座標（ポイント）の領域を、w x h の中に収めた物理ピクセルの領域にする（1 ピクセル以上）
@@ -500,6 +794,19 @@ fn viewport_px(r: egui::Rect, ppp: f32, w: u32, h: u32) -> Viewport {
 }
 
 const TARGET_FRAME_MS: f64 = 10.0; // 60fps（16.7 ms）に収まるよう、表示処理の分を残す
+
+/// 決まったサイズに合わせてウィンドウの大きさを変えるとき、合わせ直す最大のフレーム数。大きさを変えると、メニューの折り返しや
+/// パネル・ステータスバーの大きさも変わり、1 回では 3D 表示の領域が目標にならないことがある。目標に達したらそこで止める（通常 1〜2 フレーム）
+const FIT_RETRY_FRAMES: u32 = 6;
+/// 画面のうちウィンドウに使ってよい割合（幅, 高さ）。winit は作業領域（タスクバーを除いた領域）を返さないので、
+/// 画面全体からの割合で近似する（下端のタスクバー 40〜48 px と、上下左右の余白を見込む）
+const MONITOR_USABLE_FRACTION: (f32, f32) = (0.96, 0.92);
+/// 前回の位置を使うのは、ウィンドウの左上からこの点（タイトルバーの左寄り）が、今つながっている画面に入っているとき
+/// （画面を外した後に、つかんで動かせない所へ出さない）
+const TITLE_BAR_PROBE: (i32, i32) = (40, 10);
+/// 覚えた大きさが無いときのウィンドウの中の大きさ（物理ピクセル）と、設定パネルの幅（egui のポイント）
+const DEFAULT_WINDOW_SIZE: (u32, u32) = (1600, 900);
+const DEFAULT_PANEL_WIDTH: f32 = 340.0;
 
 fn ratio_label(r: f32) -> String {
     let what = if r < 1.0 {
@@ -525,7 +832,7 @@ fn size_controls(ui: &mut egui::Ui, st: &mut ViewState) {
         for (w, h) in SIZE_PRESETS {
             if ui.selectable_label(st.size_mode == Some((w, h)), size_label(w, h)).clicked() && st.size_mode != Some((w, h)) {
                 st.size_mode = Some((w, h));
-                st.fit_window_requested = true;
+                st.req.fit_window = true;
             }
         }
     });
@@ -534,7 +841,7 @@ fn size_controls(ui: &mut egui::Ui, st: &mut ViewState) {
         for r in RATIOS {
             if ui.selectable_label(st.render_ratio == r, ratio_label(r)).clicked() && st.render_ratio != r {
                 st.render_ratio = r;
-                st.fit_window_requested = st.size_mode.is_some();
+                st.req.fit_window = st.size_mode.is_some();
             }
         }
     });
@@ -597,20 +904,17 @@ impl App {
         c.azimuth_deg = st.azimuth;
         c.render_size = st.size_mode;
         let mut v = c.values();
-        v.insert("render_ratio".into(), toml::Value::Float(st.render_ratio as f64));
         remember::set_camera(&mut v, st.target, st.distance);
-        v.insert("display_mode".into(), toml::Value::String(display_mode_name(st.mode).into()));
-        v.insert("denoise".into(), toml::Value::Boolean(st.denoise));
-        v.insert("denoise_strength".into(), toml::Value::Float(st.denoise_strength as f64));
-        v.insert("max_spp".into(), toml::Value::Integer(st.max_spp as i64));
+        remember::ViewerValues { denoise: Some(st.denoise), denoise_strength: Some(st.denoise_strength), max_spp: Some(st.max_spp), display_mode: Some(display_mode_name(st.mode).into()), render_ratio: Some(st.render_ratio) }.write(&mut v);
         v
     }
 
     /// 決まったサイズのとき、3D 表示の領域が「描画のサイズ ÷ 比率」になるようにウィンドウの大きさを変える。
-    /// 画面に入らなければ、入るまで比率を上げる。メニュー・パネル・ステータスバーの大きさが変わることがあるので、数フレームかけて合わせる
+    /// 画面に入らなければ、入るまで比率を上げる。メニュー・パネル・ステータスバーの大きさが変わることがあるので、
+    /// 目標に達するまで（最大 FIT_RETRY_FRAMES フレーム）合わせ直す
     fn fit_window(&mut self) {
         let Some((w, h)) = self.st.size_mode else {
-            self.st.fit_window_requested = false;
+            self.st.req.fit_window = false;
             self.fit_frames = 0;
             return;
         };
@@ -619,8 +923,8 @@ impl App {
         let vp = self.st.viewport;
         // 領域以外（メニュー・パネル・ステータスバー）の大きさ
         let (extra_w, extra_h) = (inner.width.saturating_sub(vp.w), inner.height.saturating_sub(vp.h));
-        if self.st.fit_window_requested {
-            self.st.fit_window_requested = false;
+        if self.st.req.fit_window {
+            self.st.req.fit_window = false;
             if window.is_maximized() {
                 window.set_maximized(false);
             }
@@ -628,16 +932,18 @@ impl App {
             if let Some(m) = window.current_monitor() {
                 let outer = window.outer_size();
                 let (deco_w, deco_h) = (outer.width.saturating_sub(inner.width), outer.height.saturating_sub(inner.height));
-                let (mw, mh) = (m.size().width as f32 * 0.96, m.size().height as f32 * 0.92);
+                let (mw, mh) = (m.size().width as f32 * MONITOR_USABLE_FRACTION.0, m.size().height as f32 * MONITOR_USABLE_FRACTION.1);
                 let fits = |r: f32| (w as f32 / r) + (extra_w + deco_w) as f32 <= mw && (h as f32 / r) + (extra_h + deco_h) as f32 <= mh;
                 krbr_core::debug!("fit window: monitor {}x{}, inner {}x{}, outer {}x{}, 3D view {}x{}", m.size().width, m.size().height, inner.width, inner.height, outer.width, outer.height, vp.w, vp.h);
-                if !fits(self.st.render_ratio) {
-                    let r = RATIOS.iter().copied().find(|&r| r > self.st.render_ratio && fits(r)).unwrap_or(*RATIOS.last().unwrap());
+                let cur = self.st.render_ratio;
+                if !fits(cur) {
+                    // 候補の中で入る最小の比率。どれも入らなければ候補の最大（今の比率がそれより大きければ今のまま。比率を下げると大きくなる）
+                    let r = RATIOS.iter().copied().find(|&r| r > cur && fits(r)).unwrap_or(RATIOS[RATIOS.len() - 1].max(cur));
                     self.last_update = fl!("fit-too-large", size = format!("{w}×{h}"), ratio = r.to_string(), percent = format!("{:.0}", 100.0 / r));
                     self.st.render_ratio = r;
                 }
             }
-            self.fit_frames = 6;
+            self.fit_frames = FIT_RETRY_FRAMES;
         }
         if self.fit_frames == 0 {
             return;
@@ -671,7 +977,7 @@ impl App {
     /// パネルの設定とウィンドウの状態が変わっていたら覚える（最後に変わってから 1 秒たったら。now なら待たずに）
     fn save_view(&mut self, now: bool) {
         // ウィンドウ（表示しないテストのときは覚えない）
-        if !(self.vo.hidden || self.vo.test_frames > 0) {
+        if !(self.vo.hidden || self.test.active()) {
             if let Some(w) = self.current_window() {
                 if w != self.win_seen {
                     self.win_seen = w;
@@ -684,13 +990,6 @@ impl App {
             }
         }
         let cur = self.current_view();
-        if self.view_rebase {
-            // レジストの色などは次のフレームで設定に反映されるので、ここで基準を取り直す
-            self.view_rebase = false;
-            self.view_seen = cur.clone();
-            self.view_saved = cur;
-            return;
-        }
         if cur != self.view_seen {
             self.view_seen = cur;
             self.view_changed_at = Instant::now();
@@ -715,23 +1014,20 @@ impl App {
         st.bump_intensity = c.scene.bump_intensity;
         st.fov = c.fov_deg;
         st.spectral = c.spectral;
-        st.max_spp = self.vo.common.spp.map(pow2_spp).unwrap_or(4096);
-        st.denoise = self.vo.common.denoise.unwrap_or(false);
-        st.denoise_strength = self.vo.common.denoise_strength.unwrap_or(1.0);
-        st.mode = DisplayMode::Beauty;
-        st.reset_requested = true; // 視点も自動の構図に
-        st.size_mode = None;
-        st.render_ratio = 1.0;
-        st.mask_choice = if c.scene.mask_preset.is_empty() { None } else { mask_presets().iter().position(|p| p.name == c.scene.mask_preset) };
-        st.mask_changed = true;
-        st.materials_dirty = true;
-        st.dirty = true;
+        // ビューアだけの項目は、起動時と同じ決め方（コマンドライン、既定）で。覚えた値は使わない
+        ViewerSettings::new(&self.vo, &remember::ViewValues::new()).apply(st);
+        st.mask_choice = mask_choice_of(&c.scene);
+        st.changed.materials = true;
+        st.changed.frame = true;
         if self.prep.cfg.integrator != c.integrator {
-            self.prep.cfg.integrator = c.integrator.clone();
-            st.integrator_changed = true;
+            self.prep.cfg.integrator = c.integrator;
+            st.changed.integrator = true;
         }
         self.prep.cfg.lens = c.lens.clone();
-        // 環境マップ：--hdr、設定ファイルの [environment] hdr、内蔵のスタジオ（読み込みが終わると、それを覚え直す）
+        // レジストの色と視点（自動の構図）はここで設定に反映する（下で、覚える値の基準をこの値に取り直すため）
+        self.apply_mask_choice();
+        self.reset_camera(self.st.display.w, self.st.display.h);
+        // 環境マップ：--hdr、設定ファイルの [environment] hdr、内蔵のスタジオ（読み終えても覚えない）
         let hdr = if !self.vo.common.hdr.is_empty() {
             remember::normalize_hdr(&self.vo.common.hdr)
         } else if !self.prep.config_hdr.is_empty() {
@@ -739,14 +1035,38 @@ impl App {
         } else {
             STUDIO.to_string()
         };
-        if self.env_job.is_none() && !same_env(&hdr, &self.env_path) {
-            self.env_no_remember = true;
-            self.start_env_load(hdr);
+        if self.env_job.is_none() && !remember::same_hdr(&hdr, &self.env_path) {
+            self.start_env_load(hdr, false);
         }
-        // 戻した値は覚えない（忘れた状態のままにする。次に変えたときから、また覚える）
-        self.view_rebase = true;
+        // 戻した値は覚えない：今の値を基準にする（忘れた状態のまま。次に変えたときから、また覚える）
+        self.view_seen = self.current_view();
+        self.view_saved = self.view_seen.clone();
         self.last_update = fl!("reset-all-done");
         info!("panel settings reset to the configuration files");
+    }
+
+    /// パネルで選んだレジストの色を、設定とシーンの材質に反映する（GPU へは changed.materials で送る）
+    fn apply_mask_choice(&mut self) {
+        match self.st.mask_choice {
+            None => {
+                let s = &self.scene_as_configured;
+                let o = &mut self.prep.cfg.scene;
+                o.mask_color = s.mask_color;
+                o.mask_color_set = s.mask_color_set;
+                o.mask_roughness = s.mask_roughness;
+                o.mask_scatter = s.mask_scatter;
+                o.mask_preset = s.mask_preset.clone();
+                o.silk_color = s.silk_color;
+            }
+            Some(i) => {
+                let name = mask_presets()[i].name;
+                if let Err(e) = apply_mask_color_spec(&mut self.prep.cfg.scene, name) {
+                    warn!("solder mask {name}: {e}");
+                }
+            }
+        }
+        update_mask_material(&mut self.prep.scene, &self.prep.board, &self.prep.cfg.scene);
+        self.st.changed.materials = true;
     }
 
     /// 最初の視点：この基板で覚えた視点、無ければ自動の構図
@@ -759,7 +1079,7 @@ impl App {
         self.st.azimuth = cfg.azimuth_deg;
         self.st.fov = cfg.fov_deg;
         self.st.tan_half_fov_y = c.tan_half_fov_y;
-        self.st.dirty = true;
+        self.st.changed.frame = true;
     }
 
     /// 視点を戻す（R）：設定ファイルとコマンドラインの仰角・方位・画角での自動の構図
@@ -773,7 +1093,7 @@ impl App {
         self.st.azimuth = cfg.azimuth_deg;
         self.st.fov = cfg.fov_deg;
         self.st.tan_half_fov_y = c.tan_half_fov_y;
-        self.st.dirty = true;
+        self.st.changed.frame = true;
     }
 
     fn current_frame(&mut self, w: u32, h: u32) -> krbr_render::FrameParams {
@@ -786,8 +1106,9 @@ impl App {
         frame_params(&c, cam, self.vo.common.seed)
     }
 
-    fn start_env_load(&mut self, path: String) {
-        if self.env_job.is_some() || same_env(&path, &self.env_path) {
+    /// 環境マップを裏のスレッドで読み込む。remember：読み終えたら、この基板で使ったものとして覚える
+    fn start_env_load(&mut self, path: String, remember: bool) {
+        if self.env_job.is_some() || remember::same_hdr(&path, &self.env_path) {
             return;
         }
         info!("loading environment {}", path);
@@ -797,24 +1118,25 @@ impl App {
             krbr_core::platform::lower_thread_priority();
             let _ = tx.send(load_environment(p));
         });
-        self.env_job = Some((path, rx));
+        self.env_job = Some(EnvJob { path, rx, remember });
         self.env_error.clear();
     }
 
     fn init_gpu(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
-        let hidden = self.vo.hidden || self.vo.test_frames > 0;
+        let hidden = self.vo.hidden || self.test.active();
         let sized = self.vo.common.width.is_some() || self.vo.common.height.is_some();
         let saved = if hidden || sized { remember::WindowState::default() } else { self.win_start.clone() };
-        let (sw, sh) = saved.size.unwrap_or((1600, 900));
+        let (sw, sh) = saved.size.unwrap_or(DEFAULT_WINDOW_SIZE);
         let (w, h) = (self.vo.common.width.unwrap_or(sw), self.vo.common.height.unwrap_or(sh));
         // ウィンドウのアイコン（exe に埋め込んだものと同じ絵。scripts/make_icon.py で作る 64x64 の RGBA）
         let icon = winit::window::Icon::from_rgba(include_bytes!("../../../krbr/assets/krbr_64.rgba").to_vec(), 64, 64).ok();
         let attrs = Window::default_attributes().with_window_icon(icon).with_title(self.base_title.clone()).with_inner_size(winit::dpi::PhysicalSize::new(w, h)).with_visible(!hidden).with_active(!hidden).with_maximized(saved.maximized);
-        // 前回の位置：今つながっている画面のどれかに、ウィンドウの左上の近くが入っているときだけ（画面を外した後に見えない所へ出さない）
+        // 前回の位置：今つながっている画面のどれかに、タイトルバーの左寄りの点が入っているときだけ
         let attrs = match saved.position {
             Some((x, y)) if el.available_monitors().any(|m| {
                 let (p, s) = (m.position(), m.size());
-                x + 40 >= p.x && y + 10 >= p.y && x + 40 < p.x + s.width as i32 && y + 10 < p.y + s.height as i32
+                let (px, py) = (x + TITLE_BAR_PROBE.0, y + TITLE_BAR_PROBE.1);
+                px >= p.x && py >= p.y && px < p.x + s.width as i32 && py < p.y + s.height as i32
             }) => attrs.with_position(winit::dpi::PhysicalPosition::new(x, y)),
             _ => attrs,
         };
@@ -826,7 +1148,7 @@ impl App {
         let ctx: &'static Context = Box::leak(Box::new(Context::new(&ContextOptions { validation: self.vo.common.validate, low_queue_priority: true, instance_extensions: exts, create_surface: Some(factory) })?));
         // 積分器が GpuScene への参照を持つので、ムーブしてもアドレスが変わらないよう Box に入れる
         let mut gpu = Box::new(GpuScene::new(ctx));
-        gpu.build(&self.prep.scene, &self.prep.env, &self.prep.dist, self.st.bump_intensity);
+        gpu.try_build(&self.prep.scene, &self.prep.env, &self.prep.dist, self.st.bump_intensity).map_err(|e| format!("GPU scene: {e}"))?;
         self.prep.env.rgba = Vec::new();
         if !self.prep.scene.missing.is_empty() {
             warn!("{} 3D model(s) missing or unreadable (see missing_models.txt of a render)", self.prep.scene.missing.len());
@@ -835,12 +1157,13 @@ impl App {
         let (fbw, fbh) = (size.width.max(1), size.height.max(1));
         self.start_camera(fbw, fbh);
         // 3D 表示の大きさはメニューとパネルを置いてから決まるので、最初のフレームで視点を合わせ直す（覚えた視点があればそれ）
-        self.st.start_requested = true;
+        self.st.req.start_view = true;
         let swap = Swapchain::new(ctx, fbw, fbh)?;
         let frame = self.current_frame(swap.extent.width, swap.extent.height);
         // 安全性：Box の中身はムーブされず、Gpu を捨てるときに prog を gpu より先に捨てる（run_viewer）
         let gpu_ref: &'static GpuScene<'static> = unsafe { &*(&*gpu as *const GpuScene<'static>) };
-        let prog = Progressive::new(ctx, gpu_ref, &self.prep.cfg.integrator, swap.extent.width, swap.extent.height, frame)?;
+        let prog = progressive_or_pt(ctx, gpu_ref, self.prep.cfg.integrator, swap.extent.width, swap.extent.height, frame)?;
+        self.prep.cfg.integrator = prog.integrator_kind(); // PT に代えたら、パネルにもそう出す
         let tone = Tonemapper::new(ctx, prog.targets())?;
         let egui_renderer = EguiRenderer::with_gpu_allocator(ctx.allocator.clone(), ctx.device.clone(), RenderMode::DynamicRendering(DynamicRendering { color_attachment_format: swap.format, depth_attachment_format: None, stencil_attachment_format: None }), EguiOptions { in_flight_frames: 1, srgb_framebuffer: false, ..Default::default() })
             .map_err(|e| format!("egui renderer: {e}"))?;
@@ -851,12 +1174,8 @@ impl App {
         let timestamps = unsafe { dev.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(2), None) }.map_err(|e| format!("{e:?}"))?;
         let props = unsafe { ctx.instance.get_physical_device_properties(ctx.physical) };
         let ts_period_ms = props.limits.timestamp_period as f64 * 1e-6;
-        info!(
-            "viewer: {}x{}, up to {} spp. mouse: L=rotate, R/M=pan, wheel=zoom; keys: F1/Tab=panel, R=reset, +/-=exposure, [ ]=rotate environment, 1/2/3=image/albedo/normal, S=save, Esc=quit",
-            swap.extent.width,
-            swap.extent.height,
-            self.st.max_spp
-        );
+        let keys: Vec<String> = KEY_BINDINGS.iter().map(|b| format!("{}={}", b.label, b.log)).collect();
+        info!("viewer: {}x{}, up to {} spp. mouse: left drag=rotate, click=select a part, Ctrl+click=focus, right/middle drag=pan, wheel=zoom; keys: {}", swap.extent.width, swap.extent.height, self.st.max_spp, keys.join(", "));
         install_fonts(&self.egui_ctx, &self.language);
         self.egui_state = Some(EguiState::new(self.egui_ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, None));
         self.gpu = Some(Gpu { ctx, gpu, swap, prog, tone, denoiser: None, tone_denoised: None, egui_renderer, cmd, acquired, fence, timestamps, ts_period_ms });
@@ -879,9 +1198,7 @@ impl App {
                         ui.separator();
                     }
                     for p in group {
-                        let r = ui.selectable_label(same_env(p, &self.env_path), env_label(p));
-                        let r = if is_builtin(p) { r.on_hover_text(fl!("env-studio-tip")) } else { r.on_hover_text(p) };
-                        if r.clicked() {
+                        if ui.selectable_label(remember::same_hdr(p, &self.env_path), env_label(p)).on_hover_text(env_tip(p)).clicked() {
                             chosen = Some(p.clone());
                         }
                     }
@@ -892,17 +1209,17 @@ impl App {
             }
         });
         ui.weak(fl!("env-remember-hint"));
-        if let Some((p, _)) = &self.env_job {
-            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), fl!("env-loading", path = p.as_str()));
+        if let Some(job) = &self.env_job {
+            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), fl!("env-loading", path = job.path.as_str()));
         }
         if !self.env_error.is_empty() {
             ui.colored_label(egui::Color32::from_rgb(255, 102, 102), &self.env_error);
         }
         if ui.add(egui::Slider::new(&mut st.env_intensity, 0.05..=8.0).logarithmic(true).text(fl!("env-intensity"))).changed() {
-            st.dirty = true;
+            st.changed.frame = true;
         }
         if ui.add(egui::Slider::new(&mut st.env_rotation_deg, -180.0..=180.0).suffix("°").text(fl!("env-rotation"))).changed() {
-            st.dirty = true;
+            st.changed.frame = true;
         }
 
         ui.separator();
@@ -910,7 +1227,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.add(egui::Slider::new(&mut st.exposure, -6.0..=6.0).text("EV"));
             if ui.button(fl!("exposure-auto")).clicked() {
-                st.auto_exposure_requested = true;
+                st.req.auto_exposure = true;
             }
             if ui.button("0").clicked() {
                 st.exposure = 0.0;
@@ -931,7 +1248,7 @@ impl App {
                 if let Some(d) = self.gpu.as_ref().and_then(|g| g.denoiser.as_ref()) {
                     ui.weak(format!("{}, {:.0} ms", d.device_name(), self.last_denoise_ms));
                     if on_cpu && ui.button(fl!("denoise-now")).clicked() {
-                        st.denoise_requested = true;
+                        st.req.denoise_now = true;
                     }
                 } else if self.denoiser_tried && st.denoise {
                     ui.weak(fl!("denoise-unavailable"));
@@ -950,21 +1267,20 @@ impl App {
 
         ui.separator();
         ui.strong(fl!("panel-integrator"));
-        let integrators = ["pt", "bdpt", "vcm"];
-        let mut cur = integrators.iter().position(|i| *i == self.prep.cfg.integrator).unwrap_or(0);
+        let mut kind = self.prep.cfg.integrator;
         ui.horizontal(|ui| {
-            ui.radio_value(&mut cur, 0, "PT");
-            ui.radio_value(&mut cur, 1, "BDPT");
-            ui.radio_value(&mut cur, 2, "VCM");
+            for k in IntegratorKind::ALL {
+                ui.radio_value(&mut kind, k, k.as_str().to_uppercase());
+            }
         });
-        if integrators[cur] != self.prep.cfg.integrator {
-            self.prep.cfg.integrator = integrators[cur].to_string();
-            st.integrator_changed = true;
+        if kind != self.prep.cfg.integrator {
+            self.prep.cfg.integrator = kind;
+            st.changed.integrator = true;
         }
-        ui.weak(match cur {
-            0 => fl!("integrator-pt-hint"),
-            1 => fl!("integrator-bdpt-hint"),
-            _ => fl!("integrator-vcm-hint"),
+        ui.weak(match kind {
+            IntegratorKind::Pt => fl!("integrator-pt-hint"),
+            IntegratorKind::Bdpt => fl!("integrator-bdpt-hint"),
+            IntegratorKind::Vcm => fl!("integrator-vcm-hint"),
         });
 
         ui.separator();
@@ -1002,7 +1318,7 @@ impl App {
                 }
             }
             if ch {
-                st.dirty = true;
+                st.changed.frame = true;
             }
         }
 
@@ -1015,13 +1331,13 @@ impl App {
         });
         if spectral != st.spectral {
             st.spectral = spectral;
-            st.dirty = true;
+            st.changed.frame = true;
         }
 
         ui.separator();
         ui.strong(fl!("panel-surface"));
         if ui.add(egui::Slider::new(&mut st.bump_intensity, 0.0..=2.0).text(fl!("bump-intensity"))).changed() {
-            st.materials_dirty = true;
+            st.changed.materials = true;
         }
         {
             let presets = mask_presets();
@@ -1029,14 +1345,14 @@ impl App {
             egui::ComboBox::from_id_salt("mask").width(200.0).selected_text(current).show_ui(ui, |ui| {
                 if ui.selectable_label(st.mask_choice.is_none(), fl!("mask-as-configured")).clicked() && st.mask_choice.is_some() {
                     st.mask_choice = None;
-                    st.mask_changed = true;
+                    st.changed.mask = true;
                 }
                 for (i, p) in presets.iter().enumerate() {
                     let sel = st.mask_choice == Some(i);
                     let note = i18n::get(&format!("mask-note-{}", p.name)).unwrap_or_else(|| p.note.to_string());
                     if ui.selectable_label(sel, p.name).on_hover_text(note).clicked() && !sel {
                         st.mask_choice = Some(i);
-                        st.mask_changed = true;
+                        st.changed.mask = true;
                     }
                 }
             });
@@ -1066,22 +1382,22 @@ impl App {
         let mut fov = st.fov as f32;
         if ui.add(egui::Slider::new(&mut fov, 5.0..=90.0).suffix("°").text(fl!("camera-fov"))).changed() {
             st.fov = fov as f64;
-            st.dirty = true;
+            st.changed.frame = true;
         }
         ui.label(fl!("camera-angles", elevation = format!("{:.0}", st.elevation), azimuth = format!("{:.0}", st.azimuth.rem_euclid(360.0))));
         ui.horizontal(|ui| {
             if ui.button(fl!("camera-reset")).clicked() {
-                st.reset_requested = true;
+                st.req.reset_view = true;
             }
             if ui.button(fl!("camera-save")).clicked() {
-                st.save_requested = true;
+                st.req.save = true;
             }
         });
         ui.separator();
         ui.weak(fl!("panel-help-mouse"));
         ui.weak(fl!("panel-help-toggle"));
         if let Some(p) = chosen {
-            self.start_env_load(p);
+            self.start_env_load(p, true);
         }
         if open_dialog {
             self.start_open_dialog();
@@ -1094,11 +1410,8 @@ impl App {
             return;
         }
         let Some(src) = &self.prep.source else { return };
-        let mut saved = self.watcher.as_mut().is_some_and(|w| w.poll());
-        if self.vo.test_reload && !self.test_reload_started && self.frames >= 5 {
-            saved = true;
-            self.test_reload_started = true;
-        }
+        // 保存を待たずに読み直す要求（テスト）も、保存と同じに扱う
+        let saved = self.watcher.as_mut().is_some_and(|w| w.poll()) | std::mem::take(&mut self.st.req.reload);
         let models_done = src.library.completed();
         let silk = self.silk_dirty;
         let materials = self.materials_dirty_files;
@@ -1148,16 +1461,25 @@ impl App {
         }
     }
 
+    /// 3D 表示のカメラ（画像を置いた矩形 display の縦横比）。クリック・ピント合わせ・輪郭線はこれで換算する
+    fn view_camera(&self) -> Camera {
+        let vp = self.st.display;
+        orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, vp.w as f32 / vp.h.max(1) as f32)
+    }
+
+    /// 画面の点（物理ピクセル）を通る視線：カメラと方向
+    fn view_ray(&self, p: (f64, f64)) -> (Camera, Vec3) {
+        let vp = self.st.display;
+        let c = self.view_camera();
+        let dir = unproject(&c, (p.0 - vp.x as f64) as f32, (p.1 - vp.y as f64) as f32, vp.w.max(1) as f32, vp.h.max(1) as f32);
+        (c, dir)
+    }
+
     /// 画面の点（物理ピクセル）の部品を選ぶ。基板や何も無い所なら選択を外す
     fn pick_part(&mut self, p: (f64, f64)) {
         self.flush_emit_edit(true);
         self.emit_edit = None;
-        let vp = self.st.display;
-        let (ww, wh) = (vp.w as f64, vp.h as f64);
-        let (px, py) = (p.0 - vp.x as f64, p.1 - vp.y as f64);
-        let c = orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, (ww / wh) as f32);
-        let (nx, ny) = ((2.0 * px / ww - 1.0) as f32, (2.0 * py / wh - 1.0) as f32);
-        let dir = (c.forward + nx * c.tan_half_fov_y * c.aspect * c.right - ny * c.tan_half_fov_y * c.up).normalize();
+        let (c, dir) = self.view_ray(p);
         let hit = raycast_pick(&self.prep.scene, c.position, dir);
         self.selected = hit.and_then(|h| Selected::from_instance(&self.prep.scene, &self.prep.board, h.instance));
         self.material_error.clear();
@@ -1165,6 +1487,19 @@ impl App {
         match &self.selected {
             Some(s) => info!("selected {}{}", s.reference, if s.model.is_none() { " (placeholder)" } else { "" }),
             None => info!("selection cleared"),
+        }
+    }
+
+    /// Ctrl + クリック：画面の点（物理ピクセル）にある面にピントを合わせる（ピンホールなら薄レンズにする）
+    fn focus_at(&mut self, p: (f64, f64)) {
+        let (c, dir) = self.view_ray(p);
+        if let Some(t) = raycast(&self.prep.scene, c.position, dir) {
+            self.prep.cfg.lens.focus_distance_mm = t * dir.dot(c.forward);
+            if self.prep.cfg.lens.model == LensModel::Pinhole {
+                self.prep.cfg.lens.model = LensModel::Thin;
+            }
+            self.last_update = fl!("focus-set", mm = format!("{:.1}", self.prep.cfg.lens.focus_distance_mm));
+            self.st.changed.frame = true;
         }
     }
 
@@ -1182,7 +1517,7 @@ impl App {
         }
         let vp = self.st.display;
         let ppp = root.ctx().pixels_per_point();
-        let c = orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, vp.w as f32 / vp.h.max(1) as f32);
+        let c = self.view_camera();
         let painter = root.painter().with_clip_rect(central);
         let to_pt = |q: [f32; 2]| egui::pos2((q[0] + vp.x as f32) / ppp, (q[1] + vp.y as f32) / ppp);
         let segs = o.segments(&c, vp.w as f32, vp.h as f32);
@@ -1197,15 +1532,17 @@ impl App {
     /// 選んだ部品の部位（空なら全部位）に材質を書き込む。clear なら上書きを消す
     fn assign_material(&mut self, part: &str, material: &str, clear: bool) {
         let Some(sel) = self.selected.clone() else { return };
-        let scope = if sel.model.is_none() { 0 } else { self.assign_scope };
+        // 代わりの箱にはモデルが無いので、部品番号に書く
+        let scope = if sel.model.is_none() { AssignScope::Part } else { self.assign_scope };
         let model_spec = sel.model.and_then(|mi| self.prep.board.footprints.iter().find(|f| f.reference == sel.reference).and_then(|f| f.models.get(mi)).map(|m| m.path.clone()));
+        let by_ref = scope == AssignScope::Part;
         let o = MaterialSetOptions {
             pcb: self.prep.board.file.clone(),
-            reference: if scope == 0 { sel.reference.clone() } else { String::new() },
-            model: if scope == 0 { String::new() } else { model_spec.unwrap_or_default() },
+            reference: if by_ref { sel.reference.clone() } else { String::new() },
+            model: if by_ref { String::new() } else { model_spec.unwrap_or_default() },
             part: part.to_string(),
             material: material.to_string(),
-            global: scope == 2,
+            global: scope == AssignScope::ModelGlobal,
         };
         let r = if clear { clear_material(&o) } else { set_material(&o).map(Some) };
         match r {
@@ -1310,13 +1647,14 @@ impl App {
             })
             .unwrap_or_default();
         ui.horizontal(|ui| {
-            ui.radio_value(&mut self.assign_scope, 0, fl!("scope-part")).on_hover_text(fl!("scope-part-tip"));
-            ui.radio_value(&mut self.assign_scope, 1, fl!("scope-model")).on_hover_text(fl!("scope-model-tip"));
-            ui.radio_value(&mut self.assign_scope, 2, fl!("scope-all-boards")).on_hover_text(fl!("scope-all-boards-tip"));
+            ui.radio_value(&mut self.assign_scope, AssignScope::Part, fl!("scope-part")).on_hover_text(fl!("scope-part-tip"));
+            ui.radio_value(&mut self.assign_scope, AssignScope::ModelProject, fl!("scope-model")).on_hover_text(fl!("scope-model-tip"));
+            ui.radio_value(&mut self.assign_scope, AssignScope::ModelGlobal, fl!("scope-all-boards")).on_hover_text(fl!("scope-all-boards-tip"));
         });
         // 書き込む先より優先される上書きがあると、書いても見た目は変わらない
-        let shadowed_by_ref = self.assign_scope >= 1 && rows.iter().any(|r| r.source.starts_with("ref "));
-        let shadowed_by_project = self.assign_scope == 2 && rows.iter().any(|r| r.source == "model (project)");
+        let decided_by = |stage: MaterialStage| rows.iter().any(|r| r.stage() == Some(stage));
+        let shadowed_by_ref = self.assign_scope != AssignScope::Part && decided_by(MaterialStage::ProjectRef);
+        let shadowed_by_project = self.assign_scope == AssignScope::ModelGlobal && decided_by(MaterialStage::ProjectModel);
         if shadowed_by_ref {
             ui.colored_label(egui::Color32::from_rgb(255, 204, 77), fl!("sel-shadowed-ref"));
         } else if shadowed_by_project {
@@ -1429,35 +1767,11 @@ impl App {
         }
     }
 
-    /// 線フォントの文字が変わったので、kicad-cli で裏で書き出し直す（書き出し中なら、終わった後にもう一度）
-    fn request_silk(&mut self) {
-        let Some(k) = self.prep.kicad_cli.clone() else { return };
-        if self.silk_job.is_some() {
-            self.silk_rerun = true;
-            return;
-        }
-        let (file, name) = (self.prep.board.file.clone(), self.prep.board.project_name.clone());
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(plot_stroke_silk(&k.cli, &file, &name, &k.cache_dir, k.use_cache));
-        });
-        self.silk_job = Some(rx);
-    }
-
     /// 書き出しが終わっていれば、新しいシルクを設定に入れる（次の組み立てでタイルを全部作り直す）
     fn poll_silk(&mut self) {
-        let Some(rx) = &self.silk_job else { return };
-        match rx.try_recv() {
-            Ok(silk) => {
-                self.silk_job = None;
-                self.prep.cfg.scene.layer_art.extra_silk = silk.side;
-                self.silk_dirty = true;
-                if std::mem::take(&mut self.silk_rerun) {
-                    self.request_silk();
-                }
-            }
-            Err(mpsc::TryRecvError::Disconnected) => self.silk_job = None,
-            Err(mpsc::TryRecvError::Empty) => {}
+        if let Some(silk) = self.silk_job.poll() {
+            self.prep.cfg.scene.layer_art.extra_silk = silk.side;
+            self.silk_dirty = true;
         }
     }
 
@@ -1479,7 +1793,7 @@ impl App {
         self.reload_job = None;
         self.prep.source = Some(d.source);
         if d.saved {
-            self.test_reload_applied = true;
+            self.saved_reloads += 1;
         }
         match d.result {
             Err(e) => {
@@ -1491,7 +1805,7 @@ impl App {
                     self.prep.board = b;
                 }
                 if stats.diff.stroke_silk_changed {
-                    self.request_silk();
+                    self.silk_job.request(); // 書き出し中なら、終わった後にもう一度
                 }
                 // 読み直しの間に変えたレジストの色も反映する
                 update_mask_material(&mut scene, &self.prep.board, &self.prep.cfg.scene);
@@ -1499,10 +1813,11 @@ impl App {
                 self.refresh_outline();
                 let t0 = Instant::now();
                 let g = self.gpu.as_mut().unwrap();
-                g.gpu.rebuild_geometry(&self.prep.scene, self.st.bump_intensity);
+                // 送れなければ（VRAM が足りないなど）GPU の形状は作りかけになり描けないので、ビューアを終える（エラーを出して）
+                g.gpu.try_rebuild_geometry(&self.prep.scene, self.st.bump_intensity).map_err(|e| format!("cannot send the reloaded board to the GPU: {e}"))?;
                 g.prog.rebuild_integrator()?;
                 let gpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
-                self.st.dirty = true;
+                self.st.changed.frame = true;
                 let pending = self.prep.scene.pending_models;
                 if d.saved {
                     let since = d.saved_at.and_then(|t| t.elapsed().ok()).map(|e| fl!("reload-since", seconds = format!("{:.2}", e.as_secs_f64()))).unwrap_or_default();
@@ -1619,12 +1934,12 @@ impl App {
         let measured = self.accum_measured.max(1) as f64;
         let wall_per = self.accum_wall.as_secs_f64() / measured;
         let info = &g.ctx.info;
-        let method = if g.ctx.use_rt_pipeline { "ray tracing pipeline" } else { "ray query" };
+        let method = trace_method_name(g.ctx);
         let mut notes: Vec<(String, bool)> = Vec::new();
         if self.reload_job.is_some() {
             notes.push((fl!("status-reloading"), true));
         }
-        if self.silk_job.is_some() {
+        if self.silk_job.busy() {
             notes.push((fl!("status-silk"), true));
         }
         if self.prep.scene.pending_models > 0 {
@@ -1656,7 +1971,7 @@ impl App {
             });
             // 2 行目：描画の条件と、読み直しなどの知らせ（幅が足りなければ折り返す）
             ui.horizontal_wrapped(|ui| {
-                ui.weak(fl!("status-integrator", integrator = g.prog.integrator_name().to_uppercase(), color = if st.spectral { fl!("status-spectral") } else { "RGB".into() }));
+                ui.weak(fl!("status-integrator", integrator = g.prog.integrator_kind().as_str().to_uppercase(), color = if st.spectral { fl!("status-spectral") } else { "RGB".into() }));
                 ui.separator();
                 let (rw, rh) = (g.prog.targets().width, g.prog.targets().height);
                 ui.weak(fl!("status-render-size", width = rw.to_string(), height = rh.to_string(), percent = format!("{:.0}", 100.0 * st.display.w as f64 / rw.max(1) as f64)))
@@ -1684,15 +1999,15 @@ impl App {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button(fl!("menu-file"), |ui| {
                     if ui.add(egui::Button::new(fl!("menu-save-image")).shortcut_text("S")).on_hover_text(fl!("menu-save-image-tip")).clicked() {
-                        st.save_requested = true;
+                        st.req.save = true;
                         ui.close();
                     }
                     if ui.button(fl!("menu-save-png")).on_hover_text(fl!("menu-save-png-tip")).clicked() {
-                        st.save_as_requested = Some(SaveFormat::Png);
+                        st.req.save_as = Some(SaveFormat::Png);
                         ui.close();
                     }
                     if ui.button(fl!("menu-save-exr")).on_hover_text(fl!("menu-save-exr-tip")).clicked() {
-                        st.save_as_requested = Some(SaveFormat::Exr);
+                        st.req.save_as = Some(SaveFormat::Exr);
                         ui.close();
                     }
                     ui.separator();
@@ -1704,19 +2019,19 @@ impl App {
                         ];
                         for (loc, label, tip) in choices {
                             if ui.add(egui::Button::new(label).selected(now == loc)).on_hover_text(tip).clicked() {
-                                st.settings_location_requested = Some(loc);
+                                st.req.settings_location = Some(loc);
                                 ui.close();
                             }
                         }
                         ui.weak(fl!("loc-hint"));
                     });
                     if ui.button(fl!("menu-reveal-settings")).on_hover_text(fl!("menu-reveal-settings-tip")).clicked() {
-                        st.reveal_settings_requested = true;
+                        st.req.reveal_settings = true;
                         ui.close();
                     }
                     ui.separator();
                     if ui.add(egui::Button::new(fl!("menu-quit")).shortcut_text("Esc")).clicked() {
-                        st.quit_requested = true;
+                        st.req.quit = true;
                         ui.close();
                     }
                 });
@@ -1738,7 +2053,7 @@ impl App {
                         for (w, h) in SIZE_PRESETS {
                             if ui.add(egui::Button::new(size_label(w, h)).selected(st.size_mode == Some((w, h)))).clicked() {
                                 st.size_mode = Some((w, h));
-                                st.fit_window_requested = true;
+                                st.req.fit_window = true;
                                 ui.close();
                             }
                         }
@@ -1747,7 +2062,7 @@ impl App {
                         for r in RATIOS {
                             if ui.add(egui::Button::new(ratio_label(r)).selected(st.render_ratio == r)).clicked() {
                                 st.render_ratio = r;
-                                st.fit_window_requested = st.size_mode.is_some();
+                                st.req.fit_window = st.size_mode.is_some();
                                 ui.close();
                             }
                         }
@@ -1761,28 +2076,28 @@ impl App {
                     }
                     ui.separator();
                     if ui.add(egui::Button::new(fl!("menu-reset-view")).shortcut_text("R")).clicked() {
-                        st.reset_requested = true;
+                        st.req.reset_view = true;
                         ui.close();
                     }
                     if ui.button(fl!("menu-auto-exposure")).clicked() {
-                        st.auto_exposure_requested = true;
+                        st.req.auto_exposure = true;
                         ui.close();
                     }
                     ui.separator();
                     if ui.button(fl!("menu-reset-all")).on_hover_text(fl!("menu-reset-all-tip")).clicked() {
-                        st.reset_all_requested = true;
+                        st.req.reset_all = true;
                         ui.close();
                     }
                     ui.separator();
                     ui.menu_button(fl!("menu-language"), |ui| {
                         if ui.add(egui::Button::new(fl!("language-auto")).selected(language_choice.is_none())).on_hover_text(fl!("language-auto-tip")).clicked() {
-                            st.language_requested = Some(None);
+                            st.req.language = Some(None);
                             ui.close();
                         }
                         ui.separator();
                         for (tag, name) in i18n::LANGUAGES {
                             if ui.add(egui::Button::new(*name).selected(language_choice.as_deref() == Some(*tag))).clicked() {
-                                st.language_requested = Some(Some(tag.to_string()));
+                                st.req.language = Some(Some(tag.to_string()));
                                 ui.close();
                             }
                         }
@@ -1795,9 +2110,9 @@ impl App {
                     ui.label(fl!("help-zoom"));
                     ui.label(fl!("help-focus"));
                     ui.separator();
-                    ui.label(fl!("help-keys"));
-                    ui.label(fl!("help-keys-2"));
-                    ui.label(fl!("help-quit"));
+                    for b in KEY_BINDINGS {
+                        ui.label(format!("{}: {}", b.label, i18n::get(b.help).unwrap_or_else(|| b.log.to_string())));
+                    }
                 });
             });
         });
@@ -1824,21 +2139,40 @@ impl App {
         }
     }
 
+    /// 1 フレーム：UI を描き、要求を反映し、サンプルを積んで表示し、頼まれた保存をする
     fn frame(&mut self) -> Result<(), String> {
         let frame_t0 = Instant::now();
         let Some(window) = &self.window else { return Ok(()) };
         let size = window.inner_size();
-        let (fbw, fbh) = (size.width, size.height);
-        if fbw == 0 || fbh == 0 {
+        if size.width == 0 || size.height == 0 {
             return Ok(()); // 最小化中
         }
-        if self.vo.test_orbit_deg != 0.0 {
-            self.st.azimuth += self.vo.test_orbit_deg;
-            self.st.dirty = true;
+        self.test.inject(self.frames, &mut self.st, &mut self.save_as_target);
+        let ui = self.run_ui();
+        if self.st.req.quit {
+            self.done = true;
+            return Ok(());
         }
+        self.apply_requests(&ui, size.width, size.height)?;
+        let last_test_frame = self.test.finished(self.frames, self.busy(), self.saved_reloads);
+        let Some(shown) = self.record_and_present(&ui, last_test_frame, frame_t0)? else { return Ok(()) };
+        self.handle_saves(shown.denoised);
+        if last_test_frame {
+            self.finish_test(shown.screenshot, shown.extent);
+        } else if let Some(mut b) = shown.screenshot {
+            self.gpu.as_ref().unwrap().ctx.destroy_buffer(&mut b);
+        }
+        Ok(())
+    }
 
-        // ---- メニューと操作パネル。残りの領域が 3D 表示になる
-        let raw = self.egui_state.as_mut().unwrap().take_egui_input(window);
+    /// 裏の処理（環境マップの読み込み・基板の読み直し・書き換えた材質の反映）が残っているか
+    fn busy(&self) -> bool {
+        self.env_job.is_some() || self.reload_job.is_some() || self.materials_dirty_files
+    }
+
+    /// メニューと操作パネルを描く（egui）。残りの領域が 3D 表示になる
+    fn run_ui(&mut self) -> UiFrame {
+        let raw = self.egui_state.as_mut().unwrap().take_egui_input(self.window.as_ref().unwrap());
         let egui_ctx = self.egui_ctx.clone();
         let mut central = egui::Rect::NOTHING;
         let full = egui_ctx.run_ui(raw, |root| {
@@ -1851,36 +2185,40 @@ impl App {
             central = root.available_rect_before_wrap();
             self.draw_outline(root, central);
         });
-        if self.st.quit_requested {
-            self.done = true;
-            return Ok(());
-        }
-        let window = self.window.as_ref().unwrap();
-        self.egui_state.as_mut().unwrap().handle_platform_output(window, full.platform_output);
+        self.egui_state.as_mut().unwrap().handle_platform_output(self.window.as_ref().unwrap(), full.platform_output);
         let primitives = egui_ctx.tessellate(full.shapes, full.pixels_per_point);
+        UiFrame { textures: full.textures_delta, primitives, pixels_per_point: full.pixels_per_point, central }
+    }
 
-        // ---- 状態の反映（GPU は前のフレームの完了を待っているので、ここで資源を触ってよい）
-        if self.frames == 3 {
-            if let Some(i) = mask_presets().iter().position(|p| !self.vo.test_mask.is_empty() && p.name == self.vo.test_mask) {
-                self.st.mask_choice = Some(i);
-                self.st.mask_changed = true;
-            }
-            self.st.reset_all_requested |= self.vo.test_reset_settings;
-        }
-        // 覚えるのは前のフレームまでに反映した値（「すべて既定に戻す」で変えた値は、反映した次のフレームで基準にする）
+    /// UI の要求と裏の処理の結果を反映する（GPU は前のフレームの完了を待っているので、ここで資源を触ってよい）
+    fn apply_requests(&mut self, ui: &UiFrame, fbw: u32, fbh: u32) -> Result<(), String> {
+        // 覚えるのは前のフレームまでに反映した値（「すべて既定に戻す」は、その中で基準を取り直す）
         self.save_view(false);
-        if self.st.reset_all_requested {
-            self.st.reset_all_requested = false;
+        if std::mem::take(&mut self.st.req.reset_all) {
             self.reset_all_settings();
         }
         self.apply_reload()?;
         self.poll_silk();
         self.flush_emit_edit(false);
         self.start_reload_if_needed();
-        if let Some(f) = self.st.save_as_requested.take() {
+        self.apply_menu_requests();
+        self.poll_environment()?;
+        self.apply_scene_changes()?;
+        self.update_targets(ui, fbw, fbh)?;
+        self.fit_window();
+        self.apply_view_requests();
+        if self.st.denoise && !self.denoiser_tried {
+            self.init_denoiser();
+        }
+        Ok(())
+    }
+
+    /// メニューの要求（保存のダイアログ・表示の言語・設定ファイルの置き場所）と、開いているダイアログの結果
+    fn apply_menu_requests(&mut self) {
+        if let Some(f) = self.st.req.save_as.take() {
             self.start_save_dialog(f);
         }
-        if let Some(choice) = self.st.language_requested.take() {
+        if let Some(choice) = self.st.req.language.take() {
             // メニューで選んだものは --lang より優先する（覚えて、次からも使う）
             remember::remember_ui_language(choice.as_deref());
             self.language = i18n::select(None, choice.as_deref());
@@ -1888,10 +2226,10 @@ impl App {
             install_fonts(&self.egui_ctx, &self.language);
             info!("language: {}", self.language);
         }
-        if let Some(loc) = self.st.settings_location_requested.take() {
+        if let Some(loc) = self.st.req.settings_location.take() {
             self.set_settings_location(loc);
         }
-        if std::mem::take(&mut self.st.reveal_settings_requested) {
+        if std::mem::take(&mut self.st.req.reveal_settings) {
             krbr_core::platform::reveal_in_file_manager(&board_file::resolve(&self.prep.board.file));
         }
         if let Some((f, rx)) = &self.save_dialog {
@@ -1911,174 +2249,177 @@ impl App {
                 Ok(picked) => {
                     self.open_dialog = None;
                     if let Some(p) = picked {
-                        self.start_env_load(p.to_string_lossy().into_owned());
+                        self.start_env_load(p.to_string_lossy().into_owned(), true);
                     }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => self.open_dialog = None,
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
-        if let Some((path, rx)) = &self.env_job {
-            if let Ok(d) = rx.try_recv() {
-                let _ = path;
+    }
+
+    /// 環境マップを読み終えていれば GPU へ送る。送れなければ（VRAM が足りないなど）内蔵のスタジオに戻す
+    fn poll_environment(&mut self) -> Result<(), String> {
+        let Some(job) = &self.env_job else { return Ok(()) };
+        let d = match job.rx.try_recv() {
+            Ok(d) => d,
+            Err(mpsc::TryRecvError::Empty) => return Ok(()),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.env_error = format!("{}: the loading thread stopped", job.path);
+                error!("environment {}", self.env_error);
                 self.env_job = None;
-                let no_remember = std::mem::take(&mut self.env_no_remember);
-                if d.error.is_empty() {
-                    let g = self.gpu.as_mut().unwrap();
-                    g.ctx.wait_idle();
-                    g.gpu.set_environment(&d.image, &d.dist);
-                    g.prog.rebuild_integrator()?;
-                    self.env_path = remember::normalize_hdr(&d.path);
-                    if !no_remember {
-                        remember::remember_hdr(&self.prep.board.file, &self.env_path, &self.prep.config_hdr);
-                    }
-                    self.env_list = list_environments(&self.env_path);
-                    self.st.dirty = true;
-                    info!("environment: {} ({}x{})", self.env_path, d.image.width, d.image.height);
-                } else {
-                    self.env_error = d.error.clone();
-                    error!("environment {}: {}", d.path, d.error);
+                return Ok(());
+            }
+        };
+        let remember_it = job.remember;
+        self.env_job = None;
+        if !d.error.is_empty() {
+            self.env_error = d.error.clone();
+            error!("environment {}: {}", d.path, d.error);
+            return Ok(());
+        }
+        let g = self.gpu.as_mut().unwrap();
+        g.ctx.wait_idle();
+        match g.gpu.try_set_environment(&d.image, &d.dist) {
+            Ok(()) => {
+                self.env_path = remember::normalize_hdr(&d.path);
+                if remember_it {
+                    remember::remember_hdr(&self.prep.board.file, &self.env_path, &self.prep.config_hdr);
                 }
+                info!("environment: {} ({}x{})", self.env_path, d.image.width, d.image.height);
+            }
+            Err(e) => {
+                // GPU の環境マップは消えているので、小さい内蔵のスタジオを送り直す（それも送れなければ描けないので終える）
+                error!("environment {}: {e}; using the built-in studio", d.path);
+                self.env_error = fl!("env-gpu-failed", error = e);
+                let studio = load_environment(STUDIO.to_string());
+                if !studio.error.is_empty() {
+                    return Err(format!("environment: {}", studio.error));
+                }
+                g.gpu.try_set_environment(&studio.image, &studio.dist).map_err(|e| format!("environment: {e}"))?;
+                self.env_path = STUDIO.to_string();
             }
         }
-        if self.st.integrator_changed {
-            self.st.integrator_changed = false;
+        g.prog.rebuild_integrator()?;
+        self.env_list = list_environments(&self.env_path);
+        self.st.changed.frame = true;
+        Ok(())
+    }
+
+    /// 積分器・レジストの色・材質の変更を GPU へ送る
+    fn apply_scene_changes(&mut self) -> Result<(), String> {
+        if std::mem::take(&mut self.st.changed.integrator) {
             let g = self.gpu.as_mut().unwrap();
             g.ctx.wait_idle();
-            if let Err(e) = g.prog.set_integrator(&self.prep.cfg.integrator) {
-                error!("integrator {}: {}", self.prep.cfg.integrator, e);
-                self.prep.cfg.integrator = "pt".into();
-                g.prog.set_integrator("pt")?;
-            } else {
-                info!("integrator: {}", self.prep.cfg.integrator);
-            }
-            self.st.dirty = true;
-        }
-        if self.st.mask_changed {
-            self.st.mask_changed = false;
-            match self.st.mask_choice {
-                None => {
-                    let s = &self.scene_as_configured;
-                    let o = &mut self.prep.cfg.scene;
-                    o.mask_color = s.mask_color;
-                    o.mask_color_set = s.mask_color_set;
-                    o.mask_roughness = s.mask_roughness;
-                    o.mask_scatter = s.mask_scatter;
-                    o.mask_preset = s.mask_preset.clone();
-                    o.silk_color = s.silk_color;
-                }
-                Some(i) => {
-                    let _ = apply_mask_color_spec(&mut self.prep.cfg.scene, mask_presets()[i].name);
+            let kind = self.prep.cfg.integrator;
+            match g.prog.set_integrator(kind) {
+                Ok(()) => info!("integrator: {kind}"),
+                Err(e) => {
+                    // 起動時と同じく PT に戻す（PT も作れなければ描けないので終える）
+                    error!("integrator {kind}: {e}; using pt instead");
+                    self.last_update = fl!("integrator-failed", integrator = kind.as_str().to_uppercase(), error = e);
+                    self.prep.cfg.integrator = IntegratorKind::Pt;
+                    g.prog.set_integrator(IntegratorKind::Pt)?;
                 }
             }
-            update_mask_material(&mut self.prep.scene, &self.prep.board, &self.prep.cfg.scene);
-            self.st.materials_dirty = true;
+            self.st.changed.frame = true;
         }
-        if self.st.materials_dirty {
-            self.st.materials_dirty = false;
+        if std::mem::take(&mut self.st.changed.mask) {
+            self.apply_mask_choice();
+        }
+        if std::mem::take(&mut self.st.changed.materials) {
             let g = self.gpu.as_mut().unwrap();
             g.ctx.wait_idle();
-            g.gpu.update_materials(&self.prep.scene.materials, self.st.bump_intensity);
-            self.st.dirty = true;
-        }
-        {
-            let g = self.gpu.as_mut().unwrap();
-            if self.need_recreate || fbw != g.swap.extent.width || fbh != g.swap.extent.height {
-                g.ctx.wait_idle();
-                g.swap.recreate(fbw, fbh)?;
-                self.need_recreate = false;
+            if let Err(e) = g.gpu.try_update_materials(&self.prep.scene.materials, self.st.bump_intensity) {
+                error!("update materials: {e}");
+                self.last_update = fl!("materials-failed", error = e);
             }
-            // 3D 表示の領域（スワップチェーンがウィンドウと違う大きさのこともあるので、その中に収める）。
-            // 描画の解像度は、決まったサイズか、領域 × 比率
-            let vp = viewport_px(central, full.pixels_per_point, g.swap.extent.width, g.swap.extent.height);
-            let (rw, rh) = self.st.size_mode.unwrap_or_else(|| (((vp.w as f32 * self.st.render_ratio).round() as u32).max(1), ((vp.h as f32 * self.st.render_ratio).round() as u32).max(1)));
-            let t = g.prog.targets();
-            if rw != t.width || rh != t.height {
-                g.prog.resize(rw, rh)?;
-                g.tone = Tonemapper::new(g.ctx, g.prog.targets())?;
-                // ノイズ除去は新しい大きさで作り直す
-                if g.denoiser.is_some() {
-                    g.tone_denoised = None;
-                    g.denoiser = None;
-                    self.denoiser_tried = false;
-                }
-                self.st.dirty = true;
+            self.st.changed.frame = true;
+        }
+        Ok(())
+    }
+
+    /// スワップチェーンをウィンドウの大きさに、累積の画像を描画のサイズに合わせ、3D 表示の領域と画像を置く矩形を決める
+    fn update_targets(&mut self, ui: &UiFrame, fbw: u32, fbh: u32) -> Result<(), String> {
+        let g = self.gpu.as_mut().unwrap();
+        if self.need_recreate || fbw != g.swap.extent.width || fbh != g.swap.extent.height {
+            g.ctx.wait_idle();
+            g.swap.recreate(fbw, fbh)?;
+            self.need_recreate = false;
+        }
+        // 3D 表示の領域（スワップチェーンがウィンドウと違う大きさのこともあるので、その中に収める）。
+        // 描画の解像度は、決まったサイズか、領域 × 比率
+        let vp = viewport_px(ui.central, ui.pixels_per_point, g.swap.extent.width, g.swap.extent.height);
+        let (rw, rh) = self.st.size_mode.unwrap_or_else(|| (((vp.w as f32 * self.st.render_ratio).round() as u32).max(1), ((vp.h as f32 * self.st.render_ratio).round() as u32).max(1)));
+        let t = g.prog.targets();
+        if rw != t.width || rh != t.height {
+            g.prog.resize(rw, rh)?;
+            g.tone = Tonemapper::new(g.ctx, g.prog.targets())?;
+            // ノイズ除去は新しい大きさで作り直す
+            if g.denoiser.is_some() {
+                g.tone_denoised = None;
+                g.denoiser = None;
+                self.denoiser_tried = false;
             }
-            self.st.viewport = vp;
-            self.st.display = fit_rect(vp, rw, rh);
+            self.st.changed.frame = true;
         }
-        self.fit_window();
-        if let Some(p) = self.vo.test_save_as.as_ref().filter(|_| self.vo.test_frames > 0 && self.frames + 2 == self.vo.test_frames) {
-            let format = if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exr")) { SaveFormat::Exr } else { SaveFormat::Png };
-            self.save_as_target = Some((format, p.clone()));
-        }
-        if self.vo.test_pick.is_some() && !self.test_pick_done && self.frames >= 5 {
-            self.test_pick_done = true;
-            let (x, y) = self.vo.test_pick.unwrap();
-            self.st.part_pick = Some((x + self.st.viewport.x as f64, y + self.st.viewport.y as f64));
-        }
-        if let Some(p) = self.st.part_pick.take() {
+        self.st.viewport = vp;
+        self.st.display = fit_rect(vp, rw, rh);
+        Ok(())
+    }
+
+    /// クリック・Ctrl + クリック・視点の要求を反映し、カメラなどが変わったら累積をやり直す
+    fn apply_view_requests(&mut self) {
+        if let Some(p) = self.st.req.part_pick.take() {
             self.pick_part(p);
-            if self.vo.test_pick.is_some() && !self.vo.test_assign.is_empty() {
-                let m = self.vo.test_assign.clone();
-                self.assign_material("", &m, false);
-            }
         }
-        if let Some((px, py)) = self.st.focus_pick.take() {
-            let vp = self.st.display;
-            let (ww, wh) = (vp.w as f64, vp.h as f64);
-            let (px, py) = (px - vp.x as f64, py - vp.y as f64);
-            let c = orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, (ww / wh) as f32);
-            let (nx, ny) = ((2.0 * px / ww - 1.0) as f32, (2.0 * py / wh - 1.0) as f32);
-            let dir = (c.forward + nx * c.tan_half_fov_y * c.aspect * c.right - ny * c.tan_half_fov_y * c.up).normalize();
-            if let Some(t) = raycast(&self.prep.scene, c.position, dir) {
-                self.prep.cfg.lens.focus_distance_mm = t * dir.dot(c.forward);
-                if self.prep.cfg.lens.model == LensModel::Pinhole {
-                    self.prep.cfg.lens.model = LensModel::Thin;
-                }
-                self.last_update = fl!("focus-set", mm = format!("{:.1}", self.prep.cfg.lens.focus_distance_mm));
-                self.st.dirty = true;
-            }
+        if let Some(m) = self.st.req.assign_all.take() {
+            self.assign_material("", &m, false);
         }
-        if self.st.start_requested {
-            self.st.start_requested = false;
+        if let Some(p) = self.st.req.focus_pick.take() {
+            self.focus_at(p);
+        }
+        if std::mem::take(&mut self.st.req.start_view) {
             self.start_camera(self.st.display.w, self.st.display.h);
         }
-        if self.st.reset_requested {
-            self.st.reset_requested = false;
+        if std::mem::take(&mut self.st.req.reset_view) {
             self.reset_camera(self.st.display.w, self.st.display.h);
         }
-        if self.st.dirty {
+        if std::mem::take(&mut self.st.changed.frame) {
             let (w, h) = {
                 let t = self.gpu.as_ref().unwrap().prog.targets();
                 (t.width, t.height)
             };
             let f = self.current_frame(w, h);
             self.gpu.as_mut().unwrap().prog.set_frame(f);
-            self.st.dirty = false;
             self.last_change_at = Instant::now();
         }
-        if self.st.auto_exposure_requested {
-            self.st.auto_exposure_requested = false;
+        if std::mem::take(&mut self.st.req.auto_exposure) {
             let g = self.gpu.as_ref().unwrap();
             if g.prog.samples() > 0 {
-                self.st.exposure = auto_exposure(&g.prog.readback().color);
-                info!("auto exposure: {:+.2} EV", self.st.exposure);
+                match g.prog.try_readback() {
+                    Ok(aov) => {
+                        self.st.exposure = auto_exposure(&aov.color);
+                        info!("auto exposure: {:+.2} EV", self.st.exposure);
+                    }
+                    Err(e) => {
+                        error!("auto exposure: {e}");
+                        self.last_update = fl!("readback-failed", error = e);
+                    }
+                }
             }
         }
+    }
 
-        if self.st.denoise && !self.denoiser_tried {
-            self.init_denoiser();
-        }
-
-        // ---- 描画
+    /// サンプルを積み、（必要なら）ノイズ除去して、画像と操作パネルを表示する。スワップチェーンを作り直すときは None
+    fn record_and_present(&mut self, ui: &UiFrame, last_test_frame: bool, frame_t0: Instant) -> Result<Option<Presented>, String> {
         let g = self.gpu.as_mut().unwrap();
         let loader = g.ctx.swapchain_loader.as_ref().unwrap();
         let (image_index, _) = match unsafe { loader.acquire_next_image(g.swap.handle, u64::MAX, g.acquired, vk::Fence::null()) } {
             Ok(r) => r,
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                 self.need_recreate = true;
-                return Ok(());
+                return Ok(None);
             }
             Err(e) => return Err(format!("vkAcquireNextImageKHR: {e:?}")),
         };
@@ -2091,10 +2432,9 @@ impl App {
         } else {
             self.samples_per_frame.min(max_spp - g.prog.samples())
         };
-        let last_test_frame = self.vo.test_frames > 0 && self.frames + 1 >= self.vo.test_frames && self.env_job.is_none() && self.reload_job.is_none() && (!self.vo.test_reload || self.test_reload_applied) && (self.vo.test_pick.is_none() || self.test_pick_done) && !self.materials_dirty_files;
 
         // egui のテクスチャ
-        for (id, deltas) in &full.textures_delta.set {
+        for (id, deltas) in &ui.textures.set {
             for delta in deltas.iter() {
                 g.egui_renderer.set_texture(g.ctx.queue, g.ctx.pool, *id, delta).map_err(|e| format!("egui texture: {e}"))?;
             }
@@ -2116,26 +2456,28 @@ impl App {
         let on_cpu = g.denoiser.as_ref().is_some_and(|d| d.device_name() == "CPU");
         let moving = self.last_change_at.elapsed() < Duration::from_millis(300);
         let samples_after = g.prog.samples() + add;
-        let due = if on_cpu { samples_after >= max_spp || self.st.denoise_requested } else { moving || samples_after >= max_spp || self.last_denoise_at.elapsed() > Duration::from_millis(150) };
+        let due = if on_cpu { samples_after >= max_spp || self.st.req.denoise_now } else { moving || samples_after >= max_spp || self.last_denoise_at.elapsed() > Duration::from_millis(150) };
         let beauty = self.st.mode == DisplayMode::Beauty;
         let want = self.st.denoise && g.denoiser.is_some() && beauty && samples_after > 0 && (self.denoised_epoch != self.accum_epoch || self.denoised_samples != samples_after) && due;
-        self.st.denoise_requested = false;
+        self.st.req.denoise_now = false;
         let ctx = g.ctx;
         let timestamps = g.timestamps;
+        // 分光モードの累積は XYZ。OIDN にはリニア sRGB にして渡し、混ぜた結果は XYZ に戻す（トーンマッピングは XYZ として読む）
+        let xyz = g.prog.xyz_output();
         if want {
             // サンプルの追加と入力の準備を先に流して完了を待ち、OIDN で除去してから表示のコマンドを作る
             let d = g.denoiser.as_mut().unwrap();
             d.set_quality(if moving && !on_cpu { DenoiseQuality::Fast } else { DenoiseQuality::High });
             let (prog, d) = (&mut g.prog, &*d);
-            ctx.submit_and_wait(|dev, c| {
+            ctx.try_submit_and_wait(|dev, c| {
                 unsafe {
                     dev.cmd_reset_query_pool(c, timestamps, 0, 2);
                     dev.cmd_write_timestamp2(c, vk::PipelineStageFlags2::ALL_COMMANDS, timestamps, 0);
                 }
                 prog.record(c, add);
                 unsafe { dev.cmd_write_timestamp2(c, vk::PipelineStageFlags2::ALL_COMMANDS, timestamps, 1) };
-                d.record_prepare(c);
-            });
+                d.record_prepare_xyz(c, xyz);
+            })?;
             match d.execute() {
                 Ok(ms) => {
                     self.last_denoise_ms = ms;
@@ -2164,12 +2506,12 @@ impl App {
         self.prev_samples = g.prog.samples();
         let disp = if show_denoised {
             // 結果を元の画像と強さで混ぜる（軽いので毎フレーム。強さのスライダーがすぐ効く）
-            g.denoiser.as_ref().unwrap().record_output(cmd, self.st.denoise_strength);
+            g.denoiser.as_ref().unwrap().record_output_xyz(cmd, self.st.denoise_strength, xyz);
             let t = g.tone_denoised.as_ref().unwrap();
-            t.record(cmd, self.st.exposure, self.st.mode, g.prog.xyz_output(), &self.st.glow_params());
+            t.record(cmd, self.st.exposure, self.st.mode, xyz, &self.st.glow_params());
             t.output()
         } else {
-            g.tone.record(cmd, self.st.exposure, self.st.mode, g.prog.xyz_output(), &self.st.glow_params());
+            g.tone.record(cmd, self.st.exposure, self.st.mode, xyz, &self.st.glow_params());
             g.tone.output()
         };
         let swap_img = g.swap.images[image_index as usize];
@@ -2197,18 +2539,25 @@ impl App {
         let att = [vk::RenderingAttachmentInfo::default().image_view(g.swap.views[image_index as usize]).image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::LOAD).store_op(vk::AttachmentStoreOp::STORE)];
         let ri = vk::RenderingInfo::default().render_area(vk::Rect2D { offset: vk::Offset2D::default(), extent }).layer_count(1).color_attachments(&att);
         unsafe { dev.cmd_begin_rendering(cmd, &ri) };
-        g.egui_renderer.cmd_draw(cmd, extent, full.pixels_per_point, &primitives).map_err(|e| format!("egui draw: {e}"))?;
+        g.egui_renderer.cmd_draw(cmd, extent, ui.pixels_per_point, &ui.primitives).map_err(|e| format!("egui draw: {e}"))?;
         unsafe { dev.cmd_end_rendering(cmd) };
 
+        // テストの最後のフレーム：表示した画像（パネルも含む）を読み戻す
         let mut shot: Option<Buffer> = None;
-        if last_test_frame && g.swap.can_read_back && self.vo.screenshot.is_some() {
-            image_barrier(dev, cmd, swap_img, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_READ, 1);
-            let b = g.ctx.create_buffer(extent.width as u64 * extent.height as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST, true, true);
-            let region = vk::BufferImageCopy::default().image_subresource(sub).image_extent(vk::Extent3D { width: extent.width, height: extent.height, depth: 1 });
-            unsafe { dev.cmd_copy_image_to_buffer(cmd, swap_img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, b.buffer, &[region]) };
-            image_barrier(dev, cmd, swap_img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_READ, vk::PipelineStageFlags2::BOTTOM_OF_PIPE, vk::AccessFlags2::NONE, 1);
-            shot = Some(b);
-        } else {
+        if last_test_frame && g.swap.can_read_back && self.test.screenshot().is_some() {
+            match g.ctx.try_create_buffer(extent.width as u64 * extent.height as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST, true, true) {
+                Ok(b) => {
+                    image_barrier(dev, cmd, swap_img, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_READ, 1);
+                    let region = vk::BufferImageCopy::default().image_subresource(sub).image_extent(vk::Extent3D { width: extent.width, height: extent.height, depth: 1 });
+                    unsafe { dev.cmd_copy_image_to_buffer(cmd, swap_img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, b.buffer, &[region]) };
+                    memory_barrier(dev, cmd, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, vk::PipelineStageFlags2::HOST, vk::AccessFlags2::HOST_READ);
+                    image_barrier(dev, cmd, swap_img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_READ, vk::PipelineStageFlags2::BOTTOM_OF_PIPE, vk::AccessFlags2::NONE, 1);
+                    shot = Some(b);
+                }
+                Err(e) => error!("screenshot: {e}"),
+            }
+        }
+        if shot.is_none() {
             image_barrier(dev, cmd, swap_img, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::PipelineStageFlags2::BOTTOM_OF_PIPE, vk::AccessFlags2::NONE, 1);
         }
         unsafe { dev.end_command_buffer(cmd).map_err(|e| format!("{e:?}"))? };
@@ -2238,7 +2587,7 @@ impl App {
         }
         self.last_frame_ms = t0.elapsed().as_secs_f64() * 1000.0;
         self.frames += 1;
-        for id in &full.textures_delta.free {
+        for id in &ui.textures.free {
             let _ = g.egui_renderer.free_texture(*id);
         }
 
@@ -2253,79 +2602,106 @@ impl App {
             self.accum_gpu_ms += self.last_gpu_ms;
             self.accum_measured += add;
         }
+        Ok(Some(Presented { denoised: show_denoised, screenshot: shot, extent }))
+    }
 
-        if self.st.save_requested {
-            self.st.save_requested = false;
-            let aov = g.prog.readback();
-            let png = self.out_dir.join(format!("{}_{:03}.png", self.stem, self.save_index));
-            let exr = self.out_dir.join(format!("{}_{:03}.exr", self.stem, self.save_index));
-            self.save_index += 1;
-            let _ = std::fs::create_dir_all(&self.out_dir);
-            match image_io::save_png_tonemapped(&png, &aov.color, self.st.exposure, &self.st.glow_params()).and_then(|_| image_io::save_exr(&exr, &aov.color)) {
-                Ok(()) => {
-                    info!("saved {} / {} ({} spp)", png.display(), exr.display(), g.prog.samples());
-                    let shown = std::path::absolute(&png).unwrap_or(png.clone());
-                    self.last_update = fl!("saved", path = shown.display().to_string(), spp = g.prog.samples().to_string());
-                }
-                Err(e) => {
-                    error!("save failed: {}", e);
-                    self.last_update = fl!("save-failed", error = e.to_string());
-                }
-            }
-            // ノイズ除去した画像を表示しているなら、それも書く（表示と同じ強さで混ぜたもの）
-            if let (true, Some(d)) = (show_denoised, g.denoiser.as_ref()) {
-                let mut img = d.read_output();
-                if g.prog.xyz_output() {
-                    krbr_render::integrator::xyz_to_linear_srgb(&mut img);
-                }
-                let png = png.with_file_name(format!("{}_{:03}_denoised.png", self.stem, self.save_index - 1));
-                let exr = png.with_extension("exr");
-                match image_io::save_png_tonemapped(&png, &img, self.st.exposure, &self.st.glow_params()).and_then(|_| image_io::save_exr(&exr, &img)) {
-                    Ok(()) => {
-                        info!("saved {} / {} (denoised, strength {:.2})", png.display(), exr.display(), self.st.denoise_strength);
-                        self.last_update.push_str(&fl!("saved-denoised-too"));
-                    }
-                    Err(e) => error!("save failed: {}", e),
-                }
-            }
+    /// S キー（番号を付けた PNG と EXR）と「名前を付けて保存」
+    fn handle_saves(&mut self, show_denoised: bool) {
+        if std::mem::take(&mut self.st.req.save) {
+            self.save_numbered(show_denoised);
         }
-
         if let Some((format, path)) = self.save_as_target.take() {
-            // 表示している画像（ノイズ除去した画像を表示していればそれ）を書く
-            let img = match (show_denoised, g.denoiser.as_ref()) {
-                (true, Some(d)) => {
-                    let mut img = d.read_output();
-                    if g.prog.xyz_output() {
-                        krbr_render::integrator::xyz_to_linear_srgb(&mut img);
-                    }
-                    img
-                }
-                _ => g.prog.readback().color,
-            };
-            let r = match format {
-                SaveFormat::Png => image_io::save_png_tonemapped(&path, &img, self.st.exposure, &self.st.glow_params()),
-                SaveFormat::Exr => image_io::save_exr(&path, &img),
-            };
-            match r {
-                Ok(()) => {
-                    info!("saved {} ({} spp{})", path.display(), g.prog.samples(), if show_denoised { ", denoised" } else { "" });
-                    self.last_update = fl!("saved-as", path = path.display().to_string(), spp = g.prog.samples().to_string(), denoised = if show_denoised { fl!("saved-as-denoised") } else { String::new() });
-                }
-                Err(e) => {
-                    error!("save failed: {} ({})", e, path.display());
-                    self.last_update = fl!("save-failed", error = e.to_string());
-                }
+            self.save_as(format, &path, show_denoised);
+        }
+    }
+
+    /// index 番の S キーの保存のファイル
+    fn save_paths(&self, index: u32) -> SavePaths {
+        let file = |suffix: &str| self.out_dir.join(format!("{}_{index:03}{suffix}", self.stem));
+        SavePaths { png: file(".png"), exr: file(".exr"), denoised_png: file("_denoised.png"), denoised_exr: file("_denoised.exr") }
+    }
+
+    /// 次の保存の番号：前の保存の次から、どのファイル（PNG・EXR・ノイズ除去版）も無い最小の番号（前に起動したときの画像を上書きしない）
+    fn next_save_index(&self) -> u32 {
+        (self.save_index..).find(|&i| !self.save_paths(i).any_exists()).unwrap_or(self.save_index)
+    }
+
+    /// 累積を番号を付けた PNG と EXR に書く。ノイズ除去した画像を表示しているなら、それも（表示と同じ強さで混ぜたもの）
+    fn save_numbered(&mut self, show_denoised: bool) {
+        let index = self.next_save_index();
+        self.save_index = index + 1;
+        let paths = self.save_paths(index);
+        let g = self.gpu.as_ref().unwrap();
+        let spp = g.prog.samples();
+        let (exposure, glow) = (self.st.exposure, self.st.glow_params());
+        let write = |img: &ImageF, png: &Path, exr: &Path| -> Result<(), String> {
+            if let Some(dir) = png.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            }
+            image_io::save_png_tonemapped(png, img, exposure, &glow)?;
+            image_io::save_exr(exr, img)
+        };
+        match read_image(g, false).and_then(|img| write(&img, &paths.png, &paths.exr)) {
+            Ok(()) => {
+                info!("saved {} / {} ({} spp)", paths.png.display(), paths.exr.display(), spp);
+                let shown = std::path::absolute(&paths.png).unwrap_or(paths.png.clone());
+                self.last_update = fl!("saved", path = shown.display().to_string(), spp = spp.to_string());
+            }
+            Err(e) => {
+                error!("save failed: {}", e);
+                self.last_update = fl!("save-failed", error = e);
             }
         }
+        if show_denoised {
+            match read_image(g, true).and_then(|img| write(&img, &paths.denoised_png, &paths.denoised_exr)) {
+                Ok(()) => {
+                    info!("saved {} / {} (denoised, strength {:.2})", paths.denoised_png.display(), paths.denoised_exr.display(), self.st.denoise_strength);
+                    self.last_update.push_str(&fl!("saved-denoised-too"));
+                }
+                Err(e) => error!("save failed: {}", e),
+            }
+        }
+    }
 
-        if last_test_frame {
-            info!("test: {} frames, {} spp, last frame {:.1} ms (GPU {:.1} ms, {} spp/frame), swapchain {}x{} format {:?}, environment {}", self.frames, g.prog.samples(), self.last_frame_ms, self.last_gpu_ms, self.samples_per_frame, extent.width, extent.height, g.swap.format, self.env_path);
-            info!("test: render {}x{}, 3D view {}x{}, display {}x{} at ({}, {}), ratio {}", g.prog.targets().width, g.prog.targets().height, self.st.viewport.w, self.st.viewport.h, self.st.display.w, self.st.display.h, self.st.display.x, self.st.display.y, self.st.render_ratio);
-            info!("test: rendering {:.2} s for {} spp, average {:.1} ms/spp (GPU {:.1} ms/spp)", self.accum_wall.as_secs_f64(), self.accum_measured, self.accum_wall.as_secs_f64() * 1000.0 / self.accum_measured.max(1) as f64, self.accum_gpu_ms / self.accum_measured.max(1) as f64);
-            if let Some(p) = &self.vo.screenshot {
-                let ok = if let Some(mut b) = shot.take() {
-                    // 確保した大きさは要求より大きいことがあるので、画像の分だけを使う
-                    let mut px = b.mapped_ref().unwrap()[..extent.width as usize * extent.height as usize * 4].to_vec();
+    /// 表示している画像（ノイズ除去した画像を表示していればそれ）を、選ばれた場所に書く
+    fn save_as(&mut self, format: SaveFormat, path: &Path, show_denoised: bool) {
+        let g = self.gpu.as_ref().unwrap();
+        let spp = g.prog.samples();
+        let r = read_image(g, show_denoised).and_then(|img| match format {
+            SaveFormat::Png => image_io::save_png_tonemapped(path, &img, self.st.exposure, &self.st.glow_params()),
+            SaveFormat::Exr => image_io::save_exr(path, &img),
+        });
+        match r {
+            Ok(()) => {
+                info!("saved {} ({} spp{})", path.display(), spp, if show_denoised { ", denoised" } else { "" });
+                self.last_update = fl!("saved-as", path = path.display().to_string(), spp = spp.to_string(), denoised = if show_denoised { fl!("saved-as-denoised") } else { String::new() });
+            }
+            Err(e) => {
+                error!("save failed: {} ({})", e, path.display());
+                self.last_update = fl!("save-failed", error = e);
+            }
+        }
+    }
+
+    /// テストの最後のフレーム：計測をログに出し、表示した画像を保存して終える
+    fn finish_test(&mut self, shot: Option<Buffer>, extent: vk::Extent2D) {
+        let g = self.gpu.as_ref().unwrap();
+        info!("test: {} frames, {} spp, last frame {:.1} ms (GPU {:.1} ms, {} spp/frame), swapchain {}x{} format {:?}, environment {}", self.frames, g.prog.samples(), self.last_frame_ms, self.last_gpu_ms, self.samples_per_frame, extent.width, extent.height, g.swap.format, self.env_path);
+        info!("test: render {}x{}, 3D view {}x{}, display {}x{} at ({}, {}), ratio {}", g.prog.targets().width, g.prog.targets().height, self.st.viewport.w, self.st.viewport.h, self.st.display.w, self.st.display.h, self.st.display.x, self.st.display.y, self.st.render_ratio);
+        info!("test: rendering {:.2} s for {} spp, average {:.1} ms/spp (GPU {:.1} ms/spp)", self.accum_wall.as_secs_f64(), self.accum_measured, self.accum_wall.as_secs_f64() * 1000.0 / self.accum_measured.max(1) as f64, self.accum_gpu_ms / self.accum_measured.max(1) as f64);
+        let Some(p) = self.test.screenshot().cloned() else {
+            if let Some(mut b) = shot {
+                g.ctx.destroy_buffer(&mut b);
+            }
+            self.done = true;
+            return;
+        };
+        let r = match shot {
+            Some(mut b) => {
+                // 確保した大きさは求めた大きさより大きいことがあるので、画像の分（mapped_bytes）だけを使う
+                let px = b.mapped_bytes().map(<[u8]>::to_vec);
+                g.ctx.destroy_buffer(&mut b);
+                px.ok_or_else(|| "the readback buffer is not host-visible".to_string()).and_then(|mut px| {
                     if g.swap.format == vk::Format::B8G8R8A8_UNORM {
                         for c in px.chunks_exact_mut(4) {
                             c.swap(0, 2);
@@ -2334,28 +2710,22 @@ impl App {
                     for c in px.chunks_exact_mut(4) {
                         c[3] = 255;
                     }
-                    g.ctx.destroy_buffer(&mut b);
                     if let Some(dir) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
                         let _ = std::fs::create_dir_all(dir);
                     }
-                    image_io::save_png_rgba8(p, extent.width, extent.height, &px)
-                } else {
-                    Err("swapchain cannot be read back".into())
-                };
-                match ok {
-                    Ok(()) => info!("wrote {}", p.display()),
-                    Err(e) => {
-                        error!("{}: {}", p.display(), e);
-                        self.rc = 1;
-                    }
-                }
+                    image_io::save_png_rgba8(&p, extent.width, extent.height, &px)
+                })
             }
-            self.done = true;
+            None => Err("the displayed image could not be read back".into()),
+        };
+        match r {
+            Ok(()) => info!("wrote {}", p.display()),
+            Err(e) => {
+                error!("{}: {}", p.display(), e);
+                self.rc = 1;
+            }
         }
-        if let Some(mut b) = shot {
-            g.ctx.destroy_buffer(&mut b);
-        }
-        Ok(())
+        self.done = true;
     }
 }
 
@@ -2382,7 +2752,7 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::DroppedFile(path) => {
                 if is_env_file(&path) {
-                    self.start_env_load(path.to_string_lossy().into_owned());
+                    self.start_env_load(path.to_string_lossy().into_owned(), true);
                 } else {
                     self.last_update = fl!("env-not-an-environment", path = path.display().to_string());
                 }
@@ -2394,7 +2764,7 @@ impl ApplicationHandler for App {
                     return; // メニュー・パネルの上での操作はカメラに渡さない
                 }
                 if down && button == MouseButton::Left && self.st.ctrl {
-                    self.st.focus_pick = Some(self.st.last_cursor);
+                    self.st.req.focus_pick = Some(self.st.last_cursor);
                     return;
                 }
                 match button {
@@ -2404,7 +2774,7 @@ impl ApplicationHandler for App {
                             self.st.press_at = Some(self.st.last_cursor);
                             self.st.press_moved = 0.0;
                         } else if self.st.press_at.take().is_some() && self.st.press_moved < 4.0 {
-                            self.st.part_pick = Some(self.st.last_cursor);
+                            self.st.req.part_pick = Some(self.st.last_cursor);
                         }
                     }
                     MouseButton::Right | MouseButton::Middle => self.st.panning = down,
@@ -2420,12 +2790,12 @@ impl ApplicationHandler for App {
                 if self.st.rotating {
                     self.st.azimuth -= dx * 0.3;
                     self.st.elevation = (self.st.elevation + dy * 0.3).clamp(-89.0, 89.0);
-                    self.st.dirty = true;
+                    self.st.changed.frame = true;
                 } else if self.st.panning {
                     let c = orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, 1.0);
                     let scale = 2.0 * self.st.distance * self.st.tan_half_fov_y / self.st.display.h.max(1) as f32;
                     self.st.target += (-c.right * dx as f32 + c.up * dy as f32) * scale;
-                    self.st.dirty = true;
+                    self.st.changed.frame = true;
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -2437,35 +2807,28 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::PixelDelta(p) => p.y / 40.0,
                 };
                 self.st.distance = (self.st.distance * 0.9f64.powf(yoff) as f32).max(1.0);
-                self.st.dirty = true;
+                self.st.changed.frame = true;
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed || response.consumed {
                     return;
                 }
                 let PhysicalKey::Code(code) = event.physical_key else { return };
+                let Some(action) = key_action(code) else { return };
                 let st = &mut self.st;
-                match code {
-                    KeyCode::Escape => el.exit(),
-                    KeyCode::F1 | KeyCode::Tab => st.show_panel = !st.show_panel,
-                    KeyCode::KeyR | KeyCode::KeyF => st.reset_requested = true,
-                    KeyCode::KeyS => st.save_requested = true,
-                    KeyCode::Equal | KeyCode::NumpadAdd => st.exposure += 0.25, // 露出は表示だけなので累積はやり直さない
-                    KeyCode::Minus | KeyCode::NumpadSubtract => st.exposure -= 0.25,
-                    KeyCode::BracketLeft => {
-                        st.env_rotation_deg -= 15.0;
-                        st.dirty = true;
+                match action {
+                    KeyAction::Quit => el.exit(),
+                    KeyAction::TogglePanel => st.show_panel = !st.show_panel,
+                    KeyAction::ResetView => st.req.reset_view = true,
+                    KeyAction::Save => st.req.save = true,
+                    KeyAction::Pause => st.paused = !st.paused,
+                    KeyAction::DenoiseNow => st.req.denoise_now = true,
+                    KeyAction::Exposure(ev) => st.exposure += ev, // 露出は表示だけなので累積はやり直さない
+                    KeyAction::RotateEnvironment(deg) => {
+                        st.env_rotation_deg += deg;
+                        st.changed.frame = true;
                     }
-                    KeyCode::BracketRight => {
-                        st.env_rotation_deg += 15.0;
-                        st.dirty = true;
-                    }
-                    KeyCode::Digit1 => st.mode = DisplayMode::Beauty,
-                    KeyCode::Digit2 => st.mode = DisplayMode::Albedo,
-                    KeyCode::Digit3 => st.mode = DisplayMode::Normal,
-                    KeyCode::KeyD => st.denoise_requested = true,
-                    KeyCode::KeyP => st.paused = !st.paused,
-                    _ => {}
+                    KeyAction::Mode(m) => st.mode = m,
                 }
             }
             WindowEvent::RedrawRequested => {} // 描画は about_to_wait で行う
@@ -2488,7 +2851,7 @@ impl ApplicationHandler for App {
             el.exit();
             return;
         }
-        let idle = self.gpu.as_ref().map(|g| g.prog.samples() >= self.st.max_spp || (self.st.paused && g.prog.samples() > 0)).unwrap_or(false) && !self.st.dirty && self.env_job.is_none() && self.reload_job.is_none() && self.silk_job.is_none() && !self.silk_dirty && self.vo.test_frames == 0;
+        let idle = self.gpu.as_ref().map(|g| g.prog.samples() >= self.st.max_spp || (self.st.paused && g.prog.samples() > 0)).unwrap_or(false) && !self.st.changed.frame && self.env_job.is_none() && self.reload_job.is_none() && !self.silk_job.busy() && !self.silk_dirty && !self.test.active();
         if idle {
             // 収束したら GPU を休ませ、入力と保存を待つ
             let wait = if self.watcher.is_some() || self.prep.scene.pending_models > 0 { 100 } else { 250 };
@@ -2499,17 +2862,11 @@ impl ApplicationHandler for App {
     }
 }
 
-pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
+pub fn run_viewer(mut vo: ViewOptions) -> anyhow::Result<i32> {
     let Some(prep) = prepare_scene(&vo.common) else { anyhow::bail!("scene preparation failed") };
     let cfg = &prep.cfg;
-    let rv = &prep.remembered_view;
     let win = remember::window_state();
-    // 描画のサイズと比率：コマンドライン、覚えたもの、ウィンドウに合わせる・×1
-    let size_mode = if vo.render_size.is_empty() { remember::render_size_of(rv) } else { parse_size(&vo.render_size) };
-    let render_ratio = vo.render_ratio.or_else(|| rv.get("render_ratio").and_then(|v| v.as_float()).map(|v| v as f32)).map(|r| r.clamp(0.1, 4.0)).unwrap_or(1.0);
-    let max_spp = vo.common.spp.map(pow2_spp).or_else(|| rv.get("max_spp").and_then(|v| v.as_integer()).map(|v| pow2_spp(v as u32))).unwrap_or(4096);
-    let mask_choice = if cfg.scene.mask_preset.is_empty() { None } else { mask_presets().iter().position(|p| p.name == cfg.scene.mask_preset) };
-    let st = ViewState {
+    let mut st = ViewState {
         target: Vec3::ZERO,
         distance: 100.0,
         elevation: cfg.elevation_deg,
@@ -2522,44 +2879,30 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         env_rotation_deg: cfg.env_rotation_deg,
         env_intensity: cfg.env_intensity,
         bump_intensity: cfg.scene.bump_intensity,
-        max_spp,
-        mode: rv.get("display_mode").and_then(|v| v.as_str()).map(display_mode_of).unwrap_or(DisplayMode::Beauty),
+        max_spp: DEFAULT_MAX_SPP,
+        mode: DisplayMode::Beauty,
         show_panel: win.panel_shown,
-        dirty: true,
-        materials_dirty: false,
-        mask_choice,
-        mask_changed: false,
-        save_requested: false,
-        save_as_requested: None,
-        settings_location_requested: None,
-        reveal_settings_requested: false,
-        reset_requested: false,
-        auto_exposure_requested: false,
-        reset_all_requested: false,
-        start_requested: false,
-        quit_requested: false,
+        mask_choice: mask_choice_of(&cfg.scene),
         paused: vo.paused,
         spectral: cfg.spectral,
-        integrator_changed: false,
         rotating: false,
         panning: false,
-        focus_pick: None,
         press_at: None,
         press_moved: 0.0,
-        part_pick: None,
-        denoise: vo.common.denoise.or_else(|| rv.get("denoise").and_then(|v| v.as_bool())).unwrap_or(false),
-        denoise_strength: vo.common.denoise_strength.or_else(|| rv.get("denoise_strength").and_then(|v| v.as_float()).map(|v| v as f32)).unwrap_or(1.0),
-        denoise_requested: false,
+        denoise: false,
+        denoise_strength: 1.0,
         last_cursor: (0.0, 0.0),
         ctrl: false,
         viewport: Viewport { x: 0, y: 0, w: 1, h: 1 },
         display: Viewport { x: 0, y: 0, w: 1, h: 1 },
-        size_mode,
-        render_ratio,
-        fit_window_requested: size_mode.is_some(),
-        language_requested: None,
+        size_mode: None,
+        render_ratio: 1.0,
         tan_half_fov_y: 0.27,
+        req: Requests::default(),
+        changed: Changes { frame: true, ..Default::default() },
     };
+    // 描画のサイズ・比率・最大 spp・ノイズ除去・表示の種類：コマンドライン、覚えたもの、既定の順
+    ViewerSettings::new(&vo, &prep.remembered_view).apply(&mut st);
     let language_choice = remember::ui_language();
     let language = i18n::select(vo.language.as_deref(), language_choice.as_deref());
     let out_png = vo.common.out.clone();
@@ -2573,6 +2916,8 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
     }
     let models_seen = prep.source.as_ref().map(|s| s.library.completed()).unwrap_or(0);
     let material_names = prep.source.as_ref().map(|s| s.materials.library.names()).unwrap_or_default();
+    let silk_job = SilkJob::new(prep.kicad_cli.clone(), &prep.board.file, &prep.board.project_name);
+    let test = TestHooks { o: std::mem::take(&mut vo.test), ..Default::default() };
     let mut app = App {
         base_title: format!("krbr - {}", prep.board.project_name),
         scene_as_configured: prep.configured.scene.clone(),
@@ -2592,20 +2937,17 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         env_error: String::new(),
         watcher,
         reload_job: None,
+        saved_reloads: 0,
         models_seen,
-        test_reload_started: false,
-        test_reload_applied: false,
-        silk_job: None,
-        silk_rerun: false,
+        silk_job,
         silk_dirty: false,
         selected: None,
         outline: None,
         materials_dirty_files: false,
-        assign_scope: 0,
+        assign_scope: AssignScope::Part,
         material_names,
         material_error: String::new(),
         emit_edit: None,
-        test_pick_done: false,
         denoiser_tried: false,
         denoise_error: String::new(),
         accum_epoch: 0,
@@ -2628,18 +2970,17 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         view_seen: remember::ViewValues::new(),
         view_saved: remember::ViewValues::new(),
         view_changed_at: Instant::now(),
-        view_rebase: false,
         win_start: win.clone(),
         win_seen: win.clone(),
         win_saved: win.clone(),
         win_changed_at: Instant::now(),
-        panel_width: win.panel_width.unwrap_or(340.0),
+        panel_width: win.panel_width.unwrap_or(DEFAULT_PANEL_WIDTH),
         fit_frames: 0,
-        env_no_remember: false,
         language,
         language_choice,
         out_dir,
         stem,
+        test,
         rc: 0,
         done: false,
     };
@@ -2666,7 +3007,46 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         // 安全性：Box::leak で作ったコンテキストを、参照していた資源をすべて捨てた後に解放する
         unsafe { drop(Box::from_raw(ctx as *const Context as *mut Context)) };
     }
-    let _ = app.last_change_at;
     app.save_view(true);
     Ok(app.rc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_size_and_ratio_options() {
+        assert_eq!(parse_render_size("fit"), Ok(RenderSize::Fit));
+        assert_eq!(parse_render_size(" 1920x1080 "), Ok(RenderSize::Fixed(1920, 1080)));
+        assert_eq!(parse_render_size("1080×1350"), Ok(RenderSize::Fixed(1080, 1350)));
+        assert!(parse_render_size("1920x").is_err());
+        assert!(parse_render_size("0x100").is_err());
+        assert!(parse_render_size(&format!("{}x10", remember::MAX_RENDER_SIZE + 1)).is_err());
+        assert_eq!(parse_render_ratio("0.5"), Ok(0.5));
+        assert!(parse_render_ratio("8").is_err() && parse_render_ratio("x").is_err());
+        assert!(RATIOS.iter().all(|r| RENDER_RATIO_RANGE.contains(r)));
+    }
+
+    /// キーの割り当て：同じキーを 2 つの操作に割り当てていない。ヘルプの説明が英語の .ftl にある
+    #[test]
+    fn key_bindings_are_unique_and_have_help() {
+        let keys: Vec<KeyCode> = KEY_BINDINGS.iter().flat_map(|b| b.keys.iter().map(|(k, _)| *k)).collect();
+        for (i, k) in keys.iter().enumerate() {
+            assert!(!keys[i + 1..].contains(k), "{k:?} is bound twice");
+        }
+        for b in KEY_BINDINGS {
+            assert!(i18n::english_has(b.help), "{} is not in the English .ftl", b.help);
+        }
+        assert_eq!(key_action(KeyCode::KeyF), Some(KeyAction::ResetView));
+        assert_eq!(key_action(KeyCode::NumpadSubtract), Some(KeyAction::Exposure(-EXPOSURE_STEP_EV)));
+        assert_eq!(key_action(KeyCode::KeyZ), None);
+    }
+
+    /// 内蔵の環境マップの表示名とヒントが英語の .ftl にある
+    #[test]
+    fn builtin_environment_has_a_name() {
+        let EnvironmentName::Builtin(id) = describe_environment(STUDIO) else { panic!("{STUDIO} is not built in") };
+        assert!(i18n::english_has(&format!("env-builtin-{id}")) && i18n::english_has(&format!("env-builtin-{id}-tip")));
+    }
 }

@@ -97,7 +97,7 @@ fn prism_dispersion_acrylic_vs_polycarbonate() {
     for (mode, r) in result.iter_mut().enumerate() {
         let mut f = frame(cam, 16);
         f.spectral = mode == 1;
-        let out = render(&ctx, &gpu, W, H, 256, "pt", f);
+        let out = render(&ctx, &gpu, W, H, 256, IntegratorKind::Pt, f);
         save_png(if mode == 1 { "p5_prisms_spectral.png" } else { "p5_prisms_rgb.png" }, &out.color, 0.0);
         *r = (channel_shift(&out.color, row(12.0), row(4.0), c0, c1), channel_shift(&out.color, row(-4.0), row(-12.0), c0, c1));
     }

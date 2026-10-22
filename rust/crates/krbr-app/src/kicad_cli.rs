@@ -5,14 +5,14 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use krbr_core::{debug, warn};
 use krbr_geom::shapes::unite;
 use krbr_geom::svg_reader::read_kicad_svg;
 use krbr_geom::{FillRule, Paths};
-use krbr_kicad::stroke_silk_only_board;
+use krbr_kicad::{stroke_silk_only_board, Board};
 
 /// kicad-cli 1 回の上限（固まったときに止める）
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -22,6 +22,82 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 pub struct SilkPlot {
     pub side: [Option<Arc<Paths>>; 2],
     pub from_cache: bool,
+}
+
+/// 線フォントの文字（シルク）の書き出しに使う kicad-cli と、そのキャッシュ
+#[derive(Debug, Clone)]
+pub struct KicadCliSilk {
+    pub cli: PathBuf,
+    pub cache_dir: PathBuf,
+    pub use_cache: bool,
+}
+
+impl KicadCliSilk {
+    pub fn plot(&self, board: &Board) -> SilkPlot {
+        self.plot_file(&board.file, &board.project_name)
+    }
+
+    /// 基板のファイルとプロジェクトの名前から（裏のスレッドへ Board 全体を渡さずに済む）
+    pub fn plot_file(&self, board_file: &Path, project_name: &str) -> SilkPlot {
+        plot_stroke_silk(&self.cli, board_file, project_name, &self.cache_dir, self.use_cache)
+    }
+}
+
+/// 線フォントの文字の書き出しを裏のスレッドで行う（ビューアと watch で共有）。
+/// 書き出し中にまた頼まれたら、終わった後にもう一度書き出す（途中の版の文字を最後の結果にしない）
+pub struct SilkJob {
+    /// kicad-cli を使わないなら None（request は何もしない）
+    kicad: Option<KicadCliSilk>,
+    board_file: PathBuf,
+    project_name: String,
+    running: Option<mpsc::Receiver<SilkPlot>>,
+    rerun: bool,
+}
+
+impl SilkJob {
+    pub fn new(kicad: Option<KicadCliSilk>, board_file: &Path, project_name: &str) -> Self {
+        Self { kicad, board_file: board_file.to_path_buf(), project_name: project_name.to_string(), running: None, rerun: false }
+    }
+
+    /// 書き出し中か
+    pub fn busy(&self) -> bool {
+        self.running.is_some()
+    }
+
+    /// 書き出しを頼む（書き出し中なら、終わった後にもう一度）
+    pub fn request(&mut self) {
+        let Some(k) = self.kicad.clone() else { return };
+        if self.running.is_some() {
+            self.rerun = true;
+            return;
+        }
+        let (file, name) = (self.board_file.clone(), self.project_name.clone());
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            // SVG の解析と多角形の和は CPU を使うので、ウィンドウのスレッドより優先度を下げる（ほかの裏の処理と同じ）
+            krbr_core::platform::lower_thread_priority();
+            let _ = tx.send(k.plot_file(&file, &name));
+        });
+        self.running = Some(rx);
+    }
+
+    /// 書き出しが終わっていれば、その結果（頼まれていた次の書き出しは、ここで始める）
+    pub fn poll(&mut self) -> Option<SilkPlot> {
+        let rx = self.running.as_ref()?;
+        let r = match rx.try_recv() {
+            Ok(plot) => Some(plot),
+            Err(mpsc::TryRecvError::Empty) => return None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                warn!("kicad-cli silk: the export thread stopped");
+                None
+            }
+        };
+        self.running = None;
+        if std::mem::take(&mut self.rerun) {
+            self.request();
+        }
+        r
+    }
 }
 
 /// kicad-cli を探す：設定のパス、Program Files\KiCad\*\bin（新しい版を優先）、PATH の順

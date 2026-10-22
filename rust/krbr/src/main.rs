@@ -1,20 +1,23 @@
-//! krbr（Rust 版）のコマンドライン。移植の進み具合に合わせてサブコマンドを増やす。
-//! フェーズ1：`info`（基板の解析と 3D モデルのパス解決。GPU は使わない）
+//! krbr（Rust 版）のコマンドライン。サブコマンドの解析だけをして、処理は krbr-app に任せる
+//! （render / view / watch / material / bench など。`krbr <基板>.kicad_pcb` は view）
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use krbr_app::prepare::{load_board_or_report, model_resolver};
+use krbr_app::viewer::{parse_render_ratio, parse_render_size, RenderSize, TestOptions};
 use krbr_core::{info, log};
-use krbr_kicad::{load_board, ModelResolver};
+use krbr_kicad::{load_board, Board};
+use krbr_scene::config::load_project_config;
+use krbr_scene::{IntegratorKind, LensModel};
 
 #[derive(Parser)]
 #[command(name = "krbr", about = "KRB-Renderer: a physically based renderer for KiCad boards")]
 struct Cli {
-    /// debug ログも出す
+    /// also print debug messages
     #[arg(short, long, global = true)]
     verbose: bool,
-    /// ウィンドウを持たないコマンド（render / watch / geom / models）も、通常の CPU の優先度で動かす（既定は低優先度）
+    /// run the commands without a window (render / watch / geom / models) at the normal CPU priority (default: below normal)
     #[arg(long, global = true)]
     normal_priority: bool,
     #[command(subcommand)]
@@ -173,9 +176,9 @@ struct RenderArgs {
     /// look at this board point (KiCad X,Y in mm)
     #[arg(long, value_delimiter = ',', num_args = 2)]
     look_at: Vec<f64>,
-    /// zoom factor relative to the automatic framing
-    #[arg(long, default_value_t = 1.0)]
-    zoom: f64,
+    /// zoom factor relative to the automatic framing (default 1; when given, the view remembered for the board is not used)
+    #[arg(long, value_parser = parse_zoom)]
+    zoom: Option<f64>,
     /// exposure (EV)
     #[arg(long)]
     exposure: Option<f32>,
@@ -195,9 +198,9 @@ struct RenderArgs {
     /// clamp indirect radiance per sample (default 10, 0 = off)
     #[arg(long)]
     clamp: Option<f32>,
-    /// integrator: pt (default), bdpt, vcm
-    #[arg(long, default_value = "")]
-    integrator: String,
+    /// integrator: pt (default), bdpt, vcm ("path" is another name for pt)
+    #[arg(long, value_parser = parse_integrator)]
+    integrator: Option<IntegratorKind>,
     #[arg(long, default_value_t = 0)]
     seed: u32,
     /// do not read or write the mesh cache (and the kicad-cli silk cache)
@@ -228,8 +231,8 @@ struct RenderArgs {
     #[arg(long, conflicts_with = "spectral")]
     rgb: bool,
     /// camera lens: pinhole (default), thin, realistic
-    #[arg(long, default_value = "")]
-    lens: String,
+    #[arg(long, value_parser = parse_lens)]
+    lens: Option<LensModel>,
     #[arg(long)]
     f_number: Option<f32>,
     #[arg(long)]
@@ -281,10 +284,10 @@ struct ViewArgs {
     #[arg(long)]
     test_reset_settings: bool,
     /// rendering size: WxH (the window is resized so that the 3D view is that size / ratio) or "fit" (follow the window); default: last used
-    #[arg(long, default_value = "")]
-    render_size: String,
-    /// rendering resolution / display size (e.g. 0.5 renders at half resolution, 2 renders finer and shrinks); default: last used
-    #[arg(long)]
+    #[arg(long, value_parser = parse_render_size)]
+    render_size: Option<RenderSize>,
+    /// rendering resolution / display size, 0.1 .. 4 (e.g. 0.5 renders at half resolution, 2 renders finer and shrinks); default: last used
+    #[arg(long, value_parser = parse_render_ratio)]
     render_ratio: Option<f32>,
     /// open with rendering paused (P or the toolbar button resumes); for weak GPUs
     #[arg(long)]
@@ -327,7 +330,7 @@ impl RenderArgs {
             radiance_clamp: self.clamp,
             look_at: self.look_at.clone(),
             zoom: self.zoom,
-            integrator: self.integrator.clone(),
+            integrator: self.integrator,
             seed: self.seed,
             no_cache: self.no_cache,
             no_kicad_cli: self.no_kicad_cli,
@@ -337,13 +340,28 @@ impl RenderArgs {
             ignore_remembered: false,
             validate: self.validate,
             spectral: if self.spectral { Some(true) } else if self.rgb { Some(false) } else { None },
-            lens: self.lens.clone(),
+            lens: self.lens,
             f_number: self.f_number,
             focal_length: self.focal_length,
             focus_distance: self.focus_distance,
             blades: self.blades,
             mask_color: self.mask_color.clone(),
         }
+    }
+}
+
+fn parse_integrator(s: &str) -> Result<IntegratorKind, String> {
+    s.parse()
+}
+
+fn parse_lens(s: &str) -> Result<LensModel, String> {
+    s.parse()
+}
+
+fn parse_zoom(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(z) if z > 0.0 && z.is_finite() => Ok(z),
+        _ => Err(format!("'{s}' is not a positive number")),
     }
 }
 
@@ -389,7 +407,7 @@ fn cmd_geom(pcb: &PathBuf) -> anyhow::Result<()> {
     if board.stackup.copper_thickness > 0.0 {
         rp.copper = board.stackup.copper_thickness;
     }
-    let opts = BoardBuildOptions { core_half: rp.core_half(board.stackup.thickness), caps: false };
+    let opts = BoardBuildOptions { core_half: rp.core_half(board.stackup.thickness) };
     let geo = build_board_geometry(&board, &opts);
     let mut cache = ReliefTileCache::default();
     let rebuilt = build_relief_tiles(&mut cache, &board, &geo, &rp, &LayerArtOptions::default());
@@ -398,14 +416,20 @@ fn cmd_geom(pcb: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 基板を読み（要約をログに出す）、3D モデルのパスの解決を用意する（基板の設定ファイルの [paths] も使う。render と同じ）
+fn board_and_resolver(pcb: &PathBuf) -> anyhow::Result<(Board, krbr_kicad::ModelResolver)> {
+    let board = load_board_or_report(pcb).ok_or_else(|| anyhow::anyhow!("cannot load {}", pcb.display()))?;
+    let resolver = model_resolver(&board, &load_project_config(&board.file));
+    Ok((board, resolver))
+}
+
 fn cmd_models(pcb: &PathBuf, no_cache: bool) -> anyhow::Result<()> {
     use krbr_model::{library::step_support, MeshParams, ModelLibrary};
-    let board = load_board(pcb)?;
+    let (board, resolver) = board_and_resolver(pcb)?;
     match step_support() {
         Ok(()) => info!("STEP converter: available"),
         Err(e) => krbr_core::warn!("STEP converter unavailable ({e}); STEP models will be placeholders"),
     }
-    let resolver = ModelResolver::new(&board.project_dir, &BTreeMap::new(), &[]);
     let library = ModelLibrary::new(krbr_core::platform::cache_dir(), MeshParams::default(), !no_cache);
     let t0 = std::time::Instant::now();
     let (mut tris, mut parts, mut missing) = (0usize, 0usize, 0usize);
@@ -438,32 +462,15 @@ fn cmd_models(pcb: &PathBuf, no_cache: bool) -> anyhow::Result<()> {
 }
 
 fn cmd_info(pcb: &PathBuf, models: bool) -> anyhow::Result<()> {
-    info!("loading {}", pcb.display());
-    let board = load_board(pcb)?;
-    info!(
-        "board v{}: {} footprints, {} pads, {} tracks, {} vias, {} zone fills, {} graphics",
-        board.version,
-        board.footprints.len(),
-        board.pads.len(),
-        board.tracks.len(),
-        board.vias.len(),
-        board.zones.len(),
-        board.graphics.len()
-    );
-    if board.unfilled_zones > 0 {
-        krbr_core::warn!("{} zone(s) have no fill; run zone fill in KiCad and save", board.unfilled_zones);
-    }
+    let (board, resolver) = board_and_resolver(pcb)?;
     info!(
         "stackup: thickness {:.3} mm, finish '{}', mask '{}'",
         board.stackup.thickness, board.stackup.copper_finish, board.stackup.mask_color_front
     );
-    let stroke = board.stroke_texts.iter().filter(|t| t.layer == "F.SilkS" || t.layer == "B.SilkS").count();
-    info!("stroke-font texts on silkscreen (need kicad-cli): {}", stroke);
+    info!("stroke-font texts / text boxes on the silkscreen (need kicad-cli): {}", board.stroke_silk_count());
     if !models {
         return Ok(());
     }
-    // TODO: <名前>.krbr の path_vars / model_search_dirs（設定ファイルの移植後）
-    let resolver = ModelResolver::new(&board.project_dir, &BTreeMap::new(), &[]);
     let (mut found, mut missing, mut no_model) = (0, 0, 0);
     for fp in &board.footprints {
         if fp.models.is_empty() {
@@ -506,8 +513,7 @@ fn launched_from_explorer() -> bool {
 /// エクスプローラーから起動したときは、終わるとコンソールがすぐ閉じてエラーが読めないので、Enter を待つ
 fn exit_with(code: i32, explorer: bool) -> ! {
     if explorer && code != 0 {
-        eprintln!("
-Enter キーで閉じます");
+        eprintln!("\nPress Enter to close");
         let _ = std::io::stdin().read_line(&mut String::new());
     }
     std::process::exit(code)
@@ -523,12 +529,8 @@ fn main() {
     if let Some(i) = args.iter().skip(1).position(|a| !a.starts_with('-')) {
         let i = i + 1;
         if args[i].to_lowercase().ends_with(".kicad_pcb") {
-            // エクスプローラーからの起動では作業フォルダが決まらないので、保存先（既定 out\）を基板のフォルダの下にする
-            if explorer {
-                if let Some(dir) = std::path::absolute(&args[i]).ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-                    let _ = std::env::set_current_dir(dir);
-                }
-            }
+            // 作業フォルダは変えない：view の保存先は基板のフォルダから決め（--out が無ければ）、エクスプローラーからの起動では
+            // 相対パスの指定も無い。ファイルのダイアログも基板・環境マップのフォルダを最初に開く
             args.insert(i, "view".into());
         }
     }
@@ -561,21 +563,23 @@ fn main() {
             }
             let vo = krbr_app::ViewOptions {
                 common,
-                test_frames: args.test_frames,
-                screenshot: args.screenshot.clone(),
                 hidden: args.hidden,
-                test_orbit_deg: args.test_orbit,
                 watch: !args.no_watch,
-                test_reload: args.test_reload,
-                test_pick: (args.test_pick.len() == 2).then(|| (args.test_pick[0], args.test_pick[1])),
-                test_assign: args.test_assign.clone(),
-                test_mask: args.test_mask.clone(),
-                test_save_as: args.test_save_as.clone(),
-                test_reset_settings: args.test_reset_settings,
-                render_size: args.render_size.clone(),
+                render_size: args.render_size,
                 render_ratio: args.render_ratio,
                 paused: args.paused,
                 language: args.lang.clone(),
+                test: TestOptions {
+                    frames: args.test_frames,
+                    screenshot: args.screenshot.clone(),
+                    orbit_deg: args.test_orbit,
+                    reload: args.test_reload,
+                    pick: (args.test_pick.len() == 2).then(|| (args.test_pick[0], args.test_pick[1])),
+                    assign: args.test_assign.clone(),
+                    mask: args.test_mask.clone(),
+                    save_as: args.test_save_as.clone(),
+                    reset_settings: args.test_reset_settings,
+                },
             };
             krbr_app::run_viewer(vo).map(|rc| {
                 if rc != 0 {

@@ -2,6 +2,8 @@
 
 use std::time::Instant;
 
+use krbr_scene::IntegratorKind;
+
 use crate::gpu_scene::GpuScene;
 use crate::image_io::ImageF;
 use crate::denoiser::{DenoiseQuality, Denoiser};
@@ -13,7 +15,7 @@ pub struct RenderSettings {
     pub width: u32,
     pub height: u32,
     pub spp: u32,
-    pub integrator: String,
+    pub integrator: IntegratorKind,
     pub frame: FrameParams,
     /// ノイズ除去（OIDN）もする：品質と、元の画像と混ぜる強さ（0..1）
     pub denoise: Option<(DenoiseQuality, f32)>,
@@ -29,7 +31,7 @@ pub struct RenderOutput {
 }
 
 pub fn render_offscreen(ctx: &Context, scene: &GpuScene<'_>, s: &RenderSettings) -> Result<RenderOutput, String> {
-    let mut prog = Progressive::new(ctx, scene, &s.integrator, s.width, s.height, s.frame.clone())?;
+    let mut prog = Progressive::new(ctx, scene, s.integrator, s.width, s.height, s.frame.clone())?;
     krbr_core::info!("rendering {}x{}, {} spp, integrator '{}', max depth {}, {}", s.width, s.height, s.spp, prog.integrator_name(), s.frame.max_depth, if s.frame.spectral { "spectral" } else { "RGB" });
 
     // 1 サンプルずつ投入して完了を待つ。GPU を長時間占有しないので、作業中の画面描画が止まりにくい

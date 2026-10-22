@@ -9,13 +9,18 @@ use krbr_geom::tiles::ReliefTileCache;
 use krbr_kicad::{diff_boards, load_board, Board, BoardDiff, ModelResolver};
 use krbr_model::{MeshParams, ModelLibrary};
 use krbr_render::studio_env::STUDIO;
-use krbr_render::{build_env_distribution, image_io, DenoiseQuality, is_builtin, load_environment_map, render_offscreen, Context, ContextOptions, FrameParams, GpuScene, RenderSettings};
+use krbr_render::{build_env_distribution, image_io, DenoiseQuality, is_builtin, load_environment_map, render_offscreen, Context, ContextOptions, FrameParams, GpuScene, Progressive, RenderSettings};
 use krbr_scene::config::{apply_mask_color_spec, load_project_config, write_default_configs, ProjectConfig};
 use krbr_scene::scene::{build_scene, load_material_setup, MaterialSetup, SceneContext};
-use krbr_scene::{frame_camera, orbit_camera, Camera, CameraParams, LensModel, MaterialResolver, Scene, SceneOptions};
+use krbr_scene::{frame_camera, orbit_camera, Camera, CameraParams, IntegratorKind, LensModel, MaterialResolver, Scene, SceneOptions};
 
-use crate::kicad_cli::{find_kicad_cli, plot_stroke_silk, SilkPlot};
+use crate::kicad_cli::find_kicad_cli;
+pub use crate::kicad_cli::KicadCliSilk;
 use crate::remember;
+
+/// 環境マップの重点サンプリングの分布の幅（画素）。これより大きい環境マップは縮小して分布を作る（放射輝度は元の解像度のまま）。
+/// 4K の環境マップでも分布の表が数十 MB に収まり、太陽のような小さく明るい光源も 1 画素以上に残る大きさ
+pub const ENV_DIST_RESOLUTION: u32 = 2048;
 
 #[derive(Debug, Clone, Default)]
 pub struct RenderOptions {
@@ -39,13 +44,16 @@ pub struct RenderOptions {
     pub radiance_clamp: Option<f32>,
     /// 注視点（KiCad の基板座標 X, Y、mm）
     pub look_at: Vec<f64>,
-    pub zoom: f64,
-    pub integrator: String,
+    /// 自動の構図からの拡大率（正の値）。None なら指定なし（覚えた視点があればそれ、無ければ自動の構図のまま）
+    pub zoom: Option<f64>,
+    /// None なら設定ファイル（または覚えたもの）のまま
+    pub integrator: Option<IntegratorKind>,
     pub seed: u32,
     pub no_cache: bool,
     pub validate: bool,
     pub spectral: Option<bool>,
-    pub lens: String,
+    /// None なら設定ファイル（または覚えたもの）のまま
+    pub lens: Option<LensModel>,
     pub f_number: Option<f32>,
     pub focal_length: Option<f32>,
     pub focus_distance: Option<f32>,
@@ -83,37 +91,18 @@ pub struct PreparedScene {
     pub source: Option<SceneSource>,
 }
 
-/// 線フォントの文字（シルク）の書き出し（kicad-cli）
-#[derive(Debug, Clone)]
-pub struct KicadCliSilk {
-    pub cli: PathBuf,
-    pub cache_dir: PathBuf,
-    pub use_cache: bool,
-}
-
-impl KicadCliSilk {
-    pub fn plot(&self, board: &Board) -> SilkPlot {
-        plot_stroke_silk(&self.cli, &board.file, &board.project_name, &self.cache_dir, self.use_cache)
-    }
-}
-
-/// シルク層の線フォントの文字の数（krbr は形を作れないので kicad-cli で描く）
-pub fn stroke_silk_count(board: &Board) -> usize {
-    board.stroke_texts.iter().filter(|t| t.layer == "F.SilkS" || t.layer == "B.SilkS").count()
-}
-
-/// kicad-cli を探し、線フォントの文字があれば書き出して cfg.scene.layer_art.extra_silk に入れる
+/// kicad-cli を探し、線フォントの文字・文字の枠があれば書き出して cfg.scene.layer_art.extra_silk に入れる
 fn setup_stroke_silk(board: &Board, cfg: &mut ProjectConfig, o: &RenderOptions, cache_dir: &Path) -> Option<KicadCliSilk> {
-    let n = stroke_silk_count(board);
+    let n = board.stroke_silk_count();
     if !cfg.use_kicad_cli_text || o.no_kicad_cli {
         if n > 0 {
-            warn!("{} stroke-font silkscreen text(s) will be missing (kicad-cli disabled)", n);
+            warn!("{} stroke-font text(s) / text box(es) on the silkscreen will be missing (kicad-cli disabled)", n);
         }
         return None;
     }
     let Some(cli) = find_kicad_cli(&cfg.kicad_cli) else {
         if n > 0 {
-            warn!("kicad-cli not found; {} stroke-font silkscreen text(s) will be missing (set [kicad_cli] path in <name>.krbr)", n);
+            warn!("kicad-cli not found; {} stroke-font text(s) / text box(es) on the silkscreen will be missing (set [kicad_cli] path in <name>.krbr)", n);
         }
         return None;
     };
@@ -121,7 +110,7 @@ fn setup_stroke_silk(board: &Board, cfg: &mut ProjectConfig, o: &RenderOptions, 
     if n > 0 {
         let t0 = Instant::now();
         let silk = k.plot(board);
-        info!("kicad-cli silk: {} stroke-font text(s), {:.0} ms{} ({})", n, t0.elapsed().as_secs_f64() * 1000.0, if silk.from_cache { ", from cache" } else { "" }, k.cli.display());
+        info!("kicad-cli silk: {} stroke-font text(s) / text box(es), {:.0} ms{} ({})", n, t0.elapsed().as_secs_f64() * 1000.0, if silk.from_cache { ", from cache" } else { "" }, k.cli.display());
         cfg.scene.layer_art.extra_silk = silk.side;
     }
     Some(k)
@@ -180,8 +169,8 @@ pub fn load_board_or_report(pcb: &Path) -> Option<Board> {
     match load_board(pcb) {
         Ok(b) => {
             info!("board v{}: {} footprints, {} pads, {} tracks, {} vias, {} zone fills, {} graphics", b.version, b.footprints.len(), b.pads.len(), b.tracks.len(), b.vias.len(), b.zones.len(), b.graphics.len());
-            if b.unfilled_zones > 0 {
-                warn!("{} zone(s) have no fill data (refill zones in KiCad and save)", b.unfilled_zones);
+            if let Some(m) = b.unfilled_zones_message() {
+                warn!("{m}");
             }
             Some(b)
         }
@@ -244,12 +233,8 @@ fn apply_command_line(cfg: &mut ProjectConfig, o: &RenderOptions) {
             warn!("--mask-color: {}", e);
         }
     }
-    if !o.lens.is_empty() {
-        cfg.lens.model = match o.lens.as_str() {
-            "thin" => LensModel::Thin,
-            "realistic" => LensModel::Realistic,
-            _ => LensModel::Pinhole,
-        };
+    if let Some(m) = o.lens {
+        cfg.lens.model = m;
     }
     if let Some(v) = o.f_number {
         cfg.lens.f_number = v;
@@ -263,8 +248,8 @@ fn apply_command_line(cfg: &mut ProjectConfig, o: &RenderOptions) {
     if let Some(v) = o.blades {
         cfg.lens.blades = v;
     }
-    if !o.integrator.is_empty() {
-        cfg.integrator = o.integrator.clone();
+    if let Some(k) = o.integrator {
+        cfg.integrator = k;
     }
 }
 
@@ -313,7 +298,7 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
     // 部品の材質：材質ライブラリ、全体の対応表、プロジェクトの上書き
     let materials = load_material_setup(&board.file);
     let kicad_cli = setup_stroke_silk(&board, &mut cfg, o, &cache_dir);
-    let resolver = ModelResolver::new(&board.project_dir, &cfg.path_vars, &cfg.model_search_dirs);
+    let resolver = model_resolver(&board, &cfg);
     let library = Arc::new(ModelLibrary::new(cache_dir.clone(), MeshParams::default(), !o.no_cache));
     info!("mesh cache: {}{}", cache_dir.join("meshes").display(), if o.no_cache { " (disabled)" } else { "" });
     let mut source = SceneSource { resolver, library, materials, tiles: ReliefTileCache::default() };
@@ -342,8 +327,34 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
         cfg.hdr = remember::normalize_hdr(&cfg.hdr);
         remember::remember_hdr(&board.file, &cfg.hdr, &config_hdr);
     }
-    let dist = build_env_distribution(&env, 2048);
+    let dist = build_env_distribution(&env, ENV_DIST_RESOLUTION);
     Some(PreparedScene { board, cfg, scene, env, dist, config_hdr, configured, config_view, remembered_view, kicad_cli, source: Some(source) })
+}
+
+/// 3D モデルのパスの解決：基板のフォルダと、設定ファイル（<名前>.krbr）の [paths] の変数・探す場所
+pub fn model_resolver(board: &Board, cfg: &ProjectConfig) -> ModelResolver {
+    ModelResolver::new(&board.project_dir, &cfg.path_vars, &cfg.model_search_dirs)
+}
+
+/// 累積の描画を用意する。BDPT / VCM を作れなければ（GPU の機能が足りないなど）警告して PT で作る。
+/// ビューアのパネルで選び直したときも同じ扱い（どちらでも、描けないまま止めない）
+pub fn progressive_or_pt<'a>(ctx: &'a Context, gpu: &'a GpuScene<'a>, kind: IntegratorKind, width: u32, height: u32, frame: FrameParams) -> Result<Progressive<'a>, String> {
+    match Progressive::new(ctx, gpu, kind, width, height, frame.clone()) {
+        Err(e) if kind != IntegratorKind::Pt => {
+            warn!("integrator {kind}: {e}; using pt instead");
+            Progressive::new(ctx, gpu, IntegratorKind::Pt, width, height, frame)
+        }
+        r => r,
+    }
+}
+
+/// GPU が光線と三角形の交差をどの方式で求めるか（ステータスバーと krbr bench の表示。技術用語なので訳さない）
+pub fn trace_method_name(ctx: &Context) -> &'static str {
+    if ctx.use_rt_pipeline {
+        "ray tracing pipeline"
+    } else {
+        "ray query"
+    }
 }
 
 pub fn camera_params(cfg: &ProjectConfig, width: u32, height: u32) -> CameraParams {
@@ -353,7 +364,7 @@ pub fn camera_params(cfg: &ProjectConfig, width: u32, height: u32) -> CameraPara
 /// 最初のカメラ：この基板で覚えた視点（--look-at / --zoom を指定しなければ）。覚えていなければ自動の構図
 pub fn initial_camera(prep: &PreparedScene, o: &RenderOptions, width: u32, height: u32) -> Camera {
     let cfg = &prep.cfg;
-    if o.look_at.is_empty() && (o.zoom == 0.0 || o.zoom == 1.0) {
+    if o.look_at.is_empty() && o.zoom.is_none() {
         if let Some((target, distance)) = remember::camera_of(&prep.remembered_view) {
             debug!("camera: last used for this board (distance {:.1} mm, elevation {:.1}, azimuth {:.1})", distance, cfg.elevation_deg, cfg.azimuth_deg);
             return orbit_camera(target, distance, cfg.elevation_deg, cfg.azimuth_deg, cfg.fov_deg, width as f32 / height.max(1) as f32);
@@ -370,7 +381,9 @@ pub fn framed_camera(cfg: &ProjectConfig, prep: &PreparedScene, o: &RenderOption
         let b = &prep.scene.board;
         target = krbr_geom::board_mesh::board_to_world(glam::DVec2::new(o.look_at[0], o.look_at[1]), b.thickness / 2.0, b.center);
     }
-    let dist = cam.distance / o.zoom.max(1e-3) as f32;
+    // 0 以下の拡大率は使わない（指定なしと同じ。カメラが無限に遠くならないように）
+    let zoom = o.zoom.filter(|z| *z > 0.0).unwrap_or(1.0);
+    let dist = cam.distance / zoom as f32;
     orbit_camera(target, dist, cfg.elevation_deg, cfg.azimuth_deg, cfg.fov_deg, cam.aspect)
 }
 
@@ -403,10 +416,10 @@ pub fn cmd_render(o: &RenderOptions) -> anyhow::Result<()> {
     let ctx = Context::new(&ContextOptions { validation: o.validate, low_queue_priority: true, ..Default::default() }).map_err(|e| anyhow::anyhow!(e))?;
     let result = {
         let mut gpu = GpuScene::new(&ctx);
-        gpu.build(&prep.scene, &prep.env, &prep.dist, cfg.scene.bump_intensity);
+        gpu.try_build(&prep.scene, &prep.env, &prep.dist, cfg.scene.bump_intensity).map_err(|e| anyhow::anyhow!("GPU scene: {e}"))?;
         prep.env.rgba = Vec::new();
         let denoise = o.denoise.unwrap_or(false).then_some((DenoiseQuality::High, o.denoise_strength.unwrap_or(1.0)));
-        let rs = RenderSettings { width: cfg.width, height: cfg.height, spp: cfg.spp, integrator: cfg.integrator.clone(), frame: frame_params(cfg, cam, o.seed), denoise };
+        let rs = RenderSettings { width: cfg.width, height: cfg.height, spp: cfg.spp, integrator: cfg.integrator, frame: frame_params(cfg, cam, o.seed), denoise };
         render_offscreen(&ctx, &gpu, &rs).map_err(|e| anyhow::anyhow!("render failed: {e}"))?
     };
 

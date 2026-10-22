@@ -17,7 +17,7 @@ struct FurnaceResult {
     mean_rgb: DVec3,
 }
 
-fn furnace(ctx: &Context, mat: &Material, spp: u32, spectral: bool, integrator: &str) -> FurnaceResult {
+fn furnace(ctx: &Context, mat: &Material, spp: u32, spectral: bool, integrator: IntegratorKind) -> FurnaceResult {
     let mut mesh = Mesh::default();
     add_sphere(&mut mesh, Vec3::ZERO, 10.0, 0, 96, 48);
     let s = scene_of(vec![mat.clone()], mesh);
@@ -89,13 +89,13 @@ fn acrylic(m: &mut Material) {
     m.transmission_dispersion_abbe_number = 57.0;
 }
 
-fn check(cases: &[Case], spp: u32, integrator: &str, ctx: &Context) -> Vec<String> {
+fn check(cases: &[Case], spp: u32, integrator: IntegratorKind, ctx: &Context) -> Vec<String> {
     let mut failures = Vec::new();
     for c in cases {
         let r = furnace(ctx, &c.m, spp, c.spectral, integrator);
-        println!("  {integrator:<5} {:<16} mean {:.4}  (allowed {:.3} .. {:.3})", c.name, r.mean, c.lo, c.hi);
+        println!("  {:<5} {:<16} mean {:.4}  (allowed {:.3} .. {:.3})", integrator.as_str(), c.name, r.mean, c.lo, c.hi);
         if r.mean < c.lo || r.mean > c.hi {
-            failures.push(format!("{integrator} {}: mean {:.4}", c.name, r.mean));
+            failures.push(format!("{} {}: mean {:.4}", integrator.as_str(), c.name, r.mean));
         }
     }
     failures
@@ -130,7 +130,7 @@ fn white_furnace() {
         case("coated (spec)", 0.75, 1.015, true, coated_lambert),
     ];
     println!("white furnace test (mean radiance on the sphere, ideal = 1):");
-    let failures = check(&cases, 256, "pt", &ctx);
+    let failures = check(&cases, 256, IntegratorKind::Pt, &ctx);
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
@@ -142,8 +142,8 @@ fn spectral_color_constancy() {
     let ctx = context();
     for c in [Vec3::new(0.8, 0.3, 0.1), Vec3::new(0.1, 0.4, 0.8), Vec3::new(0.2, 0.7, 0.25)] {
         let m = Material { specular_weight: 0.0, base_color: c, ..Default::default() };
-        let rgb = furnace(&ctx, &m, 128, false, "pt").mean_rgb;
-        let spec = furnace(&ctx, &m, 128, true, "pt").mean_rgb;
+        let rgb = furnace(&ctx, &m, 128, false, IntegratorKind::Pt).mean_rgb;
+        let spec = furnace(&ctx, &m, 128, true, IntegratorKind::Pt).mean_rgb;
         println!("  base {:.2} {:.2} {:.2}: RGB {:.4} {:.4} {:.4}, spectral {:.4} {:.4} {:.4}", c.x, c.y, c.z, rgb.x, rgb.y, rgb.z, spec.x, spec.y, spec.z);
         for k in 0..3 {
             assert!((spec[k] - rgb[k]).abs() < 0.02 + 0.03 * rgb[k], "channel {k}: spectral {} vs RGB {}", spec[k], rgb[k]);
@@ -169,8 +169,8 @@ fn white_furnace_bidirectional() {
         case("acrylic (spec)", 0.97, 1.03, true, acrylic),
     ];
     println!("white furnace test, bidirectional (mean radiance on the sphere, ideal = 1):");
-    let mut failures = check(&cases, 128, "bdpt", &ctx);
-    failures.extend(check(&cases, 128, "vcm", &ctx));
+    let mut failures = check(&cases, 128, IntegratorKind::Bdpt, &ctx);
+    failures.extend(check(&cases, 128, IntegratorKind::Vcm, &ctx));
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
@@ -185,8 +185,8 @@ fn rough_surfaces_bidirectional_match_pt() {
     let mut failures = Vec::new();
     let materials = [case("glass_r0.3", 0.0, 1.0, false, glass(0.3)), case("glass_r0.6", 0.0, 1.0, false, glass(0.6)), case("metal_r0.3", 0.0, 1.0, false, metal(0.3))];
     for Case { name, m, .. } in &materials {
-        let pt = furnace(&ctx, m, 512, false, "pt").mean;
-        for integ in ["bdpt", "vcm"] {
+        let pt = furnace(&ctx, m, 512, false, IntegratorKind::Pt).mean;
+        for integ in [IntegratorKind::Bdpt, IntegratorKind::Vcm] {
             let b = furnace(&ctx, m, 256, false, integ).mean;
             println!("  {name:<12} pt {pt:.4}, {integ} {b:.4}");
             if (b / pt - 1.0).abs() > 0.015 {

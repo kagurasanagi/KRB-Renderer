@@ -10,10 +10,19 @@ use std::path::{Path, PathBuf};
 use krbr_core::{info, warn};
 use krbr_scene::board_file;
 use krbr_scene::config::{apply_mask_color_spec, ProjectConfig};
-use krbr_scene::{LensModel, LensParams};
+use krbr_scene::{IntegratorKind, LensModel, LensParams};
 use toml::{Table, Value};
 
 const MAX_RECENT: usize = 12;
+
+/// 描画のサイズの上限（幅・高さとも）。多くのデスクトップ GPU の maxImageDimension2D（16384）に合わせる。
+/// これより大きいと累積の画像を作れない（覚えた値・--render-size のどちらもこれで確かめる）
+pub const MAX_RENDER_SIZE: u32 = 16384;
+
+/// 描画のサイズとして使える大きさか（1 .. MAX_RENDER_SIZE）
+pub fn valid_render_size(w: i64, h: i64) -> bool {
+    (1..=MAX_RENDER_SIZE as i64).contains(&w) && (1..=MAX_RENDER_SIZE as i64).contains(&h)
+}
 
 /// 基板について覚えている環境マップ
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +42,15 @@ pub fn normalize_hdr(spec: &str) -> String {
         return spec.to_string();
     }
     std::path::absolute(spec).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| spec.to_string())
+}
+
+/// 同じ環境マップか（Windows では大文字・小文字と区切り文字の違いを無視する）。最近使った一覧の重なりの除去とビューアの一覧で使う
+pub fn same_hdr(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.replace('\\', "/").eq_ignore_ascii_case(&b.replace('\\', "/"))
+    } else {
+        a == b
+    }
 }
 
 fn load(file: &Path) -> Table {
@@ -86,8 +104,10 @@ fn write_board_remembered(pcb: &Path, b: &Table) -> Option<PathBuf> {
     if !b.is_empty() {
         src.insert("remembered".into(), Value::Table(b.clone()));
     }
-    match board_file::edit(pcb, |doc| board_file::replace_tables(doc, &src, &["remembered"])) {
-        Ok(f) => Some(f),
+    // 表を作れなければ書かない（ファイルの [remembered] を消してしまわない）
+    let file = board_file::resolve(pcb);
+    match board_file::try_edit_toml(&file, &board_file::template(), |doc| board_file::try_replace_tables(doc, &src, &["remembered"])) {
+        Ok(()) => Some(file),
         Err(e) => {
             warn!("remembered settings: {}", e);
             None
@@ -108,7 +128,7 @@ fn remember_in(b: &mut Table, hdr: &str, config_hdr: &str) {
 
 fn add_recent(t: &mut Table, hdr: &str) {
     let mut recent = recent_in(t);
-    recent.retain(|r| r != hdr);
+    recent.retain(|r| !same_hdr(r, hdr));
     recent.insert(0, hdr.to_string());
     recent.truncate(MAX_RECENT);
     t.insert("recent_hdr".into(), Value::Array(recent.into_iter().map(Value::String).collect()));
@@ -141,11 +161,60 @@ pub fn recent_hdrs() -> Vec<String> {
 
 // ---------------------------------------------------------------- パネルの設定
 
-/// パネルの設定の値（項目の名前 → 値）。設定ファイルにもある項目と、ビューアだけの項目（VIEWER_ONLY）がある
+/// パネルの設定の値（項目の名前 → 値）。設定ファイルにもある項目（ViewSettings）、視点の注視点と距離（camera_of / set_camera。
+/// render も使う）、ビューアだけの項目（ViewerValues）がある
 pub type ViewValues = Table;
 
-/// ビューアだけの項目（render / watch には使わない。設定ファイルには無い）
-pub const VIEWER_ONLY: [&str; 5] = ["denoise", "denoise_strength", "max_spp", "display_mode", "render_ratio"];
+/// ビューアだけの項目（render / watch には使わない。設定ファイルには無い）。覚えていない項目は None
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ViewerValues {
+    pub denoise: Option<bool>,
+    pub denoise_strength: Option<f32>,
+    /// 最大のサンプル数
+    pub max_spp: Option<u32>,
+    /// 表示の種類の名前（"image" / "albedo" / "normal"）
+    pub display_mode: Option<String>,
+    /// レンダリングの比率
+    pub render_ratio: Option<f32>,
+}
+
+impl ViewerValues {
+    const DENOISE: &'static str = "denoise";
+    const DENOISE_STRENGTH: &'static str = "denoise_strength";
+    const MAX_SPP: &'static str = "max_spp";
+    const DISPLAY_MODE: &'static str = "display_mode";
+    const RENDER_RATIO: &'static str = "render_ratio";
+
+    /// 覚えた値から読む
+    pub fn of(v: &ViewValues) -> Self {
+        Self {
+            denoise: v.get(Self::DENOISE).and_then(|x| x.as_bool()),
+            denoise_strength: v.get(Self::DENOISE_STRENGTH).and_then(|x| x.as_float()).map(|x| x as f32),
+            max_spp: v.get(Self::MAX_SPP).and_then(|x| x.as_integer()).and_then(|x| u32::try_from(x).ok()),
+            display_mode: v.get(Self::DISPLAY_MODE).and_then(|x| x.as_str()).map(str::to_string),
+            render_ratio: v.get(Self::RENDER_RATIO).and_then(|x| x.as_float()).map(|x| x as f32),
+        }
+    }
+
+    /// 値に入れる（None の項目は入れない）
+    pub fn write(&self, v: &mut ViewValues) {
+        if let Some(b) = self.denoise {
+            v.insert(Self::DENOISE.into(), Value::Boolean(b));
+        }
+        if let Some(x) = self.denoise_strength {
+            v.insert(Self::DENOISE_STRENGTH.into(), Value::Float(x as f64));
+        }
+        if let Some(n) = self.max_spp {
+            v.insert(Self::MAX_SPP.into(), Value::Integer(n as i64));
+        }
+        if let Some(m) = &self.display_mode {
+            v.insert(Self::DISPLAY_MODE.into(), Value::String(m.clone()));
+        }
+        if let Some(r) = self.render_ratio {
+            v.insert(Self::RENDER_RATIO.into(), Value::Float(r as f64));
+        }
+    }
+}
 
 /// 画像に関わるパネルの設定（設定ファイル・コマンドラインにもある項目）
 #[derive(Debug, Clone)]
@@ -156,7 +225,7 @@ pub struct ViewSettings<'a> {
     pub glow: f32,
     pub glow_threshold: f32,
     pub glow_spread: f32,
-    pub integrator: &'a str,
+    pub integrator: IntegratorKind,
     pub spectral: bool,
     pub bump_intensity: f32,
     /// レジストの色：プリセットの名前、r,g,b、または空（stackup の色・既定）
@@ -179,7 +248,7 @@ impl<'a> ViewSettings<'a> {
             glow: cfg.glow,
             glow_threshold: cfg.glow_threshold,
             glow_spread: cfg.glow_spread,
-            integrator: &cfg.integrator,
+            integrator: cfg.integrator,
             spectral: cfg.spectral,
             bump_intensity: cfg.scene.bump_intensity,
             mask: mask_spec(&cfg.scene),
@@ -222,10 +291,10 @@ impl<'a> ViewSettings<'a> {
         if let Some((w, h)) = self.render_size {
             t.insert("render_size".into(), Value::Array(vec![Value::Integer(w as i64), Value::Integer(h as i64)]));
         }
-        t.insert("integrator".into(), Value::String(self.integrator.to_string()));
+        t.insert("integrator".into(), Value::String(self.integrator.as_str().into()));
         t.insert("spectral".into(), Value::Boolean(self.spectral));
         t.insert("mask".into(), Value::String(self.mask.clone()));
-        t.insert("lens_model".into(), Value::String(lens_model_name(l.model).into()));
+        t.insert("lens_model".into(), Value::String(l.model.as_str().into()));
         t.insert("lens_blades".into(), Value::Integer(l.blades as i64));
         t.insert("lens_natural_vignetting".into(), Value::Boolean(l.natural_vignetting));
         t
@@ -240,14 +309,6 @@ pub fn mask_spec(s: &krbr_scene::SceneOptions) -> String {
         format!("{:.6},{:.6},{:.6}", s.mask_color.x, s.mask_color.y, s.mask_color.z)
     } else {
         String::new()
-    }
-}
-
-fn lens_model_name(m: LensModel) -> &'static str {
-    match m {
-        LensModel::Pinhole => "pinhole",
-        LensModel::Thin => "thin",
-        LensModel::Realistic => "realistic",
     }
 }
 
@@ -285,11 +346,10 @@ pub fn apply_view_values(cfg: &mut ProjectConfig, v: &ViewValues) {
     set(&mut l.abbe_number, "lens_abbe_number");
     set(&mut l.lateral_ca, "lens_lateral_ca");
     if let Some(m) = v.get("lens_model").and_then(|x| x.as_str()) {
-        l.model = match m {
-            "thin" => LensModel::Thin,
-            "realistic" => LensModel::Realistic,
-            _ => LensModel::Pinhole,
-        };
+        match m.parse::<LensModel>() {
+            Ok(m) => l.model = m,
+            Err(e) => warn!("remembered lens: {e}; ignored"),
+        }
     }
     if let Some(n) = v.get("lens_blades").and_then(|x| x.as_integer()) {
         l.blades = n as i32;
@@ -302,7 +362,10 @@ pub fn apply_view_values(cfg: &mut ProjectConfig, v: &ViewValues) {
         cfg.height = h;
     }
     if let Some(i) = v.get("integrator").and_then(|x| x.as_str()) {
-        cfg.integrator = i.to_string();
+        match i.parse::<IntegratorKind>() {
+            Ok(k) => cfg.integrator = k,
+            Err(e) => warn!("remembered integrator: {e}; ignored"),
+        }
     }
     if let Some(b) = v.get("spectral").and_then(|x| x.as_bool()) {
         cfg.spectral = b;
@@ -318,7 +381,7 @@ pub fn apply_view_values(cfg: &mut ProjectConfig, v: &ViewValues) {
 pub fn render_size_of(v: &ViewValues) -> Option<(u32, u32)> {
     let a = v.get("render_size")?.as_array()?;
     let (w, h) = (a.first()?.as_integer()?, a.get(1)?.as_integer()?);
-    (w > 0 && h > 0 && w <= 16384 && h <= 16384).then_some((w as u32, h as u32))
+    valid_render_size(w, h).then_some((w as u32, h as u32))
 }
 
 /// 覚えた視点の注視点（ワールド座標）と距離（mm）
@@ -493,6 +556,24 @@ mod tests {
         assert_eq!(remembered_in(&b).unwrap().config_hdr, "/cfg.exr");
         assert_eq!(remembered_in(&Table::new()), None);
         assert_eq!(recent_in(&st), vec!["/hdr/two.exr".to_string(), "/hdr/one.exr".to_string()]);
+        // Windows では大文字・小文字と区切り文字だけが違うものは同じファイル（一覧に重ねない）
+        if cfg!(windows) {
+            let mut st = Table::new();
+            add_recent(&mut st, "C:\\hdr\\One.exr");
+            add_recent(&mut st, "c:/hdr/one.exr");
+            assert_eq!(recent_in(&st), vec!["c:/hdr/one.exr".to_string()]);
+        }
+    }
+
+    #[test]
+    fn viewer_values_round_trip_and_render_size_limit() {
+        let v = ViewerValues { denoise: Some(true), denoise_strength: Some(0.5), max_spp: Some(256), display_mode: Some("albedo".into()), render_ratio: Some(1.5) };
+        let mut t = ViewValues::new();
+        v.write(&mut t);
+        let t: Table = t.to_string().parse().unwrap();
+        assert_eq!(ViewerValues::of(&t), v);
+        assert_eq!(ViewerValues::of(&ViewValues::new()), ViewerValues::default());
+        assert!(valid_render_size(1, MAX_RENDER_SIZE as i64) && !valid_render_size(0, 10) && !valid_render_size(10, MAX_RENDER_SIZE as i64 + 1));
     }
 
     #[test]
@@ -502,7 +583,7 @@ mod tests {
         // パネルで変えた値
         let mut panel = cfg.clone();
         panel.exposure_ev = 1.5;
-        panel.integrator = "vcm".into();
+        panel.integrator = IntegratorKind::Vcm;
         panel.spectral = true;
         panel.lens.model = LensModel::Thin;
         panel.lens.blades = 6;
@@ -510,7 +591,7 @@ mod tests {
         panel.height = 1350;
         apply_mask_color_spec(&mut panel.scene, "jlcpcb-purple").unwrap();
         let mut values = ViewSettings::of(&panel).values();
-        values.insert("max_spp".into(), Value::Integer(1024));
+        ViewerValues { max_spp: Some(1024), ..Default::default() }.write(&mut values);
 
         let mut b = Table::new();
         remember_in(&mut b, "/hdr/one.exr", "");
@@ -522,7 +603,7 @@ mod tests {
         let got = usable_view_values(&b, &config_then);
         assert_eq!(got, values);
         apply_view_values(&mut cfg, &got);
-        assert_eq!((cfg.exposure_ev, cfg.integrator.as_str(), cfg.spectral, cfg.lens.model, cfg.lens.blades), (1.5, "vcm", true, LensModel::Thin, 6));
+        assert_eq!((cfg.exposure_ev, cfg.integrator, cfg.spectral, cfg.lens.model, cfg.lens.blades), (1.5, IntegratorKind::Vcm, true, LensModel::Thin, 6));
         assert_eq!(cfg.scene.mask_preset, "jlcpcb-purple");
         assert_eq!((cfg.width, cfg.height), (1080, 1350));
         assert_eq!(render_size_of(&got), Some((1080, 1350)));
@@ -533,7 +614,7 @@ mod tests {
         let got = usable_view_values(&b, &ViewSettings::of(&edited).values());
         assert!(!got.contains_key("exposure_ev"));
         assert_eq!(got.get("integrator").and_then(|v| v.as_str()), Some("vcm"));
-        assert_eq!(got.get("max_spp").and_then(|v| v.as_integer()), Some(1024));
+        assert_eq!(ViewerValues::of(&got).max_spp, Some(1024));
 
         // 視点
         let mut v = ViewValues::new();

@@ -55,8 +55,26 @@ struct Edge {
 
 /// 選んだインスタンスの辺（選んだとき・シーンを組み直したときに作る）
 pub struct Outline {
-    pub instance: usize,
     edges: Vec<Edge>,
+}
+
+/// ワールド座標の点を、カメラの画面（w x h 画素）の画素の位置にする。カメラのすぐ前・後ろの点は None。
+/// ピンホール・薄レンズの投影（実レンズは投影が違うので使わない）
+pub fn project(cam: &Camera, p: Vec3, w: f32, h: f32) -> Option<[f32; 2]> {
+    let v = p - cam.position;
+    let z = v.dot(cam.forward);
+    if z < 0.1 {
+        return None;
+    }
+    let nx = v.dot(cam.right) / (z * cam.tan_half_fov_y * cam.aspect);
+    let ny = -v.dot(cam.up) / (z * cam.tan_half_fov_y);
+    Some([(nx + 1.0) * 0.5 * w, (ny + 1.0) * 0.5 * h])
+}
+
+/// project の逆：カメラの画面（w x h 画素）の画素の位置 (x, y) を通る視線の方向（正規化）
+pub fn unproject(cam: &Camera, x: f32, y: f32, w: f32, h: f32) -> Vec3 {
+    let (nx, ny) = (2.0 * x / w - 1.0, 2.0 * y / h - 1.0);
+    (cam.forward + nx * cam.tan_half_fov_y * cam.aspect * cam.right - ny * cam.tan_half_fov_y * cam.up).normalize()
 }
 
 impl Outline {
@@ -85,22 +103,13 @@ impl Outline {
                 edges.entry(k).and_modify(|e| { e.n1.get_or_insert(n); }).or_insert(Edge { a: world[t[i] as usize], b: world[t[j] as usize], n0: n, n1: None });
             }
         }
-        Outline { instance, edges: edges.into_values().collect() }
+        Outline { edges: edges.into_values().collect() }
     }
 
     /// カメラから見た輪郭（表と裏の境の辺と、縁の辺）を、画面の画素の線分にする。
     /// w x h はカメラの画面の大きさ（画素）。画面の外・カメラの後ろにかかる辺は除く
     pub fn segments(&self, cam: &Camera, w: f32, h: f32) -> Vec<([f32; 2], [f32; 2])> {
-        let project = |p: Vec3| {
-            let v = p - cam.position;
-            let z = v.dot(cam.forward);
-            if z < 0.1 {
-                return None;
-            }
-            let nx = v.dot(cam.right) / (z * cam.tan_half_fov_y * cam.aspect);
-            let ny = -v.dot(cam.up) / (z * cam.tan_half_fov_y);
-            Some([(nx + 1.0) * 0.5 * w, (ny + 1.0) * 0.5 * h])
-        };
+        let project = |p: Vec3| project(cam, p, w, h);
         let mut out = Vec::new();
         for e in &self.edges {
             let front = |n: Vec3| n.dot(cam.position - e.a) > 0.0;
@@ -158,6 +167,17 @@ mod tests {
             for p in [a, b] {
                 assert!(p[0] > 40.0 && p[0] < 60.0 && p[1] > 40.0 && p[1] < 60.0, "{p:?}");
             }
+        }
+    }
+
+    #[test]
+    fn unproject_inverts_project() {
+        let cam = orbit_camera(Vec3::new(1.0, 2.0, 3.0), 50.0, 35.0, 45.0, 30.0, 1.6);
+        for p in [Vec3::new(1.0, 2.0, 3.0), Vec3::new(5.0, -3.0, 8.0), Vec3::new(-6.0, 1.0, 0.0)] {
+            let [x, y] = project(&cam, p, 320.0, 200.0).unwrap();
+            let dir = unproject(&cam, x, y, 320.0, 200.0);
+            let to = (p - cam.position).normalize();
+            assert!(dir.dot(to) > 0.99999, "{dir:?} vs {to:?}");
         }
     }
 }

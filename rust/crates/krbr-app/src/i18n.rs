@@ -40,6 +40,13 @@ pub fn get(id: &str) -> Option<String> {
     LOADER.has(id).then(|| LOADER.get(id))
 }
 
+/// 英語の .ftl にこの id の文があるか（実行時に id を組み立てる文の確かめ用）
+#[cfg(test)]
+pub(crate) fn english_has(id: &str) -> bool {
+    let f = Localizations::get("en/krbr-app.ftl").unwrap();
+    std::str::from_utf8(&f.data).unwrap().lines().any(|l| l.split(" =").next() == Some(id))
+}
+
 /// 選べる言語（言語タグ, その言語での名前）
 pub const LANGUAGES: &[(&str, &str)] = &[("en", "English"), ("ja", "日本語")];
 

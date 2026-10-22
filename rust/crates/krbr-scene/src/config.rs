@@ -27,13 +27,20 @@ impl IntegratorKind {
     /// すべての種類（ビューアの選択肢の並び）
     pub const ALL: [IntegratorKind; 3] = [IntegratorKind::Pt, IntegratorKind::Bdpt, IntegratorKind::Vcm];
 
-    /// 設定ファイル・コマンドラインでの名前（krbr-render の create_integrator が受け付ける名前）
+    /// 設定ファイル・コマンドライン・覚えた設定での名前
     pub fn as_str(self) -> &'static str {
         match self {
             IntegratorKind::Pt => "pt",
             IntegratorKind::Bdpt => "bdpt",
             IntegratorKind::Vcm => "vcm",
         }
+    }
+}
+
+/// as_str の名前で出す（幅の指定も効く）
+impl std::fmt::Display for IntegratorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
     }
 }
 
@@ -80,8 +87,7 @@ pub struct ProjectConfig {
     pub radiance_clamp: f32,
     /// 分光モード（代表波長方式、4 波長）
     pub spectral: bool,
-    /// IntegratorKind::as_str の名前（load_project_config で確かめる）
-    pub integrator: String,
+    pub integrator: IntegratorKind,
     /// VCM の近傍の半径の初期値（mm）。0 で自動
     pub vcm_radius: f32,
     pub lens: LensParams,
@@ -116,7 +122,7 @@ impl Default for ProjectConfig {
             glow_spread: 0.7,
             radiance_clamp: 10.0,
             spectral: false,
-            integrator: IntegratorKind::default().as_str().into(),
+            integrator: IntegratorKind::default(),
             vcm_radius: 0.0,
             lens: LensParams::default(),
             loaded_files: Vec::new(),
@@ -505,10 +511,8 @@ fn read_into(c: &mut ProjectConfig, r: &mut Reader, base: &Path) {
     r.num(&["render", "glow_spread"], R::UNIT, &mut c.glow_spread);
     r.num(&["render", "radiance_clamp"], R::NON_NEGATIVE, &mut c.radiance_clamp);
     r.boolean(&["render", "spectral"], &mut c.spectral);
-    // 積分器は名前で持つ（ProjectConfig::integrator は String のまま）。名前は IntegratorKind で確かめ、知らない名前は警告して既定のまま
-    let mut integrator: IntegratorKind = c.integrator.parse().unwrap_or_default();
-    r.choice(&["render", "integrator"], &mut integrator);
-    c.integrator = integrator.as_str().to_string();
+    // 知らない名前は警告して既定のまま（"path" は "pt" の別名）
+    r.choice(&["render", "integrator"], &mut c.integrator);
     r.num(&["render", "vcm_radius"], R::NON_NEGATIVE, &mut c.vcm_radius);
     r.choice(&["lens", "model"], &mut c.lens.model);
     r.num(&["lens", "focal_length_mm"], R::POSITIVE, &mut c.lens.focal_length_mm);
@@ -607,7 +611,7 @@ x = 1
         assert_eq!(c.scene.fr4_color, d.scene.fr4_color); // 型の誤り
         assert_eq!(c.scene.include_dnp, d.scene.include_dnp);
         assert_eq!((c.spp, c.width, c.height), (d.spp, d.width, 720)); // 負の値・小数は使わない（以前は 0 と 640）
-        assert_eq!(c.integrator, "pt"); // path は pt の別名
+        assert_eq!(c.integrator, IntegratorKind::Pt); // path は pt の別名
         assert_eq!(c.lens.model, d.lens.model); // 知らない名前（大小も区別する）
         assert_eq!((c.hdr.as_str(), c.lens.lens_file.as_str()), ("", "")); // 空は省略と同じ
         let _ = std::fs::remove_dir_all(&ws);
@@ -620,7 +624,7 @@ x = 1
         }
         assert_eq!("path".parse::<IntegratorKind>(), Ok(IntegratorKind::Pt));
         assert!("PT".parse::<IntegratorKind>().is_err());
-        assert_eq!(ProjectConfig::default().integrator, IntegratorKind::default().as_str());
+        assert_eq!(ProjectConfig::default().integrator, IntegratorKind::Pt);
     }
 
     #[test]

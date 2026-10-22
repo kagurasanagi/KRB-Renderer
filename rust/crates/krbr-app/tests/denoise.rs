@@ -6,6 +6,7 @@ mod common;
 
 use krbr_app::prepare::{frame_params, initial_camera, prepare_scene, RenderOptions};
 use krbr_render::image_io::ImageF;
+use krbr_scene::IntegratorKind;
 use krbr_render::{render_offscreen, Context, ContextOptions, DenoiseQuality, GpuScene, RenderOutput, RenderSettings};
 
 /// 画素の値（RGB）の平均の差
@@ -32,13 +33,13 @@ fn denoising_a_4spp_image_approaches_the_reference() {
     let look_at = if common::custom_board() { Vec::new() } else { vec![95.0, 95.0] };
     let ctx = Context::new(&ContextOptions { low_queue_priority: true, ..Default::default() }).unwrap();
     for spectral in [false, true] {
-        let o = RenderOptions { pcb: pcb.clone(), hdr: "builtin:studio".into(), width: Some(480), height: Some(270), look_at: look_at.clone(), zoom: 2.0, spectral: Some(spectral), ..Default::default() };
+        let o = RenderOptions { pcb: pcb.clone(), hdr: "builtin:studio".into(), width: Some(480), height: Some(270), look_at: look_at.clone(), zoom: Some(2.0), spectral: Some(spectral), ..Default::default() };
         let prep = prepare_scene(&o).unwrap();
         let cam = initial_camera(&prep, &o, 480, 270);
         let mut gpu = GpuScene::new(&ctx);
-        gpu.build(&prep.scene, &prep.env, &prep.dist, prep.cfg.scene.bump_intensity);
+        gpu.try_build(&prep.scene, &prep.env, &prep.dist, prep.cfg.scene.bump_intensity).unwrap();
         let render = |spp: u32, denoise: Option<(DenoiseQuality, f32)>| -> RenderOutput {
-            let rs = RenderSettings { width: 480, height: 270, spp, integrator: "pt".into(), frame: frame_params(&prep.cfg, cam, 1), denoise };
+            let rs = RenderSettings { width: 480, height: 270, spp, integrator: IntegratorKind::Pt, frame: frame_params(&prep.cfg, cam, 1), denoise };
             render_offscreen(&ctx, &gpu, &rs).unwrap()
         };
         let reference = render(1024, None).color;

@@ -10,10 +10,10 @@ use krbr_model::{MeshParams, ModelLibrary};
 use krbr_render::{Context, ContextOptions};
 use krbr_scene::config::load_project_config;
 use krbr_scene::model_map::{GlobalModelMap, PartAssignment, ProjectOverrides};
-use krbr_scene::scene::{load_material_setup, MaterialAssignment};
+use krbr_scene::scene::{load_material_setup, MaterialAssignment, MaterialSetup};
 use krbr_scene::{mask_presets, MaterialLibrary, MaterialQuery, MaterialResolver};
 
-use crate::prepare::load_board_or_report;
+use crate::prepare::{load_board_or_report, model_resolver};
 
 #[derive(Debug, Clone, Default)]
 pub struct MaterialSetOptions {
@@ -83,8 +83,14 @@ fn check_readable<T>(file: &Path, load: impl Fn(&Path) -> Result<T, String>) -> 
     Ok(())
 }
 
-/// 材質を割り当てて設定ファイルに書く。戻り値は書いたファイル
-pub fn set_material(o: &MaterialSetOptions) -> Result<PathBuf, String> {
+/// 書き込む先：部品番号か、基板の中の 3D モデル
+enum Target {
+    Ref(String),
+    Model(ModelRef),
+}
+
+/// set_material / clear_material で共通：指定の検証、基板と材質の設定の読み込み、書き込む先の決定（--model に一致するモデルがちょうど 1 つ）
+fn resolve_target(o: &MaterialSetOptions) -> Result<(Board, MaterialSetup, Target), String> {
     if o.reference.is_empty() == o.model.is_empty() {
         return Err("specify exactly one of --ref or --model".into());
     }
@@ -92,29 +98,39 @@ pub fn set_material(o: &MaterialSetOptions) -> Result<PathBuf, String> {
         return Err("--global can only be used with --model (per-reference overrides belong to the project)".into());
     }
     let board = load_board_or_report(&o.pcb).ok_or("cannot load board")?;
-    let mut ms = load_material_setup(&board.file);
+    let ms = load_material_setup(&board.file);
+    if !o.reference.is_empty() {
+        return Ok((board, ms, Target::Ref(o.reference.clone())));
+    }
+    let cfg = load_project_config(&board.file);
+    let mut models = find_models(&board, &model_resolver(&board, &cfg), &o.model);
+    match models.len() {
+        0 => Err(format!("no 3D model on this board matches '{}'", o.model)),
+        1 => Ok((board, ms, Target::Model(models.remove(0)))),
+        _ => {
+            let list: String = models.iter().map(|m| format!("\n  {}", m.spec)).collect();
+            Err(format!("'{}' matches several models; use the full path as written in the board:{list}", o.model))
+        }
+    }
+}
+
+/// 材質を割り当てて設定ファイルに書く。戻り値は書いたファイル
+pub fn set_material(o: &MaterialSetOptions) -> Result<PathBuf, String> {
+    let (board, mut ms, target) = resolve_target(o)?;
     if ms.library.find_variant(&o.material).is_none() {
         return Err(format!("material '{}' is not in the material library (see: krbr material list)", o.material));
     }
-    if !o.reference.is_empty() {
-        if !board.footprints.iter().any(|f| f.reference == o.reference) {
-            warn!("reference {} is not on this board (written anyway)", o.reference);
+    let m = match target {
+        Target::Ref(reference) => {
+            if !board.footprints.iter().any(|f| f.reference == reference) {
+                warn!("reference {} is not on this board (written anyway)", reference);
+            }
+            check_readable(&ms.project_file, ProjectOverrides::load)?;
+            assign(ms.project.refs.entry(reference).or_default(), &o.part, &o.material);
+            ms.project.save(&ms.project_file)?;
+            return Ok(ms.project_file);
         }
-        check_readable(&ms.project_file, ProjectOverrides::load)?;
-        assign(ms.project.refs.entry(o.reference.clone()).or_default(), &o.part, &o.material);
-        ms.project.save(&ms.project_file)?;
-        return Ok(ms.project_file);
-    }
-    let cfg = load_project_config(&board.file);
-    let resolver = ModelResolver::new(&board.project_dir, &cfg.path_vars, &cfg.model_search_dirs);
-    let models = find_models(&board, &resolver, &o.model);
-    let m = match models.as_slice() {
-        [] => return Err(format!("no 3D model on this board matches '{}'", o.model)),
-        [m] => m,
-        _ => {
-            let list: String = models.iter().map(|m| format!("\n  {}", m.spec)).collect();
-            return Err(format!("'{}' matches several models; use the full path as written in the board:{list}", o.model));
-        }
+        Target::Model(m) => m,
     };
     if o.global {
         check_readable(&ms.global_file, GlobalModelMap::load)?;
@@ -143,30 +159,22 @@ fn clear_assign(a: &mut PartAssignment, part: &str) -> bool {
 /// set_material で書いた割り当てを消して、規則どおりに戻す（o.material は使わない）。
 /// 戻り値は書き直したファイル（消すものが無ければ None で、ファイルに触らない）
 pub fn clear_material(o: &MaterialSetOptions) -> Result<Option<PathBuf>, String> {
-    if o.reference.is_empty() == o.model.is_empty() {
-        return Err("specify exactly one of --ref or --model".into());
-    }
-    if o.global && o.model.is_empty() {
-        return Err("--global can only be used with --model (per-reference overrides belong to the project)".into());
-    }
-    let board = load_board_or_report(&o.pcb).ok_or("cannot load board")?;
-    let mut ms = load_material_setup(&board.file);
-    if !o.reference.is_empty() {
-        check_readable(&ms.project_file, ProjectOverrides::load)?;
-        let Some(a) = ms.project.refs.get_mut(&o.reference) else { return Ok(None) };
-        if !clear_assign(a, &o.part) {
-            return Ok(None);
+    let (_, mut ms, target) = resolve_target(o)?;
+    let m = match target {
+        Target::Ref(reference) => {
+            check_readable(&ms.project_file, ProjectOverrides::load)?;
+            let Some(a) = ms.project.refs.get_mut(&reference) else { return Ok(None) };
+            if !clear_assign(a, &o.part) {
+                return Ok(None);
+            }
+            if a.is_empty() {
+                ms.project.refs.remove(&reference);
+            }
+            ms.project.save(&ms.project_file)?;
+            return Ok(Some(ms.project_file));
         }
-        if a.is_empty() {
-            ms.project.refs.remove(&o.reference);
-        }
-        ms.project.save(&ms.project_file)?;
-        return Ok(Some(ms.project_file));
-    }
-    let cfg = load_project_config(&board.file);
-    let resolver = ModelResolver::new(&board.project_dir, &cfg.path_vars, &cfg.model_search_dirs);
-    let models = find_models(&board, &resolver, &o.model);
-    let [m] = models.as_slice() else { return Err(format!("'{}' does not match exactly one 3D model on this board", o.model)) };
+        Target::Model(m) => m,
+    };
     let (entries, file) = if o.global {
         check_readable(&ms.global_file, GlobalModelMap::load)?;
         (&mut ms.global.models, ms.global_file.clone())
@@ -192,7 +200,7 @@ pub fn compute_assignments(pcb: &Path) -> Result<Vec<MaterialAssignment>, String
     let cfg = load_project_config(&board.file);
     let ms = load_material_setup(&board.file);
     let materials = MaterialResolver::new(&ms.library, &ms.project, &ms.global);
-    let resolver = ModelResolver::new(&board.project_dir, &cfg.path_vars, &cfg.model_search_dirs);
+    let resolver = model_resolver(&board, &cfg);
     let library = ModelLibrary::new(krbr_core::platform::cache_dir(), MeshParams::default(), true);
     let mut out = Vec::new();
     for fp in &board.footprints {

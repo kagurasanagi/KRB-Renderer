@@ -1,17 +1,17 @@
 //! ヘッドレスの保存監視（`krbr watch`、C++ 版 app/watch）。ウィンドウは開かず、保存のたびに描き直して PNG を書き出す
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use ash::vk;
 use krbr_core::{info, warn, FileWatcher};
 use krbr_render::tonemapper::{DisplayMode, Tonemapper};
 use krbr_render::vk::memory_barrier;
-use krbr_render::{image_io, Context, ContextOptions, DenoiseQuality, Denoiser, FrameParams, GpuScene, Progressive};
+use krbr_render::{image_io, Context, ContextOptions, DenoiseQuality, Denoiser, FrameParams, GpuScene};
+use krbr_scene::IntegratorKind;
 
-use crate::kicad_cli::{plot_stroke_silk, SilkPlot};
-use crate::prepare::{frame_params, initial_camera, prepare_scene, PreparedScene, ReloadStats, RenderOptions};
+use crate::kicad_cli::SilkJob;
+use crate::prepare::{frame_params, initial_camera, prepare_scene, progressive_or_pt, ReloadStats, RenderOptions};
 
 #[derive(Debug, Clone, Default)]
 pub struct WatchOptions {
@@ -66,13 +66,13 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
 
     let ctx = Context::new(&ContextOptions { validation: common.validate, low_queue_priority: true, ..Default::default() }).map_err(|e| anyhow::anyhow!(e))?;
     let mut gpu = GpuScene::new(&ctx);
-    gpu.build(&prep.scene, &prep.env, &prep.dist, prep.cfg.scene.bump_intensity);
+    gpu.try_build(&prep.scene, &prep.env, &prep.dist, prep.cfg.scene.bump_intensity).map_err(|e| anyhow::anyhow!("GPU scene: {e}"))?;
     prep.env.rgba = Vec::new();
     // 最初の描画の間の保存も取りこぼさないよう、先に監視を始める
     let mut watcher = FileWatcher::with_defaults(&prep.board.file);
     // ノイズ除去は既定で有効（C++ 版と同じ。--no-denoise で無効）
     let denoise = common.denoise.unwrap_or(true);
-    let mut r = Renderer { ctx: &ctx, integrator: prep.cfg.integrator.clone(), width: w, height: h, spp, exposure: prep.cfg.exposure_ev, glow: crate::prepare::glow_params(&prep.cfg), frame, denoise, denoise_strength: common.denoise_strength.unwrap_or(1.0), denoiser: None };
+    let mut r = Renderer { ctx: &ctx, integrator: prep.cfg.integrator, width: w, height: h, spp, exposure: prep.cfg.exposure_ev, glow: crate::prepare::glow_params(&prep.cfg), frame, denoise, denoise_strength: common.denoise_strength.unwrap_or(1.0), denoiser: None };
     let (render_ms, write_ms, _) = r.render_and_write(&gpu, &out)?;
     info!("watch: wrote {} ({}x{}, {} spp, render {:.0} ms, write {:.0} ms); watching {} for saves", out.display(), w, h, spp, render_ms, write_ms, prep.board.file.display());
     if !on_event(WatchEvent::Ready(&out)) {
@@ -81,24 +81,13 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
 
     let mut models_seen = prep.source.as_ref().map(|s| s.library.completed()).unwrap_or(0);
     let mut idle_since = Instant::now();
-    // 線フォントの文字の書き出し（kicad-cli、裏のスレッド）と、その間にまた文字が変わったか
-    let mut silk_job: Option<mpsc::Receiver<SilkPlot>> = None;
-    let mut silk_rerun = false;
+    // 線フォントの文字の書き出し（kicad-cli、裏のスレッド）
+    let mut silk_job = SilkJob::new(prep.kicad_cli.clone(), &prep.board.file, &prep.board.project_name);
     loop {
         let mut silk = false;
-        if let Some(rx) = &silk_job {
-            match rx.try_recv() {
-                Ok(plot) => {
-                    silk_job = None;
-                    prep.cfg.scene.layer_art.extra_silk = plot.side;
-                    silk = true;
-                }
-                Err(mpsc::TryRecvError::Disconnected) => silk_job = None,
-                Err(mpsc::TryRecvError::Empty) => {}
-            }
-        }
-        if silk_job.is_none() && std::mem::take(&mut silk_rerun) {
-            silk_job = start_silk(&prep);
+        if let Some(plot) = silk_job.poll() {
+            prep.cfg.scene.layer_art.extra_silk = plot.side;
+            silk = true;
         }
         let source = prep.source.as_mut().unwrap();
         let saved = watcher.poll();
@@ -123,12 +112,7 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
                 Ok((board, scene, stats)) => {
                     prep.board = board;
                     if stats.diff.stroke_silk_changed {
-                        // 書き出しの間にまた変わったら、終わった後にもう一度書き出す
-                        if silk_job.is_some() {
-                            silk_rerun = true;
-                        } else {
-                            silk_job = start_silk(&prep);
-                        }
+                        silk_job.request(); // 書き出しの間にまた変わったら、終わった後にもう一度書き出す
                     }
                     u.stats = stats;
                     scene
@@ -146,7 +130,10 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
         u.pending_models = scene.pending_models;
         let t1 = Instant::now();
         prep.scene = scene;
-        gpu.rebuild_geometry(&prep.scene, prep.cfg.scene.bump_intensity);
+        if let Err(e) = gpu.try_rebuild_geometry(&prep.scene, prep.cfg.scene.bump_intensity) {
+            warn!("watch: cannot send the board to the GPU ({e}); waiting for the next save");
+            continue;
+        }
         u.gpu_ms = ms_since(t1);
         (u.render_ms, u.write_ms, u.denoise_ms) = r.render_and_write(&gpu, &out)?;
         if saved {
@@ -169,17 +156,6 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
     }
 }
 
-/// 線フォントの文字を kicad-cli で裏で書き出す（kicad-cli を使わないなら None）
-fn start_silk(prep: &PreparedScene) -> Option<mpsc::Receiver<SilkPlot>> {
-    let k = prep.kicad_cli.clone()?;
-    let (file, name) = (prep.board.file.clone(), prep.board.project_name.clone());
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(plot_stroke_silk(&k.cli, &file, &name, &k.cache_dir, k.use_cache));
-    });
-    Some(rx)
-}
-
 /// `krbr watch`：止めるまで（または --max-updates 回）保存のたびに描き直す
 pub fn cmd_watch(o: &WatchOptions) -> anyhow::Result<()> {
     let mut updates = 0;
@@ -198,7 +174,7 @@ fn ms_since(t: Instant) -> f64 {
 /// 1 回分の描画：積分器とトーンマッピングを作り、spp を積んで RGBA8 を読み戻し、PNG に書く
 struct Renderer<'a> {
     ctx: &'a Context,
-    integrator: String,
+    integrator: IntegratorKind,
     width: u32,
     height: u32,
     spp: u32,
@@ -216,16 +192,15 @@ impl<'a> Renderer<'a> {
     fn render_and_write(&mut self, gpu: &GpuScene<'_>, out: &PathBuf) -> anyhow::Result<(f64, f64, f64)> {
         let t0 = Instant::now();
         // 形状を作り直すと積分器の参照先も変わるので、更新のたびに作る（C++ 版の rebuildIntegrator と同じ）
-        let mut prog = Progressive::new(self.ctx, gpu, &self.integrator, self.width, self.height, self.frame.clone()).map_err(|e| anyhow::anyhow!(e))?;
-        if prog.integrator_name() != self.integrator {
-            self.integrator = prog.integrator_name().to_string();
-        }
+        let mut prog = progressive_or_pt(self.ctx, gpu, self.integrator, self.width, self.height, self.frame.clone()).map_err(|e| anyhow::anyhow!(e))?;
+        // PT に代えたら、次の更新からも PT にする（毎回作り直して失敗しない）
+        self.integrator = prog.integrator_kind();
         let tone = Tonemapper::new(self.ctx, prog.targets()).map_err(|e| anyhow::anyhow!(e))?;
         // 8 サンプルずつ投入する（GPU を長く占有しない）
         let mut left = self.spp;
         while left > 0 {
             let n = left.min(8);
-            self.ctx.submit_and_wait(|_, cmd| prog.record(cmd, n));
+            self.ctx.try_submit_and_wait(|_, cmd| prog.record(cmd, n)).map_err(|e| anyhow::anyhow!(e))?;
             left -= n;
         }
         // ノイズ除去（OIDN のデバイスとバッファは使い回し、累積の画像だけ参照し直す）
@@ -241,10 +216,11 @@ impl<'a> Renderer<'a> {
         }
         let mut denoise_ms = 0.0;
         let mut tone_denoised = None;
+        // 分光モードの累積は XYZ なので、OIDN にはリニア sRGB にして渡し、結果は XYZ に戻す（トーンマッピングは XYZ として読む）
+        let xyz = prog.xyz_output();
         if let Some(d) = &self.denoiser {
             d.rebind(prog.targets());
-            self.ctx.submit_and_wait(|_, cmd| d.record_prepare(cmd));
-            match d.execute() {
+            match self.ctx.try_submit_and_wait(|_, cmd| d.record_prepare_xyz(cmd, xyz)).and_then(|()| d.execute()) {
                 Ok(ms) => {
                     denoise_ms = ms;
                     let t = prog.targets();
@@ -259,12 +235,12 @@ impl<'a> Renderer<'a> {
         };
         let img = tm.output();
         let (w, h) = (img.width, img.height);
-        let mut rb = self.ctx.create_buffer(w as u64 * h as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST, true, true);
-        let (image, rbb, xyz) = (img.image, rb.buffer, prog.xyz_output());
+        let mut rb = self.ctx.try_create_buffer(w as u64 * h as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST, true, true).map_err(|e| anyhow::anyhow!(e))?;
+        let (image, rbb) = (img.image, rb.buffer);
         let denoiser = self.denoiser.as_ref().filter(|_| tone_denoised.is_some());
-        self.ctx.submit_and_wait(|dev, cmd| {
+        let copied = self.ctx.try_submit_and_wait(|dev, cmd| {
             if let Some(d) = denoiser {
-                d.record_output(cmd, strength);
+                d.record_output_xyz(cmd, strength, xyz);
             }
             tm.record(cmd, self.exposure, DisplayMode::Beauty, xyz, &self.glow);
             memory_barrier(dev, cmd, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_READ);
@@ -272,9 +248,12 @@ impl<'a> Renderer<'a> {
                 .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
                 .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
             unsafe { dev.cmd_copy_image_to_buffer(cmd, image, vk::ImageLayout::GENERAL, rbb, &[region]) };
+            memory_barrier(dev, cmd, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, vk::PipelineStageFlags2::HOST, vk::AccessFlags2::HOST_READ);
         });
-        let mut px = rb.mapped_ref().unwrap().to_vec();
+        // 確保した大きさは求めた大きさより大きいことがあるので、画像の分（mapped_bytes）だけを使う
+        let px = copied.map(|()| rb.mapped_bytes().map(<[u8]>::to_vec).unwrap_or_default());
         self.ctx.destroy_buffer(&mut rb);
+        let mut px = px.map_err(|e| anyhow::anyhow!(e))?;
         for c in px.chunks_exact_mut(4) {
             c[3] = 255;
         }
