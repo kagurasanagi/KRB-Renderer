@@ -362,9 +362,9 @@ impl<'a> Denoiser<'a> {
         check(api, self.device, "filter")?;
 
         let ctx = self.ctx;
-        self.out_image = ctx.try_create_image_2d(self.width, self.height, 1, vk::Format::R32G32B32A32_SFLOAT, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_DST)?;
+        self.out_image = ctx.create_image_2d(self.width, self.height, 1, vk::Format::R32G32B32A32_SFLOAT, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_DST)?;
         let img = self.out_image.image;
-        ctx.try_submit_and_wait(|dev, cmd| {
+        ctx.submit_and_wait(|dev, cmd| {
             image_barrier(dev, cmd, img, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, 1);
         })?;
         let (si, sb) = (vk::DescriptorType::STORAGE_IMAGE, vk::DescriptorType::STORAGE_BUFFER);
@@ -414,14 +414,10 @@ impl<'a> Denoiser<'a> {
         }
     }
 
-    /// 累積画像から OIDN の入力を作るコマンドを記録する（この後、完了を待ってから execute）。累積はリニア sRGB とみなす。
-    /// 分光モード（累積が XYZ）では record_prepare_xyz を使う
-    pub fn record_prepare(&self, cmd: vk::CommandBuffer) {
-        self.record_prepare_xyz(cmd, false);
-    }
-
-    /// record_prepare の、累積の色空間を指定する版。xyz_input: 累積が CIE XYZ（分光モード。Progressive::xyz_output）なら true
-    pub fn record_prepare_xyz(&self, cmd: vk::CommandBuffer, xyz_input: bool) {
+    /// 累積画像から OIDN の入力を作るコマンドを記録する（この後、完了を待ってから execute）。
+    /// xyz_input: 累積が CIE XYZ（分光モード。Progressive::xyz_output）なら true、リニア sRGB なら false。
+    /// OIDN は RGB を前提にしているので、XYZ はここでリニア sRGB に直して渡す
+    pub fn record_prepare(&self, cmd: vk::CommandBuffer, xyz_input: bool) {
         let push = PrepPush { width: self.width, height: self.height, _pad: [0; 2], xyz_to_rgb: color_matrix(krbr_scene::spectrum::xyz_to_linear_srgb(), xyz_input) };
         self.prep.dispatch(self.ctx, cmd, &push, self.width, self.height);
         // 書き込みを、完了の待機後に OIDN（外部・CPU）から読めるようにする
@@ -438,13 +434,8 @@ impl<'a> Denoiser<'a> {
     }
 
     /// 結果を、元の画像と strength（0..1、1 で OIDN の結果そのまま）で混ぜて output() の画像へ書くコマンドを記録する。
-    /// 累積はリニア sRGB とみなす。分光モードでは record_output_xyz を使う
-    pub fn record_output(&self, cmd: vk::CommandBuffer, strength: f32) {
-        self.record_output_xyz(cmd, strength, false);
-    }
-
-    /// record_output の、累積の色空間を指定する版（record_prepare_xyz と同じ xyz_input を渡す）。出力は累積と同じ色空間
-    pub fn record_output_xyz(&self, cmd: vk::CommandBuffer, strength: f32, xyz_input: bool) {
+    /// xyz_input は record_prepare と同じ値を渡す。出力は累積と同じ色空間
+    pub fn record_output(&self, cmd: vk::CommandBuffer, strength: f32, xyz_input: bool) {
         let dev = &self.ctx.device;
         memory_barrier(dev, cmd, vk::PipelineStageFlags2::HOST, vk::AccessFlags2::HOST_WRITE, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_READ);
         let push = BlendPush { width: self.width, height: self.height, strength, _pad: 0, rgb_to_xyz: color_matrix(krbr_scene::spectrum::linear_srgb_to_xyz(), xyz_input) };
@@ -458,12 +449,12 @@ impl<'a> Denoiser<'a> {
     }
 
     /// output() の画像を読み戻す（GPU が待機中に呼ぶこと。分光モードなら XYZ のまま）。失敗したら Err
-    pub fn try_read_output(&self) -> Result<crate::image_io::ImageF, String> {
+    pub fn read_output(&self) -> Result<crate::image_io::ImageF, String> {
         let (w, h) = (self.width, self.height);
         let bytes = w as u64 * h as u64 * 16;
-        let mut rb = self.ctx.try_create_buffer(bytes, vk::BufferUsageFlags::TRANSFER_DST, true, true)?;
+        let mut rb = self.ctx.create_buffer(bytes, vk::BufferUsageFlags::TRANSFER_DST, true, true)?;
         let (img, rbb) = (self.out_image.image, rb.buffer);
-        let r = self.ctx.try_submit_and_wait(|dev, cmd| {
+        let r = self.ctx.submit_and_wait(|dev, cmd| {
             let region = vk::BufferImageCopy::default()
                 .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
                 .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
@@ -480,11 +471,6 @@ impl<'a> Denoiser<'a> {
         });
         self.ctx.destroy_buffer(&mut rb);
         out
-    }
-
-    /// try_read_output の、失敗したらパニックする版
-    pub fn read_output(&self) -> crate::image_io::ImageF {
-        self.try_read_output().unwrap_or_else(|e| panic!("denoiser readback: {e}"))
     }
 
     fn create_shared(&self, size: u64) -> Result<SharedBuf, String> {
@@ -525,7 +511,7 @@ impl<'a> Denoiser<'a> {
 
     fn create_host(&self, size: u64) -> Result<SharedBuf, String> {
         let mut b = SharedBuf::default();
-        let mut host = self.ctx.try_create_buffer(size, vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST, true, true)?;
+        let mut host = self.ctx.create_buffer(size, vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST, true, true)?;
         let ptr = host.mapped_bytes_mut().map(|m| m.as_mut_ptr() as *mut c_void);
         b.host = Some(host);
         let Some(ptr) = ptr else {

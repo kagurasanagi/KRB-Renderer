@@ -137,10 +137,10 @@ impl<'a> GpuScene<'a> {
     }
 
     /// シーン・環境マップを GPU へ送る。VRAM が足りないなどで失敗したら Err（作った分は Drop が解放する。この GpuScene では描かない）
-    pub fn try_build(&mut self, sc: &Scene, env: &ImageF, dist: &EnvDistribution, bump_intensity: f32) -> Result<(), String> {
+    pub fn build(&mut self, sc: &Scene, env: &ImageF, dist: &EnvDistribution, bump_intensity: f32) -> Result<(), String> {
         self.build_spectral_table()?; // 材質の分光の係数に使うので、形状より先に
         self.build_geometry(sc, bump_intensity)?;
-        self.try_set_environment(env, dist)?;
+        self.set_environment(env, dist)?;
         self.upload_board_texture(sc)?;
         self.update_board_params(sc);
         krbr_core::info!(
@@ -156,25 +156,15 @@ impl<'a> GpuScene<'a> {
         Ok(())
     }
 
-    /// try_build の、失敗したらパニックする版（失敗を扱えない呼び出し元用）
-    pub fn build(&mut self, sc: &Scene, env: &ImageF, dist: &EnvDistribution, bump_intensity: f32) {
-        self.try_build(sc, env, dist, bump_intensity).unwrap_or_else(|e| panic!("GPU scene: {e}"))
-    }
-
     /// シーンの形状・配置・材質と基板の距離場を作り直す（環境マップはそのまま。積分器は作り直しが必要）。
     /// 失敗したら Err で、形状は作りかけのまま（作り直しが成功するまで、この GpuScene では描かない）
-    pub fn try_rebuild_geometry(&mut self, sc: &Scene, bump_intensity: f32) -> Result<(), String> {
+    pub fn rebuild_geometry(&mut self, sc: &Scene, bump_intensity: f32) -> Result<(), String> {
         self.ctx.wait_idle();
         self.destroy_geometry();
         self.build_geometry(sc, bump_intensity)?;
         self.upload_board_texture(sc)?;
         self.update_board_params(sc);
         Ok(())
-    }
-
-    /// try_rebuild_geometry の、失敗したらパニックする版
-    pub fn rebuild_geometry(&mut self, sc: &Scene, bump_intensity: f32) {
-        self.try_rebuild_geometry(sc, bump_intensity).unwrap_or_else(|e| panic!("GPU scene: {e}"))
     }
 
     fn update_sdf_tiles(&mut self, sc: &Scene) -> Result<(), String> {
@@ -205,10 +195,10 @@ impl<'a> GpuScene<'a> {
         if regions.is_empty() {
             return Ok(());
         }
-        let mut buf = self.ctx.try_create_buffer(staging.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC, true, false)?;
+        let mut buf = self.ctx.create_buffer(staging.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC, true, false)?;
         buf.mapped_bytes_mut().expect("the staging buffer is host-visible").copy_from_slice(&staging);
         let (image, layers, trace, bb) = (self.board_image.image, self.board_image.layers, self.ctx.trace_stages(), buf.buffer);
-        let r = self.ctx.try_submit_and_wait(|dev, cmd| {
+        let r = self.ctx.submit_and_wait(|dev, cmd| {
             image_barrier(dev, cmd, image, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL, trace, vk::AccessFlags2::SHADER_SAMPLED_READ, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, layers);
             unsafe { dev.cmd_copy_buffer_to_image(cmd, bb, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &regions) };
             image_barrier(dev, cmd, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, trace, vk::AccessFlags2::SHADER_SAMPLED_READ, layers);
@@ -236,11 +226,11 @@ impl<'a> GpuScene<'a> {
         self.triangle_count = tmat.len();
         let mats = to_gpu_materials(&sc.materials, bump_intensity);
 
-        self.vertices = ctx.try_create_device_buffer(as_bytes(&verts), GEOM_USAGE)?;
-        self.indices = ctx.try_create_device_buffer(as_bytes(&idx), GEOM_USAGE)?;
-        self.tri_mats = ctx.try_create_device_buffer(as_bytes(&tmat), vk::BufferUsageFlags::STORAGE_BUFFER)?;
-        self.mesh_infos = ctx.try_create_device_buffer(as_bytes(&infos), vk::BufferUsageFlags::STORAGE_BUFFER)?;
-        self.materials = ctx.try_create_device_buffer(as_bytes(&mats), vk::BufferUsageFlags::STORAGE_BUFFER)?;
+        self.vertices = ctx.create_device_buffer(as_bytes(&verts), GEOM_USAGE)?;
+        self.indices = ctx.create_device_buffer(as_bytes(&idx), GEOM_USAGE)?;
+        self.tri_mats = ctx.create_device_buffer(as_bytes(&tmat), vk::BufferUsageFlags::STORAGE_BUFFER)?;
+        self.mesh_infos = ctx.create_device_buffer(as_bytes(&infos), vk::BufferUsageFlags::STORAGE_BUFFER)?;
+        self.materials = ctx.create_device_buffer(as_bytes(&mats), vk::BufferUsageFlags::STORAGE_BUFFER)?;
 
         // ---- BLAS（メッシュごと）。頂点は GpuVertex の先頭の位置（R32G32B32）、添字は u32
         let vertex_stride = std::mem::size_of::<GpuVertex>() as u64;
@@ -276,7 +266,7 @@ impl<'a> GpuScene<'a> {
             let mut sizes = vk::AccelerationStructureBuildSizesInfoKHR::default();
             unsafe { ctx.as_device.get_acceleration_structure_build_sizes(vk::AccelerationStructureBuildTypeKHR::DEVICE, &info, &[ranges[i].primitive_count], &mut sizes) };
             // 作ったものはすぐフィールドに入れる（途中で失敗しても destroy_geometry が解放する）
-            self.blas_buffers.push(ctx.try_create_buffer(sizes.acceleration_structure_size, vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR, false, false)?);
+            self.blas_buffers.push(ctx.create_buffer(sizes.acceleration_structure_size, vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR, false, false)?);
             let aci = vk::AccelerationStructureCreateInfoKHR::default().buffer(self.blas_buffers[i].buffer).size(sizes.acceleration_structure_size).ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL);
             self.blas[i] = unsafe { ctx.as_device.create_acceleration_structure(&aci, None) }.map_err(|e| format!("vkCreateAccelerationStructureKHR (BLAS {i}): {e:?}"))?;
             scratch_offsets.push(scratch_total);
@@ -307,8 +297,8 @@ impl<'a> GpuScene<'a> {
                 acceleration_structure_reference: vk::AccelerationStructureReferenceKHR { device_handle: addr },
             });
         }
-        self.instance_infos = ctx.try_create_device_buffer(as_bytes(&inst_info), vk::BufferUsageFlags::STORAGE_BUFFER)?;
-        self.instance_buffer = ctx.try_create_device_buffer(as_bytes(&inst), vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR)?;
+        self.instance_infos = ctx.create_device_buffer(as_bytes(&inst_info), vk::BufferUsageFlags::STORAGE_BUFFER)?;
+        self.instance_buffer = ctx.create_device_buffer(as_bytes(&inst), vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR)?;
         let tinst = vk::AccelerationStructureGeometryInstancesDataKHR::default().data(vk::DeviceOrHostAddressConstKHR { device_address: self.instance_buffer.address });
         let tgeom = vk::AccelerationStructureGeometryKHR::default().geometry_type(vk::GeometryTypeKHR::INSTANCES).geometry(vk::AccelerationStructureGeometryDataKHR { instances: tinst });
         let tgeoms = [tgeom];
@@ -320,19 +310,19 @@ impl<'a> GpuScene<'a> {
         let ninst = inst.len() as u32;
         let mut tsizes = vk::AccelerationStructureBuildSizesInfoKHR::default();
         unsafe { ctx.as_device.get_acceleration_structure_build_sizes(vk::AccelerationStructureBuildTypeKHR::DEVICE, &tinfo, &[ninst], &mut tsizes) };
-        self.tlas_buffer = ctx.try_create_buffer(tsizes.acceleration_structure_size, vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR, false, false)?;
+        self.tlas_buffer = ctx.create_buffer(tsizes.acceleration_structure_size, vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR, false, false)?;
         let taci = vk::AccelerationStructureCreateInfoKHR::default().buffer(self.tlas_buffer.buffer).size(tsizes.acceleration_structure_size).ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL);
         self.tlas = unsafe { ctx.as_device.create_acceleration_structure(&taci, None) }.map_err(|e| format!("vkCreateAccelerationStructureKHR (TLAS): {e:?}"))?;
         tinfo = tinfo.dst_acceleration_structure(self.tlas);
         let tlas_scratch_offset = scratch_total;
         scratch_total = align_up(scratch_total + tsizes.build_scratch_size, scratch_align);
 
-        let mut scratch = ctx.try_create_buffer(scratch_total + scratch_align, vk::BufferUsageFlags::STORAGE_BUFFER, false, false)?;
+        let mut scratch = ctx.create_buffer(scratch_total + scratch_align, vk::BufferUsageFlags::STORAGE_BUFFER, false, false)?;
         let scratch_base = align_up(scratch.address, scratch_align);
         let blas = self.blas.clone();
         let as_device = &ctx.as_device;
         let trace = ctx.trace_stages();
-        let r = ctx.try_submit_and_wait(|dev, cmd| {
+        let r = ctx.submit_and_wait(|dev, cmd| {
             let mut infos_b: Vec<vk::AccelerationStructureBuildGeometryInfoKHR> = Vec::with_capacity(n_mesh);
             let mut range_refs: Vec<&[vk::AccelerationStructureBuildRangeInfoKHR]> = Vec::with_capacity(n_mesh);
             for i in 0..n_mesh {
@@ -409,8 +399,8 @@ impl<'a> GpuScene<'a> {
             em.push(GpuEmitter::default());
             cdf.push(1.0);
         }
-        self.emitters = self.ctx.try_create_device_buffer(as_bytes(&em), vk::BufferUsageFlags::STORAGE_BUFFER)?;
-        self.emitter_cdf = self.ctx.try_create_device_buffer(as_bytes(&cdf), vk::BufferUsageFlags::STORAGE_BUFFER)?;
+        self.emitters = self.ctx.create_device_buffer(as_bytes(&em), vk::BufferUsageFlags::STORAGE_BUFFER)?;
+        self.emitter_cdf = self.ctx.create_device_buffer(as_bytes(&cdf), vk::BufferUsageFlags::STORAGE_BUFFER)?;
         if self.emitter_count > 0 {
             krbr_core::info!("GPU scene: {} emissive triangles", self.emitter_count);
         }
@@ -433,16 +423,16 @@ impl<'a> GpuScene<'a> {
         self.board_image_is_sdf = false;
         if sdf {
             // 距離場（RG8、表・裏の 2 層）
-            self.board_image = ctx.try_create_image_2d(g.width as u32, g.height as u32, 2, vk::Format::R8G8_UNORM, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)?;
+            self.board_image = ctx.create_image_2d(g.width as u32, g.height as u32, 2, vk::Format::R8G8_UNORM, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)?;
             let mut both = sc.sdf_image[0].clone();
             both.extend_from_slice(&sc.sdf_image[1]);
-            ctx.try_upload_image(&self.board_image, &both, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
+            ctx.upload_image(&self.board_image, &both, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
             self.board_image_is_sdf = true;
         } else {
             // 距離場が無い（基板の凹凸を作らないシーン）。記述子には画像が要るので、同じ形式の 1x1 の画像を置く。
             // mask_params2.w = 0 なので、シェーダはこれを読まない
-            self.board_image = ctx.try_create_image_2d(1, 1, 2, vk::Format::R8G8_UNORM, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)?;
-            ctx.try_upload_image(&self.board_image, &[0; 4], vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
+            self.board_image = ctx.create_image_2d(1, 1, 2, vk::Format::R8G8_UNORM, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)?;
+            ctx.upload_image(&self.board_image, &[0; 4], vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
         }
         Ok(())
     }
@@ -467,20 +457,20 @@ impl<'a> GpuScene<'a> {
     }
 
     /// 環境マップを差し替える（GPU が待機中に呼ぶこと。積分器は作り直しが必要）。失敗したら Err
-    pub fn try_set_environment(&mut self, env: &ImageF, dist: &EnvDistribution) -> Result<(), String> {
+    pub fn set_environment(&mut self, env: &ImageF, dist: &EnvDistribution) -> Result<(), String> {
         let ctx = self.ctx;
         ctx.destroy_image(&mut self.env_image);
         ctx.destroy_buffer(&mut self.env_marginal);
         ctx.destroy_buffer(&mut self.env_conditional);
         ctx.destroy_buffer(&mut self.env_pdf);
-        self.env_image = ctx.try_create_image_2d(env.width, env.height, 1, vk::Format::R32G32B32A32_SFLOAT, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)?;
-        ctx.try_upload_image(&self.env_image, as_bytes(&env.rgba), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
+        self.env_image = ctx.create_image_2d(env.width, env.height, 1, vk::Format::R32G32B32A32_SFLOAT, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)?;
+        ctx.upload_image(&self.env_image, as_bytes(&env.rgba), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
         if self.env_sampler == vk::Sampler::null() {
             self.env_sampler = make_sampler(&ctx.device, vk::SamplerAddressMode::REPEAT, vk::SamplerAddressMode::CLAMP_TO_EDGE)?;
         }
-        self.env_marginal = ctx.try_create_device_buffer(as_bytes(&dist.marginal_cdf), vk::BufferUsageFlags::STORAGE_BUFFER)?;
-        self.env_conditional = ctx.try_create_device_buffer(as_bytes(&dist.conditional_cdf), vk::BufferUsageFlags::STORAGE_BUFFER)?;
-        self.env_pdf = ctx.try_create_device_buffer(as_bytes(&dist.pdf), vk::BufferUsageFlags::STORAGE_BUFFER)?;
+        self.env_marginal = ctx.create_device_buffer(as_bytes(&dist.marginal_cdf), vk::BufferUsageFlags::STORAGE_BUFFER)?;
+        self.env_conditional = ctx.create_device_buffer(as_bytes(&dist.conditional_cdf), vk::BufferUsageFlags::STORAGE_BUFFER)?;
+        self.env_pdf = ctx.create_device_buffer(as_bytes(&dist.pdf), vk::BufferUsageFlags::STORAGE_BUFFER)?;
         self.env_dist_w = dist.width;
         self.env_dist_h = dist.height;
         self.env_width = env.width;
@@ -489,24 +479,19 @@ impl<'a> GpuScene<'a> {
         Ok(())
     }
 
-    /// try_set_environment の、失敗したらパニックする版
-    pub fn set_environment(&mut self, env: &ImageF, dist: &EnvDistribution) {
-        self.try_set_environment(env, dist).unwrap_or_else(|e| panic!("environment map: {e}"))
-    }
-
     fn build_spectral_table(&mut self) -> Result<(), String> {
         // RGB → スペクトルの表。シェーダは vec4（xyz: 係数）の並びとして読む
         let t = spectrum::rgb2spec_table();
         let n = t.data.len() / 3;
         let data: Vec<Vec4> = (0..n).map(|i| Vec4::new(t.data[i * 3], t.data[i * 3 + 1], t.data[i * 3 + 2], 0.0)).collect();
-        self.rgb2spec = self.ctx.try_create_device_buffer(as_bytes(&data), vk::BufferUsageFlags::STORAGE_BUFFER)?;
-        self.rgb2spec_scale = self.ctx.try_create_device_buffer(as_bytes(&t.scale), vk::BufferUsageFlags::STORAGE_BUFFER)?;
+        self.rgb2spec = self.ctx.create_device_buffer(as_bytes(&data), vk::BufferUsageFlags::STORAGE_BUFFER)?;
+        self.rgb2spec_scale = self.ctx.create_device_buffer(as_bytes(&t.scale), vk::BufferUsageFlags::STORAGE_BUFFER)?;
         Ok(())
     }
 
     /// 材質を送り直す（GPU が待機中に呼ぶこと）。発光体の表（どの三角形が光るか、選ぶ確率）は形状から作るのでここでは
     /// 作り直せない。発光が変わった材質や、材質の数の違いは Err にする（その場合は rebuild_geometry で送り直す）
-    pub fn try_update_materials(&mut self, materials: &[krbr_scene::Material], bump_intensity: f32) -> Result<(), String> {
+    pub fn update_materials(&mut self, materials: &[krbr_scene::Material], bump_intensity: f32) -> Result<(), String> {
         if materials.iter().map(emission_radiance).ne(self.emissions.iter().copied()) {
             return Err("the emission of a material changed; the light table needs rebuild_geometry".into());
         }
@@ -516,16 +501,9 @@ impl<'a> GpuScene<'a> {
             return Err(format!("{} materials do not match the {} on the GPU; use rebuild_geometry", mats.len(), self.materials.size as usize / std::mem::size_of::<GpuMaterial>()));
         }
         let mut buf = std::mem::take(&mut self.materials);
-        let r = self.ctx.try_upload(&mut buf, bytes, 0);
+        let r = self.ctx.upload(&mut buf, bytes, 0);
         self.materials = buf;
         r
-    }
-
-    /// try_update_materials の、失敗を知らせるだけの版（材質はそのまま）
-    pub fn update_materials(&mut self, materials: &[krbr_scene::Material], bump_intensity: f32) {
-        if let Err(e) = self.try_update_materials(materials, bump_intensity) {
-            krbr_core::error!("update materials: {e}");
-        }
     }
 
     fn destroy_geometry(&mut self) {

@@ -20,9 +20,6 @@ pub enum BoardMat {
     Plated = 1,
 }
 
-/// 2D の外接矩形は krbr-kicad の Box2 に一本化した（以前の名前で使っている所のための別名）
-pub type Bounds2 = Box2;
-
 #[derive(Debug, Clone, Default)]
 pub struct BoardGeometry {
     /// 穴を開ける前の基板領域

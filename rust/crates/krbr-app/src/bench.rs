@@ -67,7 +67,7 @@ pub fn cmd_bench(b: &BenchOptions) -> anyhow::Result<()> {
     let method = trace_method_name(&ctx);
     let driver = driver_string(&ctx.info.name, ctx.info.driver_version);
     let mut gpu = GpuScene::new(&ctx);
-    gpu.try_build(&prep.scene, &prep.env, &prep.dist, cfg.scene.bump_intensity).map_err(|e| anyhow::anyhow!("GPU scene: {e}"))?;
+    gpu.build(&prep.scene, &prep.env, &prep.dist, cfg.scene.bump_intensity).map_err(|e| anyhow::anyhow!("GPU scene: {e}"))?;
     let board_hash = std::fs::read(&prep.board.file).map(|d| krbr_core::to_hex(krbr_core::xxh64(&d))).unwrap_or_default();
     let board_name = prep.board.file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
     info!("bench: {} ({}, driver {}), {}x{}, {} spp per case after {} warm-up, max depth {}, scene prepared in {:.1} s", ctx.info.name, method, driver, b.width, b.height, b.spp, WARMUP_SPP, cfg.max_depth, prepare_s);

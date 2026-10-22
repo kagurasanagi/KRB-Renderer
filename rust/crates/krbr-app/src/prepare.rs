@@ -416,7 +416,7 @@ pub fn cmd_render(o: &RenderOptions) -> anyhow::Result<()> {
     let ctx = Context::new(&ContextOptions { validation: o.validate, low_queue_priority: true, ..Default::default() }).map_err(|e| anyhow::anyhow!(e))?;
     let result = {
         let mut gpu = GpuScene::new(&ctx);
-        gpu.try_build(&prep.scene, &prep.env, &prep.dist, cfg.scene.bump_intensity).map_err(|e| anyhow::anyhow!("GPU scene: {e}"))?;
+        gpu.build(&prep.scene, &prep.env, &prep.dist, cfg.scene.bump_intensity).map_err(|e| anyhow::anyhow!("GPU scene: {e}"))?;
         prep.env.rgba = Vec::new();
         let denoise = o.denoise.unwrap_or(false).then_some((DenoiseQuality::High, o.denoise_strength.unwrap_or(1.0)));
         let rs = RenderSettings { width: cfg.width, height: cfg.height, spp: cfg.spp, integrator: cfg.integrator, frame: frame_params(cfg, cam, o.seed), denoise };

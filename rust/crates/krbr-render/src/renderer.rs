@@ -38,7 +38,7 @@ pub fn render_offscreen(ctx: &Context, scene: &GpuScene<'_>, s: &RenderSettings)
     let t0 = Instant::now();
     let mut last_log = t0;
     for i in 0..s.spp {
-        ctx.try_submit_and_wait(|_, cmd| prog.record(cmd, 1))?;
+        ctx.submit_and_wait(|_, cmd| prog.record(cmd, 1))?;
         std::thread::yield_now();
         let now = Instant::now();
         if now.duration_since(last_log).as_secs_f64() > 2.0 || i + 1 == s.spp {
@@ -49,16 +49,16 @@ pub fn render_offscreen(ctx: &Context, scene: &GpuScene<'_>, s: &RenderSettings)
         }
     }
     let seconds = t0.elapsed().as_secs_f64();
-    let aov = prog.try_readback()?;
+    let aov = prog.readback()?;
     krbr_core::info!("render finished in {:.2} s ({:.1} ms/spp)", seconds, seconds * 1000.0 / s.spp.max(1) as f64);
     let xyz = prog.xyz_output();
     let denoised = s.denoise.and_then(|(q, strength)| match Denoiser::new(ctx, prog.targets(), q) {
         Ok(d) => {
             let run = || -> Result<(ImageF, f64), String> {
-                ctx.try_submit_and_wait(|_, cmd| d.record_prepare_xyz(cmd, xyz))?;
+                ctx.submit_and_wait(|_, cmd| d.record_prepare(cmd, xyz))?;
                 let ms = d.execute()?;
-                ctx.try_submit_and_wait(|_, cmd| d.record_output_xyz(cmd, strength, xyz))?;
-                Ok((d.try_read_output()?, ms))
+                ctx.submit_and_wait(|_, cmd| d.record_output(cmd, strength, xyz))?;
+                Ok((d.read_output()?, ms))
             };
             match run() {
                 Ok((mut img, ms)) => {

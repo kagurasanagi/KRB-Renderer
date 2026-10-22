@@ -66,7 +66,7 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
 
     let ctx = Context::new(&ContextOptions { validation: common.validate, low_queue_priority: true, ..Default::default() }).map_err(|e| anyhow::anyhow!(e))?;
     let mut gpu = GpuScene::new(&ctx);
-    gpu.try_build(&prep.scene, &prep.env, &prep.dist, prep.cfg.scene.bump_intensity).map_err(|e| anyhow::anyhow!("GPU scene: {e}"))?;
+    gpu.build(&prep.scene, &prep.env, &prep.dist, prep.cfg.scene.bump_intensity).map_err(|e| anyhow::anyhow!("GPU scene: {e}"))?;
     prep.env.rgba = Vec::new();
     // 最初の描画の間の保存も取りこぼさないよう、先に監視を始める
     let mut watcher = FileWatcher::with_defaults(&prep.board.file);
@@ -130,7 +130,7 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
         u.pending_models = scene.pending_models;
         let t1 = Instant::now();
         prep.scene = scene;
-        if let Err(e) = gpu.try_rebuild_geometry(&prep.scene, prep.cfg.scene.bump_intensity) {
+        if let Err(e) = gpu.rebuild_geometry(&prep.scene, prep.cfg.scene.bump_intensity) {
             warn!("watch: cannot send the board to the GPU ({e}); waiting for the next save");
             continue;
         }
@@ -200,7 +200,7 @@ impl<'a> Renderer<'a> {
         let mut left = self.spp;
         while left > 0 {
             let n = left.min(8);
-            self.ctx.try_submit_and_wait(|_, cmd| prog.record(cmd, n)).map_err(|e| anyhow::anyhow!(e))?;
+            self.ctx.submit_and_wait(|_, cmd| prog.record(cmd, n)).map_err(|e| anyhow::anyhow!(e))?;
             left -= n;
         }
         // ノイズ除去（OIDN のデバイスとバッファは使い回し、累積の画像だけ参照し直す）
@@ -220,7 +220,7 @@ impl<'a> Renderer<'a> {
         let xyz = prog.xyz_output();
         if let Some(d) = &self.denoiser {
             d.rebind(prog.targets());
-            match self.ctx.try_submit_and_wait(|_, cmd| d.record_prepare_xyz(cmd, xyz)).and_then(|()| d.execute()) {
+            match self.ctx.submit_and_wait(|_, cmd| d.record_prepare(cmd, xyz)).and_then(|()| d.execute()) {
                 Ok(ms) => {
                     denoise_ms = ms;
                     let t = prog.targets();
@@ -235,12 +235,12 @@ impl<'a> Renderer<'a> {
         };
         let img = tm.output();
         let (w, h) = (img.width, img.height);
-        let mut rb = self.ctx.try_create_buffer(w as u64 * h as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST, true, true).map_err(|e| anyhow::anyhow!(e))?;
+        let mut rb = self.ctx.create_buffer(w as u64 * h as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST, true, true).map_err(|e| anyhow::anyhow!(e))?;
         let (image, rbb) = (img.image, rb.buffer);
         let denoiser = self.denoiser.as_ref().filter(|_| tone_denoised.is_some());
-        let copied = self.ctx.try_submit_and_wait(|dev, cmd| {
+        let copied = self.ctx.submit_and_wait(|dev, cmd| {
             if let Some(d) = denoiser {
-                d.record_output_xyz(cmd, strength, xyz);
+                d.record_output(cmd, strength, xyz);
             }
             tm.record(cmd, self.exposure, DisplayMode::Beauty, xyz, &self.glow);
             memory_barrier(dev, cmd, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_READ);

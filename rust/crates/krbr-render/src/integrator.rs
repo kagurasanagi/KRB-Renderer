@@ -58,7 +58,7 @@ struct FrameBuffer<'a> {
 
 impl<'a> FrameBuffer<'a> {
     fn new(ctx: &'a Context) -> Result<Self, String> {
-        Ok(Self { ctx, ubo: ctx.try_create_buffer(std::mem::size_of::<FrameUbo>() as u64, vk::BufferUsageFlags::UNIFORM_BUFFER, true, false)? })
+        Ok(Self { ctx, ubo: ctx.create_buffer(std::mem::size_of::<FrameUbo>() as u64, vk::BufferUsageFlags::UNIFORM_BUFFER, true, false)? })
     }
     fn write(&mut self, u: &FrameUbo) {
         let bytes = as_bytes(std::slice::from_ref(u));
@@ -137,12 +137,12 @@ impl<'a> VcmBuffers<'a> {
     fn new(ctx: &'a Context, paths: u64, capacity: u32) -> Result<Self, String> {
         let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
         let mut b = Self { ctx, light_verts: Buffer::default(), path_heads: Buffer::default(), cell_heads: Buffer::default(), counters: Buffer::default(), counters_readback: Buffer::default(), splat: Buffer::default() };
-        b.light_verts = ctx.try_create_buffer(light_vertex_bytes(capacity), usage, false, false)?;
-        b.path_heads = ctx.try_create_buffer(paths * 4, usage, false, false)?;
-        b.cell_heads = ctx.try_create_buffer(VCM_GRID_SIZE as u64 * 4, usage, false, false)?;
-        b.counters = ctx.try_create_buffer(VCM_COUNTER_COUNT as u64 * 4, usage | vk::BufferUsageFlags::TRANSFER_SRC, false, false)?;
-        b.counters_readback = ctx.try_create_buffer(VCM_COUNTER_COUNT as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST, true, true)?;
-        b.splat = ctx.try_create_buffer(paths * VCM_SPLAT_FLOATS_PER_PIXEL as u64 * 4, usage, false, false)?;
+        b.light_verts = ctx.create_buffer(light_vertex_bytes(capacity), usage, false, false)?;
+        b.path_heads = ctx.create_buffer(paths * 4, usage, false, false)?;
+        b.cell_heads = ctx.create_buffer(VCM_GRID_SIZE as u64 * 4, usage, false, false)?;
+        b.counters = ctx.create_buffer(VCM_COUNTER_COUNT as u64 * 4, usage | vk::BufferUsageFlags::TRANSFER_SRC, false, false)?;
+        b.counters_readback = ctx.create_buffer(VCM_COUNTER_COUNT as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST, true, true)?;
+        b.splat = ctx.create_buffer(paths * VCM_SPLAT_FLOATS_PER_PIXEL as u64 * 4, usage, false, false)?;
         Ok(b)
     }
 }
@@ -229,7 +229,7 @@ impl<'a> Bidirectional<'a> {
     fn grow(&mut self, capacity: u32) -> Result<(), String> {
         self.ctx.wait_idle();
         let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
-        let mut new_buf = self.ctx.try_create_buffer(light_vertex_bytes(capacity), usage, false, false)?;
+        let mut new_buf = self.ctx.create_buffer(light_vertex_bytes(capacity), usage, false, false)?;
         let mut bindings = self.bindings.clone();
         for b in &mut bindings {
             if let Binding::Buffer { binding: BINDING_LIGHT_VERTICES, buffer, .. } = b {
@@ -379,12 +379,12 @@ impl<'a> Progressive<'a> {
         let usage = vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC;
         let (w, h) = (self.targets.width, self.targets.height);
         let f = vk::Format::R32G32B32A32_SFLOAT;
-        self.targets.color = self.ctx.try_create_image_2d(w, h, 1, f, usage)?;
-        self.targets.albedo = self.ctx.try_create_image_2d(w, h, 1, f, usage)?;
-        self.targets.normal = self.ctx.try_create_image_2d(w, h, 1, f, usage)?;
+        self.targets.color = self.ctx.create_image_2d(w, h, 1, f, usage)?;
+        self.targets.albedo = self.ctx.create_image_2d(w, h, 1, f, usage)?;
+        self.targets.normal = self.ctx.create_image_2d(w, h, 1, f, usage)?;
         let imgs = [self.targets.color.image, self.targets.albedo.image, self.targets.normal.image];
         let trace = self.ctx.trace_stages();
-        self.ctx.try_submit_and_wait(|dev, cmd| {
+        self.ctx.submit_and_wait(|dev, cmd| {
             for img in imgs {
                 image_barrier(dev, cmd, img, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE, trace, vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE, 1);
             }
@@ -482,13 +482,13 @@ impl<'a> Progressive<'a> {
 
     /// 現在の累積を読み戻す（GPU が待機中に呼ぶこと）。分光モードでも RGB に変換して返す。
     /// 読み戻し用のバッファが作れないなどで失敗したら Err
-    pub fn try_readback(&self) -> Result<AovImages, String> {
+    pub fn readback(&self) -> Result<AovImages, String> {
         let (w, h) = (self.targets.width, self.targets.height);
         let bytes = w as u64 * h as u64 * 16;
-        let mut rb = self.ctx.try_create_buffer(bytes * 3, vk::BufferUsageFlags::TRANSFER_DST, true, true)?;
+        let mut rb = self.ctx.create_buffer(bytes * 3, vk::BufferUsageFlags::TRANSFER_DST, true, true)?;
         let imgs = [self.targets.color.image, self.targets.albedo.image, self.targets.normal.image];
         let rbb = rb.buffer;
-        let r = self.ctx.try_submit_and_wait(|dev, cmd| {
+        let r = self.ctx.submit_and_wait(|dev, cmd| {
             for (k, img) in imgs.iter().enumerate() {
                 let region = vk::BufferImageCopy::default()
                     .buffer_offset(bytes * k as u64)
@@ -527,11 +527,6 @@ impl<'a> Progressive<'a> {
             xyz_to_linear_srgb(&mut albedo);
         }
         Ok(AovImages { color, albedo, normal })
-    }
-
-    /// try_readback の、失敗したらパニックする版（失敗を扱えない呼び出し元用）
-    pub fn readback(&self) -> AovImages {
-        self.try_readback().unwrap_or_else(|e| panic!("readback: {e}"))
     }
 }
 

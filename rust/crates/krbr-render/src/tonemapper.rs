@@ -129,10 +129,10 @@ impl<'a> Tonemapper<'a> {
         t.glow_layout = unsafe { dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&gl).push_constant_ranges(&gpcr), None) }.map_err(|e| format!("{e:?}"))?;
         t.glow_pipeline = compute_pipeline(dev, t.glow_layout, "glow.comp.spv")?;
 
-        t.out = ctx.try_create_image_2d(width, height, 1, vk::Format::R8G8B8A8_UNORM, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC)?;
+        t.out = ctx.create_image_2d(width, height, 1, vk::Format::R8G8B8A8_UNORM, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC)?;
         // グローの段（画像が小さすぎて段が無いときも、tonemap.comp に渡す 1×1 を作る）
         let sizes = glow::level_sizes(width, height);
-        let make = |(w, h): (u32, u32)| ctx.try_create_image_2d(w, h, 1, vk::Format::R32G32B32A32_SFLOAT, vk::ImageUsageFlags::STORAGE);
+        let make = |(w, h): (u32, u32)| ctx.create_image_2d(w, h, 1, vk::Format::R32G32B32A32_SFLOAT, vk::ImageUsageFlags::STORAGE);
         for s in if sizes.is_empty() { vec![(1, 1)] } else { sizes.clone() } {
             t.levels.push(make(s)?);
         }
@@ -140,7 +140,7 @@ impl<'a> Tonemapper<'a> {
             t.sums.push(make(s)?);
         }
         let images: Vec<vk::Image> = std::iter::once(t.out.image).chain(t.levels.iter().map(|i| i.image)).chain(t.sums.iter().map(|i| i.image)).collect();
-        ctx.try_submit_and_wait(|dev, cmd| {
+        ctx.submit_and_wait(|dev, cmd| {
             for img in &images {
                 image_barrier(dev, cmd, *img, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, 1);
             }

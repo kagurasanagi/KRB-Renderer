@@ -47,11 +47,11 @@ pub struct Buffer {
 
 impl Buffer {
     /// 割り当てたメモリ全体（アロケータの都合で、作るときに求めた大きさ size より長いことがある）
-    pub fn mapped(&mut self) -> Option<&mut [u8]> {
+    fn mapped(&mut self) -> Option<&mut [u8]> {
         self.allocation.as_mut().and_then(|a| a.mapped_slice_mut())
     }
     /// 割り当てたメモリ全体（mapped と同じく size より長いことがある）。読み戻しには mapped_bytes を使う
-    pub fn mapped_ref(&self) -> Option<&[u8]> {
+    fn mapped_ref(&self) -> Option<&[u8]> {
         self.allocation.as_ref().and_then(|a| a.mapped_slice())
     }
     /// CPU から見えるメモリのうち、作るときに求めた大きさ（size バイト）だけ。読み戻した内容はこれで見る
@@ -381,7 +381,7 @@ impl Context {
     }
 
     /// バッファを作る。VRAM が足りないなどで作れなければ Err（作りかけの資源は解放する）
-    pub fn try_create_buffer(&self, size: u64, usage: vk::BufferUsageFlags, host_visible: bool, host_readback: bool) -> Result<Buffer, String> {
+    pub fn create_buffer(&self, size: u64, usage: vk::BufferUsageFlags, host_visible: bool, host_readback: bool) -> Result<Buffer, String> {
         let ci = vk::BufferCreateInfo::default().size(size.max(16)).usage(usage | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
         let buffer = unsafe { self.device.create_buffer(&ci, None) }.map_err(|e| format!("vkCreateBuffer ({}): {e:?}", mib(size)))?;
         let req = unsafe { self.device.get_buffer_memory_requirements(buffer) };
@@ -408,11 +408,6 @@ impl Context {
         Ok(Buffer { buffer, allocation: Some(allocation), size, address })
     }
 
-    /// try_create_buffer の、失敗したらパニックする版（失敗を扱えない呼び出し元用。新しいコードは try_ の方を使う）
-    pub fn create_buffer(&self, size: u64, usage: vk::BufferUsageFlags, host_visible: bool, host_readback: bool) -> Buffer {
-        self.try_create_buffer(size, usage, host_visible, host_readback).unwrap_or_else(|e| panic!("{e}"))
-    }
-
     fn allocate(&self, desc: &AllocationCreateDesc<'_>) -> Result<Allocation, String> {
         let mut a = self.allocator.lock().map_err(|_| "the GPU memory allocator is poisoned".to_string())?;
         a.allocate(desc).map_err(|e| e.to_string())
@@ -435,30 +430,25 @@ impl Context {
     }
 
     /// device-local バッファを作ってステージング経由で転送する。失敗したら Err（作ったバッファは解放する）
-    pub fn try_create_device_buffer(&self, data: &[u8], usage: vk::BufferUsageFlags) -> Result<Buffer, String> {
-        let mut b = self.try_create_buffer(data.len() as u64, usage | vk::BufferUsageFlags::TRANSFER_DST, false, false)?;
-        if let Err(e) = self.try_upload(&mut b, data, 0) {
+    pub fn create_device_buffer(&self, data: &[u8], usage: vk::BufferUsageFlags) -> Result<Buffer, String> {
+        let mut b = self.create_buffer(data.len() as u64, usage | vk::BufferUsageFlags::TRANSFER_DST, false, false)?;
+        if let Err(e) = self.upload(&mut b, data, 0) {
             self.destroy_buffer(&mut b);
             return Err(e);
         }
         Ok(b)
     }
 
-    /// try_create_device_buffer の、失敗したらパニックする版
-    pub fn create_device_buffer(&self, data: &[u8], usage: vk::BufferUsageFlags) -> Buffer {
-        self.try_create_device_buffer(data, usage).unwrap_or_else(|e| panic!("{e}"))
-    }
-
     /// data を dst の dst_offset へ転送して、完了まで待つ
-    pub fn try_upload(&self, dst: &mut Buffer, data: &[u8], dst_offset: u64) -> Result<(), String> {
+    pub fn upload(&self, dst: &mut Buffer, data: &[u8], dst_offset: u64) -> Result<(), String> {
         if data.is_empty() {
             return Ok(());
         }
-        let mut staging = self.try_create_buffer(data.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC, true, false)?;
+        let mut staging = self.create_buffer(data.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC, true, false)?;
         let r = (|| {
             staging.mapped_bytes_mut().ok_or("the staging buffer is not mapped")?.copy_from_slice(data);
             let (src, dstb, n) = (staging.buffer, dst.buffer, data.len() as u64);
-            self.try_submit_and_wait(|dev, cmd| unsafe {
+            self.submit_and_wait(|dev, cmd| unsafe {
                 dev.cmd_copy_buffer(cmd, src, dstb, &[vk::BufferCopy { src_offset: 0, dst_offset, size: n }]);
             })
         })();
@@ -466,13 +456,8 @@ impl Context {
         r
     }
 
-    /// try_upload の、失敗したらパニックする版
-    pub fn upload(&self, dst: &mut Buffer, data: &[u8], dst_offset: u64) {
-        self.try_upload(dst, data, dst_offset).unwrap_or_else(|e| panic!("{e}"))
-    }
-
     /// 2D の画像（layers > 1 なら配列）とビューを作る。失敗したら Err（作りかけの資源は解放する）
-    pub fn try_create_image_2d(&self, w: u32, h: u32, layers: u32, format: vk::Format, usage: vk::ImageUsageFlags) -> Result<Image, String> {
+    pub fn create_image_2d(&self, w: u32, h: u32, layers: u32, format: vk::Format, usage: vk::ImageUsageFlags) -> Result<Image, String> {
         let ici = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -511,11 +496,6 @@ impl Context {
         }
     }
 
-    /// try_create_image_2d の、失敗したらパニックする版
-    pub fn create_image_2d(&self, w: u32, h: u32, layers: u32, format: vk::Format, usage: vk::ImageUsageFlags) -> Image {
-        self.try_create_image_2d(w, h, layers, format, usage).unwrap_or_else(|e| panic!("{e}"))
-    }
-
     pub fn destroy_image(&self, img: &mut Image) {
         if img.view != vk::ImageView::null() {
             unsafe { self.device.destroy_image_view(img.view, None) };
@@ -530,13 +510,13 @@ impl Context {
     }
 
     /// 画像全体にデータを転送して最終レイアウトへ遷移する
-    pub fn try_upload_image(&self, img: &Image, data: &[u8], final_layout: vk::ImageLayout) -> Result<(), String> {
-        let mut staging = self.try_create_buffer(data.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC, true, false)?;
+    pub fn upload_image(&self, img: &Image, data: &[u8], final_layout: vk::ImageLayout) -> Result<(), String> {
+        let mut staging = self.create_buffer(data.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC, true, false)?;
         let r = (|| {
             staging.mapped_bytes_mut().ok_or("the staging buffer is not mapped")?.copy_from_slice(data);
             let (sb, image, w, h, layers) = (staging.buffer, img.image, img.width, img.height, img.layers);
             let trace = self.trace_stages();
-            self.try_submit_and_wait(|dev, cmd| {
+            self.submit_and_wait(|dev, cmd| {
                 image_barrier(dev, cmd, image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, layers);
                 let region = vk::BufferImageCopy::default()
                     .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: layers })
@@ -549,13 +529,8 @@ impl Context {
         r
     }
 
-    /// try_upload_image の、失敗したらパニックする版
-    pub fn upload_image(&self, img: &Image, data: &[u8], final_layout: vk::ImageLayout) {
-        self.try_upload_image(img, data, final_layout).unwrap_or_else(|e| panic!("{e}"))
-    }
-
     /// 1 回きりのコマンドを記録して完了まで待つ。投入や待機に失敗したら Err（デバイスを失ったときなど）
-    pub fn try_submit_and_wait(&self, record: impl FnOnce(&ash::Device, vk::CommandBuffer)) -> Result<(), String> {
+    pub fn submit_and_wait(&self, record: impl FnOnce(&ash::Device, vk::CommandBuffer)) -> Result<(), String> {
         let dev = &self.device;
         let ai = vk::CommandBufferAllocateInfo::default().command_pool(self.pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1);
         let cmd = unsafe { dev.allocate_command_buffers(&ai) }.map_err(|e| format!("vkAllocateCommandBuffers: {e:?}"))?[0];
@@ -571,11 +546,6 @@ impl Context {
         })();
         unsafe { dev.free_command_buffers(self.pool, &[cmd]) };
         r
-    }
-
-    /// try_submit_and_wait の、失敗したらパニックする版
-    pub fn submit_and_wait(&self, record: impl FnOnce(&ash::Device, vk::CommandBuffer)) {
-        self.try_submit_and_wait(record).unwrap_or_else(|e| panic!("{e}"))
     }
 
     pub fn wait_idle(&self) {

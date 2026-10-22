@@ -133,7 +133,7 @@ pub fn uniform_env(v: f32, w: u32, h: u32) -> ImageF {
 
 pub fn gpu_scene<'a>(ctx: &'a Context, s: &Scene, env: &ImageF) -> GpuScene<'a> {
     let mut gpu = GpuScene::new(ctx);
-    gpu.try_build(s, env, &build_env_distribution(env, 2048), 1.0).expect("GPU scene");
+    gpu.build(s, env, &build_env_distribution(env, 2048), 1.0).expect("GPU scene");
     gpu
 }
 

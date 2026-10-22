@@ -347,7 +347,7 @@ impl<'a> Kernel<'a> {
         table[m1..m1 + h].copy_from_slice(&handles[2 * h..3 * h]);
         let hg = (raygen_size + miss_size) as usize;
         table[hg..hg + h].copy_from_slice(&handles[3 * h..4 * h]);
-        self.sbt = self.ctx.try_create_device_buffer(&table, vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)?;
+        self.sbt = self.ctx.create_device_buffer(&table, vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)?;
         self.sbt_raygen = vk::StridedDeviceAddressRegionKHR { device_address: self.sbt.address, stride: stride as u64, size: stride as u64 };
         self.sbt_miss = vk::StridedDeviceAddressRegionKHR { device_address: self.sbt.address + raygen_size as u64, stride: stride as u64, size: 2 * stride as u64 };
         self.sbt_hit = vk::StridedDeviceAddressRegionKHR { device_address: self.sbt.address + (raygen_size + miss_size) as u64, stride: stride as u64, size: stride as u64 };

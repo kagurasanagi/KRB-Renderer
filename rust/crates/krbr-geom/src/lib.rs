@@ -8,7 +8,7 @@ pub mod shapes;
 pub mod svg_reader;
 pub mod tiles;
 
-pub use board_mesh::{build_board_geometry, extrude_region, BoardBuildOptions, BoardGeometry, BoardMat, Bounds2};
+pub use board_mesh::{build_board_geometry, extrude_region, BoardBuildOptions, BoardGeometry, BoardMat};
 pub use krbr_kicad::Box2;
 pub use raster::{Grid, LayerArtOptions, Side, SidePaths};
 pub use relief::{ReliefDimple, ReliefInput, ReliefMat, ReliefParams};

@@ -771,13 +771,13 @@ impl SavePaths {
 fn read_image(g: &Gpu, denoised: bool) -> Result<ImageF, String> {
     match g.denoiser.as_ref().filter(|_| denoised) {
         Some(d) => {
-            let mut img = d.try_read_output()?;
+            let mut img = d.read_output()?;
             if g.prog.xyz_output() {
                 krbr_render::integrator::xyz_to_linear_srgb(&mut img);
             }
             Ok(img)
         }
-        None => Ok(g.prog.try_readback()?.color),
+        None => Ok(g.prog.readback()?.color),
     }
 }
 
@@ -1148,7 +1148,7 @@ impl App {
         let ctx: &'static Context = Box::leak(Box::new(Context::new(&ContextOptions { validation: self.vo.common.validate, low_queue_priority: true, instance_extensions: exts, create_surface: Some(factory) })?));
         // 積分器が GpuScene への参照を持つので、ムーブしてもアドレスが変わらないよう Box に入れる
         let mut gpu = Box::new(GpuScene::new(ctx));
-        gpu.try_build(&self.prep.scene, &self.prep.env, &self.prep.dist, self.st.bump_intensity).map_err(|e| format!("GPU scene: {e}"))?;
+        gpu.build(&self.prep.scene, &self.prep.env, &self.prep.dist, self.st.bump_intensity).map_err(|e| format!("GPU scene: {e}"))?;
         self.prep.env.rgba = Vec::new();
         if !self.prep.scene.missing.is_empty() {
             warn!("{} 3D model(s) missing or unreadable (see missing_models.txt of a render)", self.prep.scene.missing.len());
@@ -1814,7 +1814,7 @@ impl App {
                 let t0 = Instant::now();
                 let g = self.gpu.as_mut().unwrap();
                 // 送れなければ（VRAM が足りないなど）GPU の形状は作りかけになり描けないので、ビューアを終える（エラーを出して）
-                g.gpu.try_rebuild_geometry(&self.prep.scene, self.st.bump_intensity).map_err(|e| format!("cannot send the reloaded board to the GPU: {e}"))?;
+                g.gpu.rebuild_geometry(&self.prep.scene, self.st.bump_intensity).map_err(|e| format!("cannot send the reloaded board to the GPU: {e}"))?;
                 g.prog.rebuild_integrator()?;
                 let gpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
                 self.st.changed.frame = true;
@@ -2280,7 +2280,7 @@ impl App {
         }
         let g = self.gpu.as_mut().unwrap();
         g.ctx.wait_idle();
-        match g.gpu.try_set_environment(&d.image, &d.dist) {
+        match g.gpu.set_environment(&d.image, &d.dist) {
             Ok(()) => {
                 self.env_path = remember::normalize_hdr(&d.path);
                 if remember_it {
@@ -2296,7 +2296,7 @@ impl App {
                 if !studio.error.is_empty() {
                     return Err(format!("environment: {}", studio.error));
                 }
-                g.gpu.try_set_environment(&studio.image, &studio.dist).map_err(|e| format!("environment: {e}"))?;
+                g.gpu.set_environment(&studio.image, &studio.dist).map_err(|e| format!("environment: {e}"))?;
                 self.env_path = STUDIO.to_string();
             }
         }
@@ -2330,7 +2330,7 @@ impl App {
         if std::mem::take(&mut self.st.changed.materials) {
             let g = self.gpu.as_mut().unwrap();
             g.ctx.wait_idle();
-            if let Err(e) = g.gpu.try_update_materials(&self.prep.scene.materials, self.st.bump_intensity) {
+            if let Err(e) = g.gpu.update_materials(&self.prep.scene.materials, self.st.bump_intensity) {
                 error!("update materials: {e}");
                 self.last_update = fl!("materials-failed", error = e);
             }
@@ -2397,7 +2397,7 @@ impl App {
         if std::mem::take(&mut self.st.req.auto_exposure) {
             let g = self.gpu.as_ref().unwrap();
             if g.prog.samples() > 0 {
-                match g.prog.try_readback() {
+                match g.prog.readback() {
                     Ok(aov) => {
                         self.st.exposure = auto_exposure(&aov.color);
                         info!("auto exposure: {:+.2} EV", self.st.exposure);
@@ -2469,14 +2469,14 @@ impl App {
             let d = g.denoiser.as_mut().unwrap();
             d.set_quality(if moving && !on_cpu { DenoiseQuality::Fast } else { DenoiseQuality::High });
             let (prog, d) = (&mut g.prog, &*d);
-            ctx.try_submit_and_wait(|dev, c| {
+            ctx.submit_and_wait(|dev, c| {
                 unsafe {
                     dev.cmd_reset_query_pool(c, timestamps, 0, 2);
                     dev.cmd_write_timestamp2(c, vk::PipelineStageFlags2::ALL_COMMANDS, timestamps, 0);
                 }
                 prog.record(c, add);
                 unsafe { dev.cmd_write_timestamp2(c, vk::PipelineStageFlags2::ALL_COMMANDS, timestamps, 1) };
-                d.record_prepare_xyz(c, xyz);
+                d.record_prepare(c, xyz);
             })?;
             match d.execute() {
                 Ok(ms) => {
@@ -2506,7 +2506,7 @@ impl App {
         self.prev_samples = g.prog.samples();
         let disp = if show_denoised {
             // 結果を元の画像と強さで混ぜる（軽いので毎フレーム。強さのスライダーがすぐ効く）
-            g.denoiser.as_ref().unwrap().record_output_xyz(cmd, self.st.denoise_strength, xyz);
+            g.denoiser.as_ref().unwrap().record_output(cmd, self.st.denoise_strength, xyz);
             let t = g.tone_denoised.as_ref().unwrap();
             t.record(cmd, self.st.exposure, self.st.mode, xyz, &self.st.glow_params());
             t.output()
@@ -2545,7 +2545,7 @@ impl App {
         // テストの最後のフレーム：表示した画像（パネルも含む）を読み戻す
         let mut shot: Option<Buffer> = None;
         if last_test_frame && g.swap.can_read_back && self.test.screenshot().is_some() {
-            match g.ctx.try_create_buffer(extent.width as u64 * extent.height as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST, true, true) {
+            match g.ctx.create_buffer(extent.width as u64 * extent.height as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST, true, true) {
                 Ok(b) => {
                     image_barrier(dev, cmd, swap_img, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_READ, 1);
                     let region = vk::BufferImageCopy::default().image_subresource(sub).image_extent(vk::Extent3D { width: extent.width, height: extent.height, depth: 1 });
