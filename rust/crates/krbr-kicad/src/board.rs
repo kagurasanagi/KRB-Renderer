@@ -5,6 +5,43 @@ use std::path::PathBuf;
 
 pub use glam::{DVec2 as Vec2, DVec3 as Vec3};
 
+use crate::curves::arc_box;
+
+/// 基板の面。表裏ごとの配列の添字には `side as usize` を使う
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Side {
+    Front = 0,
+    Back = 1,
+}
+
+impl Side {
+    pub const BOTH: [Side; 2] = [Side::Front, Side::Back];
+
+    pub fn copper_layer(self) -> &'static str {
+        match self {
+            Side::Front => "F.Cu",
+            Side::Back => "B.Cu",
+        }
+    }
+    pub fn mask_layer(self) -> &'static str {
+        match self {
+            Side::Front => "F.Mask",
+            Side::Back => "B.Mask",
+        }
+    }
+    pub fn silk_layer(self) -> &'static str {
+        match self {
+            Side::Front => "F.SilkS",
+            Side::Back => "B.SilkS",
+        }
+    }
+}
+
+/// シルク層（F.SilkS / B.SilkS）か
+pub fn is_silk_layer(layer: &str) -> bool {
+    Side::BOTH.iter().any(|s| s.silk_layer() == layer)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrKind {
     Line,
@@ -28,6 +65,10 @@ impl Default for Box2 {
 }
 
 impl Box2 {
+    /// p を中心とする半径 r の円を囲む矩形
+    pub fn around(p: Vec2, r: f64) -> Box2 {
+        Box2 { lo: p - Vec2::splat(r), hi: p + Vec2::splat(r) }
+    }
     pub fn add(&mut self, p: Vec2) {
         self.lo = self.lo.min(p);
         self.hi = self.hi.max(p);
@@ -57,6 +98,9 @@ impl Box2 {
     }
     pub fn center(&self) -> Vec2 {
         (self.lo + self.hi) * 0.5
+    }
+    pub fn size(&self) -> Vec2 {
+        self.hi - self.lo
     }
 }
 
@@ -95,6 +139,30 @@ pub struct Graphic {
     pub from_text: bool,
     /// Poly の塗りから抜く多角形（knockout の文字：文字を囲む四角形から字の形を抜く）
     pub cutouts: Vec<Vec<Vec2>>,
+}
+
+impl Graphic {
+    /// 線幅を含めた外接矩形（タイルのカリングと、差分の検出の範囲で共有する）
+    pub fn bbox(&self) -> Box2 {
+        let w = self.width / 2.0;
+        let mut b = Box2::default();
+        match self.kind {
+            GrKind::Line => {
+                b.add_radius(self.start, w);
+                b.add_radius(self.end, w);
+            }
+            GrKind::Arc => b = arc_box(self.start, self.mid, self.end, self.width),
+            // 塗った円も、輪郭の外側は線幅の半分まで
+            GrKind::Circle => b.add_radius(self.start, (self.end - self.start).length() + w),
+            // 多角形は頂点で、ベジェは制御点の凸包に入るので制御点で囲める。knockout の cutouts は pts の内側
+            GrKind::Poly | GrKind::Curve => {
+                for &p in &self.pts {
+                    b.add_radius(p, w);
+                }
+            }
+        }
+        b
+    }
 }
 
 impl Default for Graphic {
@@ -168,6 +236,40 @@ pub struct Pad {
 }
 
 impl Pad {
+    /// レジスト開口の広がり（パッドの指定、無ければ基板の既定。負なら開口が銅より小さい）
+    pub fn mask_expansion(&self, setup: &BoardSetup) -> f64 {
+        self.mask_margin.unwrap_or(setup.pad_to_mask_clearance)
+    }
+
+    /// 銅箔・レジスト開口・穴をすべて含む外接矩形（基板座標）。カスタムパッドのプリミティブ、台形の広がり、
+    /// 穴のずれ、レジストの広がりを含める。タイルのカリングと、差分の検出の範囲で共有する
+    pub fn extent(&self, setup: &BoardSetup) -> Box2 {
+        let anchor = if self.shape == PadShape::Custom { self.custom_anchor } else { self.shape };
+        // パッド座標系（未回転、原点がパッドの位置）での半分の大きさ。形の作り方は krbr-geom の shapes::basic_shape
+        let half = match anchor {
+            PadShape::Circle => Vec2::splat(self.size.x.max(self.size.y) / 2.0),
+            // 台形は rect_delta の半分だけ、向かい合う辺の片方が広がる
+            PadShape::Trapezoid => (self.size + Vec2::new(self.rect_delta.y.abs(), self.rect_delta.x.abs())) / 2.0,
+            _ => self.size / 2.0,
+        };
+        let mut local = Box2 { lo: -half, hi: half };
+        if self.shape == PadShape::Custom {
+            for g in &self.primitives {
+                local.add_box(&g.bbox());
+            }
+        }
+        if self.drill.present {
+            local.add_box(&Box2 { lo: self.drill.offset - self.drill.size / 2.0, hi: self.drill.offset + self.drill.size / 2.0 });
+        }
+        let local = local.expanded(self.mask_expansion(setup).max(0.0));
+        // 回した矩形の 4 隅を囲む
+        let mut out = Box2::default();
+        for c in [local.lo, Vec2::new(local.hi.x, local.lo.y), local.hi, Vec2::new(local.lo.x, local.hi.y)] {
+            out.add(self.pos + rotate_point(c, self.angle_deg));
+        }
+        out
+    }
+
     pub fn on_layer(&self, layer: &str) -> bool {
         for l in &self.layers {
             if l == layer {
@@ -200,6 +302,20 @@ pub struct Track {
     pub layer: String,
 }
 
+impl Track {
+    /// 線幅を含めた外接矩形
+    pub fn bbox(&self) -> Box2 {
+        match self.mid {
+            Some(mid) => arc_box(self.start, mid, self.end, self.width),
+            None => {
+                let mut b = Box2::around(self.start, self.width / 2.0);
+                b.add_radius(self.end, self.width / 2.0);
+                b
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Via {
     pub pos: Vec2,
@@ -211,6 +327,21 @@ pub struct Via {
     pub tent_back: Option<bool>,
 }
 
+impl Via {
+    /// 銅のランドの外接矩形（ビアのレジスト開口はランドと同じ大きさで、穴はランドの内側）
+    pub fn bbox(&self) -> Box2 {
+        Box2::around(self.pos, self.size / 2.0)
+    }
+
+    /// その面でレジストにふさがれているか（ビアごとの指定が無ければ基板の既定）
+    pub fn tented(&self, side: Side, setup: &BoardSetup) -> bool {
+        match side {
+            Side::Front => self.tent_front.unwrap_or(setup.tent_front),
+            Side::Back => self.tent_back.unwrap_or(setup.tent_back),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ZoneFill {
     pub layer: String,
@@ -218,13 +349,27 @@ pub struct ZoneFill {
     pub pts: Vec<Vec2>,
 }
 
-/// 線フォントの文字（render_cache が無いので自前では形を作れない）
+impl ZoneFill {
+    pub fn bbox(&self) -> Box2 {
+        let mut b = Box2::default();
+        for &p in &self.pts {
+            b.add(p);
+        }
+        b
+    }
+}
+
+/// krbr が自前では形を作れない文字：線フォントの文字（render_cache が無い）と、文字の枠（text_box）。
+/// シルク層のものは kicad-cli に描かせる（stroke_silk.rs。判定は stroke_silk::needs_kicad_cli にまとめてある）
 #[derive(Debug, Clone)]
 pub struct StrokeText {
     pub text: String,
     pub layer: String,
+    /// 基板座標（文字の基準点。文字の枠なら枠の中心）
     pub pos: Vec2,
     pub footprint: Option<usize>,
+    /// 範囲（基板座標）。文字の枠は枠そのもの、文字は大きさと文字数からの見積もり（差分の検出用）
+    pub bbox: Box2,
 }
 
 #[derive(Debug, Clone)]
@@ -309,11 +454,24 @@ pub struct Board {
     pub zones: Vec<ZoneFill>,
     pub stroke_texts: Vec<StrokeText>,
     pub footprints: Vec<Footprint>,
+    /// 塗りつぶすはずなのに塗りのデータが無いゾーンの数（基板直下と部品内。KiCad で塗り直して保存すれば消える）
     pub unfilled_zones: usize,
     /// 差分の検出用
     pub items: Vec<BoardItem>,
     /// general / setup / layers のハッシュ（変われば全体を作り直す）
     pub setup_hash: u64,
+}
+
+impl Board {
+    /// シルク層の、kicad-cli に描かせる文字（線フォントの文字と文字の枠）の数。0 なら kicad-cli を呼ばなくてよい
+    pub fn stroke_silk_count(&self) -> usize {
+        self.stroke_texts.iter().filter(|t| is_silk_layer(&t.layer)).count()
+    }
+
+    /// 塗りつぶしのデータが無いゾーンがあるときの警告の文（無ければ None）
+    pub fn unfilled_zones_message(&self) -> Option<String> {
+        (self.unfilled_zones > 0).then(|| format!("{} zone(s) have no fill data (refill zones in KiCad and save)", self.unfilled_zones))
+    }
 }
 
 /// 前回の読み込みとの差分

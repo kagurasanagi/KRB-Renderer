@@ -1,11 +1,13 @@
 //! KiCad の図形・パッド・配線を多角形（Clipper2、1 単位 = 10 nm）に変換する
 
-use clipper2::{Clipper, EndType, FillRule, JoinType, Point, PointScaler};
+use clipper2::{Clipper, ClipperError, EndType, FillRule, JoinType, Point, PointScaler};
 use krbr_kicad::{rotate_point, Graphic, GrKind, Pad, PadShape, Track};
 
 pub use glam::DVec2 as Vec2;
+/// 円弧・円・ベジェの折れ線化は krbr-kicad の curves にある 1 つの実装を使う（パーサの図形と同じ細かさになるように）
+pub use krbr_kicad::curves::{arc_points, bezier_points, circle_points, segments_for, ARC_TOL};
 
-/// 座標の倍率：1 単位 = 10 nm（C++ 版の kScale と同じ）
+/// 座標の倍率：1 単位 = 10 nm（ARC_TOL の 1/200 で、折れ線化の誤差より十分細かい。i64 なので基板の大きさでは溢れない）
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Nano;
 
@@ -15,9 +17,6 @@ impl PointScaler for Nano {
 
 pub type Path = clipper2::Path<Nano>;
 pub type Paths = clipper2::Paths<Nano>;
-
-/// 円弧を折れ線にするときの許容誤差（mm）
-pub const ARC_TOL: f64 = 0.002;
 
 pub fn to_path(pts: &[Vec2]) -> Path {
     Path::new(pts.iter().map(|p| Point::new(p.x, p.y)).collect())
@@ -44,80 +43,6 @@ pub fn signed_area(p: &Path) -> f64 {
         a += p0.x * p1.y - p1.x * p0.y;
     }
     a * 0.5
-}
-
-fn segments_for(r: f64, sweep: f64, tol: f64) -> usize {
-    use std::f64::consts::PI;
-    if r <= tol {
-        return ((sweep.abs() / (PI / 4.0)).ceil() as usize).max(4);
-    }
-    let step = 2.0 * (1.0 - tol / r).acos();
-    ((sweep.abs() / step).ceil() as usize).clamp(4, 4096)
-}
-
-/// 3 点を通る円弧の折れ線（両端を含む）
-pub fn arc_points(a: Vec2, m: Vec2, b: Vec2, tol: f64) -> Vec<Vec2> {
-    use std::f64::consts::PI;
-    let d = 2.0 * (a.x * (m.y - b.y) + m.x * (b.y - a.y) + b.x * (a.y - m.y));
-    if d.abs() < 1e-12 {
-        return vec![a, b];
-    }
-    let (a2, m2, b2) = (a.dot(a), m.dot(m), b.dot(b));
-    let c = Vec2::new(
-        (a2 * (m.y - b.y) + m2 * (b.y - a.y) + b2 * (a.y - m.y)) / d,
-        (a2 * (b.x - m.x) + m2 * (a.x - b.x) + b2 * (m.x - a.x)) / d,
-    );
-    let r = (a - c).length();
-    let t0 = (a.y - c.y).atan2(a.x - c.x);
-    let tm = (m.y - c.y).atan2(m.x - c.x);
-    let t1 = (b.y - c.y).atan2(b.x - c.x);
-    let norm = |t: f64| {
-        let t = t % (2.0 * PI);
-        if t < 0.0 {
-            t + 2.0 * PI
-        } else {
-            t
-        }
-    };
-    let mut sweep = norm(t1 - t0);
-    if norm(tm - t0) > sweep {
-        sweep -= 2.0 * PI;
-    }
-    let n = segments_for(r, sweep, tol);
-    let mut out = Vec::with_capacity(n + 1);
-    out.push(a);
-    for i in 1..n {
-        let t = t0 + sweep * i as f64 / n as f64;
-        out.push(c + r * Vec2::new(t.cos(), t.sin()));
-    }
-    out.push(b);
-    out
-}
-
-pub fn circle_points(c: Vec2, r: f64, tol: f64) -> Vec<Vec2> {
-    use std::f64::consts::PI;
-    let n = segments_for(r, 2.0 * PI, tol);
-    (0..n)
-        .map(|i| {
-            let t = 2.0 * PI * i as f64 / n as f64;
-            c + r * Vec2::new(t.cos(), t.sin())
-        })
-        .collect()
-}
-
-pub fn bezier_points(c: &[Vec2], tol: f64) -> Vec<Vec2> {
-    if c.len() != 4 {
-        return c.to_vec();
-    }
-    let len = (c[1] - c[0]).length() + (c[2] - c[1]).length() + (c[3] - c[2]).length();
-    let n = ((len / tol).sqrt().ceil() as usize).clamp(4, 512);
-    (0..=n)
-        .map(|i| {
-            let t = i as f64 / n as f64;
-            let u = 1.0 - t;
-            u * u * u * c[0] + 3.0 * u * u * t * c[1] + 3.0 * u * t * t * c[2] + t * t * t * c[3]
-        })
-        .collect()
 }
 
 /// 折れ線を幅 width で太らせた多角形（丸い継ぎ目・端）
@@ -311,25 +236,41 @@ pub fn drill_to_paths(center: Vec2, angle_deg: f64, size: Vec2, oval: bool) -> P
     stroke_polyline(&[a, b], min_dim, false)
 }
 
+fn point_count(p: &Paths) -> usize {
+    p.iter().map(|q| q.len()).sum()
+}
+
+/// Clipper2 のブール演算が失敗したとき（座標が i64 の範囲を超えるなど、実際の基板では起きない内部の異常）に、
+/// 記録を残して、演算ごとに決めた代わりの値を返す。黙って空にすると、銅箔や基板の本体が理由もなく消えるので
+fn on_clipper_error(op: &str, a: &Paths, b: &Paths, e: ClipperError, fallback: &Paths) -> Paths {
+    krbr_core::warn!("polygon {} failed ({:?}; {} + {} points); using the {} instead", op, e, point_count(a), point_count(b), if fallback.is_empty() { "empty set" } else { "input" });
+    fallback.clone()
+}
+
+/// 和。失敗したら入力のまま（重なりが残るだけで、塗る範囲は同じ）
 pub fn unite(p: &Paths, rule: FillRule) -> Paths {
     if p.is_empty() {
         return Paths::new(Vec::new());
     }
-    Clipper::new().add_subject(p.clone()).add_clip(Paths::new(Vec::new())).union(rule).unwrap_or_else(|_| Paths::new(Vec::new()))
+    let empty = Paths::new(Vec::new());
+    Clipper::new().add_subject(p.clone()).add_clip(empty.clone()).union(rule).unwrap_or_else(|e| on_clipper_error("union", p, &empty, e, p))
 }
 
+/// 差 a − b。失敗したら a のまま（引くものが残るだけで、a が消えるよりよい）
 pub fn subtract(a: &Paths, b: &Paths) -> Paths {
     if a.is_empty() {
         return Paths::new(Vec::new());
     }
-    Clipper::new().add_subject(a.clone()).add_clip(b.clone()).difference(FillRule::NonZero).unwrap_or_else(|_| Paths::new(Vec::new()))
+    Clipper::new().add_subject(a.clone()).add_clip(b.clone()).difference(FillRule::NonZero).unwrap_or_else(|e| on_clipper_error("difference", a, b, e, a))
 }
 
+/// 積。失敗したら空（切り抜きの範囲の外まで出すと、隣のタイルと重なるので）
 pub fn intersect(a: &Paths, b: &Paths) -> Paths {
     if a.is_empty() || b.is_empty() {
         return Paths::new(Vec::new());
     }
-    Clipper::new().add_subject(a.clone()).add_clip(b.clone()).intersect(FillRule::NonZero).unwrap_or_else(|_| Paths::new(Vec::new()))
+    let empty = Paths::new(Vec::new());
+    Clipper::new().add_subject(a.clone()).add_clip(b.clone()).intersect(FillRule::NonZero).unwrap_or_else(|e| on_clipper_error("intersection", a, b, e, &empty))
 }
 
 pub fn append(dst: &mut Paths, src: Paths) {
@@ -361,7 +302,7 @@ fn point_in_polygon(p: Vec2, poly: &[Vec2]) -> bool {
     inside
 }
 
-/// 多角形の集合を「外周＋穴」の組に分ける（C++ 版の PolyTree 相当）
+/// 多角形の集合を「外周＋穴」の組に分ける（Clipper2 の PolyTree 相当）
 pub fn nest_rings(paths: &Paths) -> Vec<Ring> {
     let mut outers: Vec<(Vec<Vec2>, f64)> = Vec::new();
     let mut holes: Vec<Vec<Vec2>> = Vec::new();

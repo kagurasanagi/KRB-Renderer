@@ -1,4 +1,4 @@
-//! 設定・キャッシュの場所（C++ 版と同じ：`%APPDATA%\krbr`、`%LOCALAPPDATA%\krbr\cache`。環境変数で差し替え可）
+//! 設定・キャッシュの場所（Windows は `%APPDATA%\krbr`、`%LOCALAPPDATA%\krbr\cache`、ほかは XDG の場所。環境変数で差し替え可）
 
 use std::path::{Path, PathBuf};
 
@@ -99,6 +99,13 @@ pub fn lower_thread_priority() {
     unsafe {
         priority::SetThreadPriority(priority::GetCurrentThread(), priority::THREAD_PRIORITY_BELOW_NORMAL);
     }
+}
+
+/// 裏の重い処理（タイルの作り直し・被覆率のラスタライズなど）で並列に動かすスレッドの数：論理コアの半分（最低 1）。
+/// 半分にするのは、ビューアのウィンドウのスレッドや KiCad など、ほかのアプリの分を空けておくため。
+/// 並列の処理を入れ子にしない（外側で並列にしたら、内側は 1 本で動かす）こと
+pub fn worker_threads() -> usize {
+    (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2) / 2).max(1)
 }
 
 /// 今のスレッドが lower_thread_priority で下げた優先度か（テスト用）

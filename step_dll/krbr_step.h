@@ -1,7 +1,8 @@
 #pragma once
 // STEP 変換器 DLL（krbr_step.dll）の C の API。
 // OpenCASCADE はこの DLL の中だけで使い、本体（Rust の krbr.exe）は必要なときにこの DLL を読み込んで呼ぶ。
-// 置き場所：実行ファイルと同じフォルダの step\ サブフォルダ（OpenCASCADE の DLL もそこにまとめる）
+// 置き場所：krbr.exe と同じフォルダの dll\step\（OpenCASCADE の DLL もそこにまとめる）。krbr.exe は dll\step\、
+// 古い配置の step\、開発中のビルド出力 build\release\step\ の順に探す（krbr-model の library.rs）
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -17,10 +18,11 @@ extern "C" {
 // API の版（引数の形が変わったら上げる）
 #define KRBR_STEP_API_VERSION 1
 
-// STEP ファイルを読んで三角形に分割し、.krbm 形式（model/mesh_file.hpp）で out_file に書く。
+// STEP ファイルを読んで三角形に分割し、.krbm 形式（step_dll/mesh_file.hpp）で out_file に書く。
 //   step_file / out_file : UTF-8 のパス
 //   linear_deflection    : 弦の許容誤差（mm）、angular_deflection : 角度の許容誤差（rad）
 // 戻り値 0 = 成功。失敗時は err に理由（UTF-8、err_len まで）を書いて非 0
+//   （1: パスが null、2: 読み込み・分割の失敗、3: 書き込みの失敗、4: 予期しない例外。例外はこの関数の外へ出さない）
 KRBR_STEP_API int krbr_step_to_mesh_file(const char* step_file, double linear_deflection, double angular_deflection,
                                          const char* out_file, char* err, size_t err_len);
 

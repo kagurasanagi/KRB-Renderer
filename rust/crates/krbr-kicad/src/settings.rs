@@ -2,15 +2,20 @@
 
 use std::path::PathBuf;
 
-/// KiCad の設定フォルダの置き場所（KICAD_CONFIG_HOME があればそれ）。この下に版ごとのフォルダ（"9.0"、"10.0"）がある
+/// KiCad の設定フォルダの置き場所（KICAD_CONFIG_HOME があればそれ）。この下に版ごとのフォルダ（"9.0"、"10.0"）がある。
+/// KiCad（wxStandardPaths::GetUserConfigDir）と同じ場所：Windows は %APPDATA%\kicad、macOS は ~/Library/Preferences/kicad、
+/// そのほかは $XDG_CONFIG_HOME/kicad（未設定なら ~/.config/kicad）
 fn config_base() -> Option<PathBuf> {
-    if let Some(v) = std::env::var_os("KICAD_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(v));
+    let non_empty = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if let Some(v) = non_empty("KICAD_CONFIG_HOME") {
+        return Some(v);
     }
     if cfg!(windows) {
-        std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("kicad"))
+        non_empty("APPDATA").map(|a| a.join("kicad"))
+    } else if cfg!(target_os = "macos") {
+        non_empty("HOME").map(|h| h.join("Library").join("Preferences").join("kicad"))
     } else {
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config").join("kicad"))
+        non_empty("XDG_CONFIG_HOME").or_else(|| non_empty("HOME").map(|h| h.join(".config"))).map(|c| c.join("kicad"))
     }
 }
 

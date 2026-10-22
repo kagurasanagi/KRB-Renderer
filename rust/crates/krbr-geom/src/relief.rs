@@ -3,7 +3,7 @@
 
 use glam::Vec3;
 use krbr_core::Mesh;
-use krbr_kicad::Box2;
+use krbr_kicad::{Box2, Side};
 
 use crate::board_mesh::{board_to_world, extrude_region, BoardGeometry};
 use crate::shapes::*;
@@ -93,9 +93,9 @@ fn dimple_rim(d: &ReliefDimple) -> Path {
 }
 
 /// すり鉢状のくぼみ：縁の高さ h_rim から中心で depth だけ下がる（余弦の断面。縁では傾き 0 で周りの面につながる）
-fn build_dimple(d: &ReliefDimple, h_rim: f64, depth: f64, side: usize, center: Vec2, mat: u32, out: &mut Mesh) {
+fn build_dimple(d: &ReliefDimple, h_rim: f64, depth: f64, side: Side, center: Vec2, mat: u32, out: &mut Mesh) {
     use std::f64::consts::PI;
-    let sign = if side == 0 { 1.0 } else { -1.0 };
+    let sign = if side == Side::Front { 1.0 } else { -1.0 };
     let r_max = d.radius;
     let height = |r: f64| h_rim - depth * (0.5 + 0.5 * (PI * r / r_max).cos());
     let slope = |r: f64| depth * 0.5 * PI / r_max * (PI * r / r_max).sin();
@@ -132,9 +132,9 @@ fn build_dimple(d: &ReliefDimple, h_rim: f64, depth: f64, side: usize, center: V
     }
 }
 
-/// side: 0=表（+Y 向き）, 1=裏（-Y 向き）。基材の面は ±core_half。
+/// 表は +Y 向き、裏は -Y 向きに作る。基材の面は ±core_half。
 /// clip を渡すと、その矩形の中だけを作る（タイル単位の作り直し用。入力も同じ矩形で切り抜いておくこと）
-pub fn build_relief(geo: &BoardGeometry, side: usize, input: &ReliefInput, p: &ReliefParams, out: &mut Mesh, clip: Option<&Box2>) {
+pub fn build_relief(geo: &BoardGeometry, side: Side, input: &ReliefInput, p: &ReliefParams, out: &mut Mesh, clip: Option<&Box2>) {
     let mut base = match &input.base {
         Some(b) => b.clone(),
         None => relief_base(geo, &input.tented_holes),
@@ -179,14 +179,14 @@ pub fn build_relief(geo: &BoardGeometry, side: usize, input: &ReliefInput, p: &R
         (intersect(&s_paths, &cu_mask), h_mask_cu + p.silk, ReliefMat::Silk),
     ];
 
-    let sign = if side == 0 { 1.0 } else { -1.0 };
+    let sign = if side == Side::Front { 1.0 } else { -1.0 };
     let y0 = sign * geo.core_half;
     for (paths, h, mat) in &regions {
         if paths.is_empty() {
             continue;
         }
         // 高さ 0 の領域（むき出しの基材）も、基材の側面とつながる面として作る
-        extrude_region(paths, y0 + sign * h, y0, side == 0, *mat as u32, *mat as u32, geo.center, out);
+        extrude_region(paths, y0 + sign * h, y0, side == Side::Front, *mat as u32, *mat as u32, geo.center, out);
     }
     if dimples {
         for d in &input.dimples {

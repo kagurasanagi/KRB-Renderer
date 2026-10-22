@@ -1,4 +1,4 @@
-//! 三角形メッシュ（C++ 版 `geom::Mesh` と同じ並び）。`tri_material` の意味は用途ごと（基板なら面の区分、モデルなら部位番号）
+//! 三角形メッシュ（.krbm と同じ並び：step_dll/model_mesh.hpp の Mesh）。`tri_material` の意味は用途ごと（基板なら面の区分、モデルなら部位番号）
 
 use glam::Vec3;
 
@@ -25,8 +25,9 @@ impl Bounds3 {
             self.add(b.hi);
         }
     }
+    /// 3 軸とも lo <= hi（add は 3 軸を同時に更新するので x だけでも結果は同じだが、意味をそろえて 3 軸を見る）
     pub fn valid(&self) -> bool {
-        self.lo.x <= self.hi.x
+        self.lo.cmple(self.hi).all()
     }
     pub fn center(&self) -> Vec3 {
         (self.lo + self.hi) * 0.5

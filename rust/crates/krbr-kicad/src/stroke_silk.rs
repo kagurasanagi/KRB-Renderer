@@ -1,7 +1,8 @@
 //! kicad-cli に渡す基板のコピー：シルク層には、krbr が自分では描けないもの（KiCad の線フォントの文字と、文字の枠）だけを残す。
 //! TrueType の文字（render_cache があるもの）・線・図形は krbr が描くので、kicad-cli には描かせない（同じものが
-//! わずかに違う形で重なって太ったり二重になったりしないように）。C++ 版はシルク層全体を描かせて重ねている
+//! わずかに違う形で重なって太ったり二重になったりしないように）
 
+use crate::board::is_silk_layer;
 use crate::sexpr::{parse, write, Node};
 
 /// 文字の層がシルクなら、その面の部品図の層（書き出さない層）
@@ -20,6 +21,23 @@ fn layer_of(n: &Node) -> &str {
 /// 文字（property / fp_text / gr_text）が TrueType か（KiCad は TrueType の文字の形を render_cache に入れて保存する）
 fn is_truetype(n: &Node) -> bool {
     n.has("render_cache")
+}
+
+/// krbr が自分では形を作れない文字の項目か（層は問わない）：線フォントの文字と、文字の枠（枠の線は krbr が描かず、
+/// 中の文字も枠に合わせた折り返しが要る）。シルク層のこれらだけを kicad-cli に描かせる。
+/// stroke_silk_only_board が残す項目と、パーサが StrokeText に入れる項目（Board::stroke_silk_count で数え、
+/// 差分の検出で BoardItem::stroke_silk を立てる）の両方をこの判定で決める
+pub(crate) fn needs_kicad_cli(n: &Node) -> bool {
+    match n.tag() {
+        "property" | "fp_text" | "gr_text" => !is_truetype(n),
+        "fp_text_box" | "gr_text_box" => true,
+        _ => false,
+    }
+}
+
+/// kicad-cli にシルクとして描かせる項目か
+fn plotted_by_kicad_cli(n: &Node) -> bool {
+    is_silk_layer(layer_of(n)) && needs_kicad_cli(n)
 }
 
 /// シルクにある TrueType の文字を、同じ面の部品図の層へ移す（消すと KiCad が既定の文字を作り直すことがあるので残す）
@@ -43,14 +61,13 @@ fn filter_footprint(fp: &Node) -> Node {
         match it.tag() {
             "property" | "fp_text" => {
                 let mut t = it.clone();
-                if fab_of_silk(layer_of(it)).is_some() && is_truetype(it) {
+                if is_silk_layer(layer_of(it)) && !plotted_by_kicad_cli(it) {
                     move_off_silk(&mut t);
                 }
                 out.items.push(t);
             }
-            // 文字の枠は krbr が描かないので、シルクのものは kicad-cli に描かせる
             "fp_text_box" => {
-                if fab_of_silk(layer_of(it)).is_some() {
+                if plotted_by_kicad_cli(it) {
                     out.items.push(it.clone());
                 }
             }
@@ -81,13 +98,8 @@ pub fn stroke_silk_only_board(text: &str) -> Result<String, String> {
                 out.items.push(it.clone())
             }
             "footprint" | "module" => out.items.push(filter_footprint(it)),
-            "gr_text" => {
-                if fab_of_silk(layer_of(it)).is_some() && !is_truetype(it) {
-                    out.items.push(it.clone());
-                }
-            }
-            "gr_text_box" => {
-                if fab_of_silk(layer_of(it)).is_some() {
+            "gr_text" | "gr_text_box" => {
+                if plotted_by_kicad_cli(it) {
                     out.items.push(it.clone());
                 }
             }
@@ -137,5 +149,48 @@ mod tests {
         assert!(n.has("layers") && n.has("version"));
         assert_eq!(fp.child("at").unwrap().num(3), 90.0);
         assert_eq!(fp.str(1), "Capacitor_SMD:C_0603_1608Metric");
+    }
+
+    /// 文字の枠と、部品内の文字を含む基板
+    const BOARD_WITH_TEXT_BOXES: &str = r#"(kicad_pcb (version 20260206) (generator "pcbnew")
+  (layers (0 "F.Cu" signal) (37 "F.SilkS" user "F.Silkscreen"))
+  (footprint "Lib:Part" (layer "F.Cu") (uuid "fp1") (at 10 20 90)
+    (property "Reference" "U1" (at 0 -2 90) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+    (property "Value" "X" (at 0 2 90) (layer "F.Fab") (effects (font (size 1 1))))
+    (fp_text_box "boxed" (start -1 -1) (end 1 1) (layer "F.SilkS") (effects (font (size 0.8 0.8))) (border yes) (stroke (width 0.1) (type solid)))
+    (fp_text_box "fab" (start -1 -1) (end 1 1) (layer "F.Fab") (effects (font (size 0.8 0.8)))))
+  (gr_text_box "only a box" (start 30 30) (end 40 35) (layer "B.SilkS") (uuid "tb1") (effects (font (size 1 1))) (border yes) (stroke (width 0.15) (type solid)))
+  (gr_text_box "tt" (start 50 50) (end 60 55) (layer "F.SilkS") (uuid "tb2") (effects (font (face "Arial") (size 1 1))) (render_cache "tt" 0 (polygon (pts (xy 50 50) (xy 51 50) (xy 51 51)))))
+)"#;
+
+    /// kicad-cli に描かせる項目の数が、stroke_silk_only_board が残すものとパーサが数えるもので一致する
+    #[test]
+    fn text_boxes_are_plotted_and_counted_alike() {
+        let out = parse(&stroke_silk_only_board(BOARD_WITH_TEXT_BOXES).unwrap()).unwrap();
+        let fp = out.child("footprint").unwrap();
+        let in_fp = fp.items.iter().filter(|c| c.is_list && plotted_by_kicad_cli(c)).count();
+        let on_board = out.items.iter().filter(|c| c.is_list && plotted_by_kicad_cli(c)).count();
+        // 部品番号 U1、シルクの fp_text_box、基板の gr_text_box 2 つ（TrueType でも枠は krbr が描かない）
+        assert_eq!((in_fp, on_board), (2, 2));
+        assert_eq!(fp.children("fp_text_box").count(), 1); // 部品図の層の枠は渡さない
+
+        let dir = std::env::temp_dir().join(format!("krbr_rust_text_box_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("boxes.kicad_pcb");
+        std::fs::write(&file, BOARD_WITH_TEXT_BOXES).unwrap();
+        let b = crate::parser::load_board(&file);
+        let _ = std::fs::remove_dir_all(&dir);
+        let b = b.unwrap();
+        assert_eq!(b.stroke_silk_count(), in_fp + on_board);
+        // 文字の枠だけの項目でも、変えればシルクを書き出し直す
+        assert!(b.items.iter().filter(|it| it.key.starts_with("tb")).all(|it| it.stroke_silk));
+        // 枠の範囲は枠そのもの（＋線と文字のはみ出し）。部品内の枠は部品の位置と向きで基板座標に直る
+        let tb1 = b.items.iter().find(|it| it.key == "tb1").unwrap();
+        assert!(tb1.bbox.lo.x <= 30.0 && tb1.bbox.hi.x >= 40.0 && tb1.bbox.lo.x > 27.0 && tb1.bbox.hi.y < 38.0);
+        let boxed = b.stroke_texts.iter().find(|t| t.text == "boxed").unwrap();
+        assert!((boxed.pos - crate::board::Vec2::new(10.0, 20.0)).length() < 1e-9);
+        // 部品の文字の位置も基板座標：(0, -2) を 90° 回すと (-2, 0)
+        let u1 = b.stroke_texts.iter().find(|t| t.text == "U1").unwrap();
+        assert!((u1.pos - crate::board::Vec2::new(8.0, 20.0)).length() < 1e-9, "{}", u1.pos);
     }
 }

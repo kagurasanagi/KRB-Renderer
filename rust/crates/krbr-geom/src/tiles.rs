@@ -9,9 +9,20 @@ use krbr_core::Mesh;
 use krbr_kicad::{Board, Box2};
 
 use crate::board_mesh::BoardGeometry;
-use crate::raster::{collect_side_paths, encode_sdf, rasterize_coverage, Grid, LayerArtOptions, Side, SDF_RANGE_MM};
+use crate::raster::{collect_side_paths, encode_sdf, rasterize_coverage_with, Grid, LayerArtOptions, Side, SDF_RANGE_MM};
 use crate::relief::{build_relief, relief_base, ReliefDimple, ReliefInput, ReliefParams};
 use crate::shapes::*;
+
+/// 外周のタイルを基板の外へ広げる幅（mm）。基板の外形はタイルの範囲にちょうど収まるが、Clipper2 の座標の丸め（10 nm）で
+/// 縁がタイルの境からわずかにはみ出しても切れないように広げる。距離場の画像もこの分だけ外側を持つ（基板の縁の画素を
+/// 補間するときに、画像の外を引かないように）。丸めの分よりずっと大きいが、画像が数 % 大きくなるだけなので余裕を取る
+const OUTER_TILE_MARGIN_MM: f64 = 1.0;
+
+/// タイルの距離場を求めるときに、タイルの外側へ広げる画素数：距離場は縁から SDF_RANGE_MM 先までを表すので、その先まで
+/// の図形を集める（＋2 画素は、縁の画素の補正と丸めの分）
+fn sdf_extent_px(px_per_mm: f64) -> usize {
+    (SDF_RANGE_MM * px_per_mm).ceil() as usize + 2
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct SdfPatch {
@@ -36,7 +47,7 @@ pub struct ReliefTileCache {
     pub tiles: [Vec<Mesh>; 2],
     pub valid: [Vec<bool>; 2],
     pub sdf: [Vec<SdfPatch>; 2],
-    /// 距離場の格子（基板の範囲＋1 mm）
+    /// 距離場の格子（基板の範囲＋OUTER_TILE_MARGIN_MM）
     pub sdf_grid: Grid,
     /// 基板全体の距離場（RG8：R = 銅, G = レジスト開口）
     pub sdf_image: [Vec<u8>; 2],
@@ -84,12 +95,13 @@ impl ReliefTileCache {
             self.valid[s] = vec![false; n];
             self.sdf[s] = vec![SdfPatch::default(); n];
         }
-        // 距離場の格子：タイルの外周の広げ分（1 mm）を含める。画素はタイルの境と揃える
+        // 距離場の格子：外周のタイルの広げ分（OUTER_TILE_MARGIN_MM）を含める。画素はタイルの境と揃える
+        let m = OUTER_TILE_MARGIN_MM;
         self.sdf_grid = Grid {
             px_per_mm,
-            origin: self.bounds.lo - Vec2::splat(1.0),
-            width: ((self.nx as f64 * self.tile_size + 2.0) * px_per_mm).ceil() as usize,
-            height: ((self.ny as f64 * self.tile_size + 2.0) * px_per_mm).ceil() as usize,
+            origin: self.bounds.lo - Vec2::splat(m),
+            width: ((self.nx as f64 * self.tile_size + 2.0 * m) * px_per_mm).ceil() as usize,
+            height: ((self.ny as f64 * self.tile_size + 2.0 * m) * px_per_mm).ceil() as usize,
         };
     }
 
@@ -99,10 +111,14 @@ impl ReliefTileCache {
         }
     }
 
+    /// 変わった範囲（差分の検出の BoardItem::bbox。レジストの広がりなどを含む）にかかるタイルを無効にする
     pub fn invalidate(&mut self, dirty: &[Box2]) {
+        // タイルの距離場は、タイルの外側（sdf_extent_px）の図形からも求めるので、その範囲までの変更で作り直す。
+        // ＋1 画素は、タイルの範囲を画素に丸めるときのずれ
+        let ppm = self.sdf_grid.px_per_mm;
+        let influence = if ppm > 0.0 { (sdf_extent_px(ppm) + 1) as f64 / ppm } else { 0.0 };
         for t in 0..self.count() {
-            // レジストの広がりなどを見込んで、少し広げた範囲で判定する
-            let r = self.tile_rect(t).expanded(1.0);
+            let r = self.tile_rect(t).expanded(influence);
             if dirty.iter().any(|d| r.intersects(d)) {
                 self.valid[0][t] = false;
                 self.valid[1][t] = false;
@@ -115,17 +131,18 @@ impl ReliefTileCache {
         let lo = self.bounds.lo + Vec2::new(i as f64 * self.tile_size, j as f64 * self.tile_size);
         let mut r = Box2 { lo, hi: lo + Vec2::splat(self.tile_size) };
         // 外周のタイルは基板の外まで少し広げる（端の取りこぼしを防ぐ）
+        let m = OUTER_TILE_MARGIN_MM;
         if i == 0 {
-            r.lo.x -= 1.0;
+            r.lo.x -= m;
         }
         if j == 0 {
-            r.lo.y -= 1.0;
+            r.lo.y -= m;
         }
         if i == self.nx - 1 {
-            r.hi.x += 1.0;
+            r.hi.x += m;
         }
         if j == self.ny - 1 {
-            r.hi.y += 1.0;
+            r.hi.y += m;
         }
         r
     }
@@ -150,29 +167,27 @@ pub fn build_relief_tiles(cache: &mut ReliefTileCache, board: &Board, geo: &Boar
     // 面を張る範囲（表裏それぞれ、ふさがれたビアの穴を含める）
     let mut base: [Paths; 2] = [Paths::new(Vec::new()), Paths::new(Vec::new())];
     let mut tented_vias: [Vec<ReliefDimple>; 2] = [Vec::new(), Vec::new()];
-    for side in 0..2 {
+    for side in Side::BOTH {
         let mut tented = Paths::new(Vec::new());
-        let tent_default = if side == 0 { board.setup.tent_front } else { board.setup.tent_back };
         for v in &board.vias {
-            let tent = if side == 0 { v.tent_front } else { v.tent_back };
-            if tent.unwrap_or(tent_default) && v.drill > 0.0 {
+            if v.tented(side, &board.setup) && v.drill > 0.0 {
                 append(&mut tented, disc(v.pos, v.drill / 2.0));
-                tented_vias[side].push(ReliefDimple { pos: v.pos, radius: v.drill / 2.0, build: true });
+                tented_vias[side as usize].push(ReliefDimple { pos: v.pos, radius: v.drill / 2.0, build: true });
             }
         }
-        base[side] = relief_base(geo, &tented);
+        base[side as usize] = relief_base(geo, &tented);
     }
 
-    let mut todo: Vec<(usize, usize)> = Vec::new();
-    for s in 0..2 {
+    let mut todo: Vec<(Side, usize)> = Vec::new();
+    for side in Side::BOTH {
         for t in 0..cache.count() {
-            if !cache.valid[s][t] {
-                todo.push((s, t));
+            if !cache.valid[side as usize][t] {
+                todo.push((side, t));
             }
         }
     }
     let next = AtomicUsize::new(0);
-    let results: Mutex<Vec<(usize, usize, Mesh, SdfPatch)>> = Mutex::new(Vec::new());
+    let results: Mutex<Vec<(Side, usize, Mesh, SdfPatch)>> = Mutex::new(Vec::new());
     let cache_ref: &ReliefTileCache = cache;
     let worker = || {
         loop {
@@ -185,16 +200,16 @@ pub fn build_relief_tiles(cache: &mut ReliefTileCache, board: &Board, geo: &Boar
             // 距離場のために、タイルより少し広い範囲（SDF_RANGE_MM 以上）の図形を集める
             let (px0, py0, px1, py1) = cache_ref.tile_pixels(t);
             let g = &cache_ref.sdf_grid;
-            let ext = (SDF_RANGE_MM * g.px_per_mm).ceil() as usize + 2;
+            let ext = sdf_extent_px(g.px_per_mm);
             let (ex0, ey0) = (px0.saturating_sub(ext), py0.saturating_sub(ext));
             let (ex1, ey1) = ((px1 + ext).min(g.width), (py1 + ext).min(g.height));
             let wide = Box2 {
                 lo: g.origin + Vec2::new(ex0 as f64, ey0 as f64) / g.px_per_mm,
                 hi: g.origin + Vec2::new(ex1 as f64, ey1 as f64) / g.px_per_mm,
             };
-            let sp = collect_side_paths(board, if side == 0 { Side::Front } else { Side::Back }, layer_art, Some(&wide));
+            let sp = collect_side_paths(board, side, layer_art, Some(&wide));
             let rect_paths = rect_path(rect.lo, rect.hi);
-            let tile_base = intersect(&base[side], &rect_paths);
+            let tile_base = intersect(&base[side as usize], &rect_paths);
             let mut input = ReliefInput {
                 copper: intersect(&sp.copper, &rect_paths),
                 mask_open: intersect(&sp.mask_open, &rect_paths),
@@ -203,7 +218,7 @@ pub fn build_relief_tiles(cache: &mut ReliefTileCache, board: &Board, geo: &Boar
                 base: Some(tile_base),
                 dimples: Vec::new(),
             };
-            for d in &tented_vias[side] {
+            for d in &tented_vias[side as usize] {
                 // 円がこのタイルにかかるものは平らな面から除く。くぼみの面は中心を含むタイルだけが作る
                 if d.pos.x + d.radius < rect.lo.x || d.pos.x - d.radius > rect.hi.x || d.pos.y + d.radius < rect.lo.y || d.pos.y - d.radius > rect.hi.y {
                     continue;
@@ -215,7 +230,8 @@ pub fn build_relief_tiles(cache: &mut ReliefTileCache, board: &Board, geo: &Boar
             let eg = Grid { origin: wide.lo, px_per_mm: g.px_per_mm, width: ex1 - ex0, height: ey1 - ey0 };
             let mut patch = SdfPatch { x0: px0, y0: py0, w: px1 - px0, h: py1 - py0, copper: Vec::new(), mask_open: Vec::new() };
             for layer in 0..2 {
-                let cov = rasterize_coverage(if layer == 0 { &sp.copper } else { &sp.mask_open }, &eg);
+                // タイルごとにすでに並列なので、ラスタライズは今のスレッドだけで行う（スレッドを入れ子にしない）
+                let cov = rasterize_coverage_with(if layer == 0 { &sp.copper } else { &sp.mask_open }, &eg, 1);
                 let enc = encode_sdf(&cov, eg.width, eg.height, g.px_per_mm);
                 let dst = if layer == 0 { &mut patch.copper } else { &mut patch.mask_open };
                 dst.resize(patch.w * patch.h, 0);
@@ -229,7 +245,7 @@ pub fn build_relief_tiles(cache: &mut ReliefTileCache, board: &Board, geo: &Boar
             results.lock().unwrap().push((side, t, m, patch));
         }
     };
-    let nthreads = (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2) / 2).clamp(1, 12).min(todo.len().max(1));
+    let nthreads = krbr_core::platform::worker_threads().min(todo.len().max(1));
     std::thread::scope(|s| {
         for _ in 0..nthreads {
             // 作業用のスレッドは低優先度（ビューアのウィンドウのスレッドより後回しにする）
@@ -241,9 +257,10 @@ pub fn build_relief_tiles(cache: &mut ReliefTileCache, board: &Board, geo: &Boar
     });
     let results = results.into_inner().unwrap();
     for (side, t, m, patch) in results {
-        cache.tiles[side][t] = m;
-        cache.sdf[side][t] = patch;
-        cache.valid[side][t] = true;
+        let s = side as usize;
+        cache.tiles[s][t] = m;
+        cache.sdf[s][t] = patch;
+        cache.valid[s][t] = true;
     }
 
     // 作り直したタイルの距離場だけを、基板全体の画像（RG8）に書き込む。範囲外は「遠く外側」
@@ -255,16 +272,17 @@ pub fn build_relief_tiles(cache: &mut ReliefTileCache, board: &Board, geo: &Boar
         }
     }
     for &(side, t) in &todo {
-        let p = &cache.sdf[side][t];
+        let s = side as usize;
+        let p = &cache.sdf[s][t];
         for y in 0..p.h {
             let row = ((p.y0 + y) * g.width + p.x0) * 2;
             for x in 0..p.w {
-                cache.sdf_image[side][row + x * 2] = p.copper[y * p.w + x];
-                cache.sdf_image[side][row + x * 2 + 1] = p.mask_open[y * p.w + x];
+                cache.sdf_image[s][row + x * 2] = p.copper[y * p.w + x];
+                cache.sdf_image[s][row + x * 2 + 1] = p.mask_open[y * p.w + x];
             }
         }
     }
-    cache.last_rebuilt = todo.clone();
+    cache.last_rebuilt = todo.iter().map(|&(side, t)| (side as usize, t)).collect();
 
     let tris: usize = (0..2).map(|s| cache.tiles[s].iter().map(|m| m.triangle_count()).sum::<usize>()).sum();
     krbr_core::info!(

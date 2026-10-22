@@ -1,7 +1,7 @@
 //! `.kicad_pcb` の読み込み。座標はすべて基板座標（mm、x 右・y 下）に変換済み。
-//! C++ 版の `kicad/` を移したもので、同じ基板からは同じ構造になる。
 
 pub mod board;
+pub mod curves;
 pub mod parser;
 pub mod resolver;
 pub mod settings;

@@ -1,4 +1,4 @@
-//! ファイルの保存の検出（C++ 版の `core/file_watcher` と同じ）。更新時刻と大きさを一定の間隔で見て、
+//! ファイルの保存の検出。更新時刻と大きさを一定の間隔で見て、
 //! 変化が止まってから（書き込みの途中や、いったん消して置き換える保存を避けて）保存とみなす
 
 use std::path::{Path, PathBuf};
@@ -22,13 +22,14 @@ pub struct FileWatcher {
 }
 
 impl FileWatcher {
-    /// interval ごとに調べ、変化が settle のあいだ止まったら保存とみなす（C++ 版の既定は 100 ms / 200 ms）
+    /// interval ごとに調べ、変化が settle のあいだ止まったら保存とみなす（既定は with_defaults の 100 ms / 200 ms）
     pub fn new(file: &Path, interval: Duration, settle: Duration) -> Self {
         let file = file.to_path_buf();
         let committed = stamp(&file);
         Self { file, interval, settle, committed, candidate: None, last_check: None, saved_at: None }
     }
 
+    /// 100 ms ごとに調べ、200 ms 止まったら保存とみなす（保存から読み直しまでの遅れを 0.3 秒程度に抑えつつ、書きかけを読まないための値）
     pub fn with_defaults(file: &Path) -> Self {
         Self::new(file, Duration::from_millis(100), Duration::from_millis(200))
     }

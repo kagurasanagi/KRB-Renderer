@@ -282,7 +282,7 @@ pub fn write(n: &Node) -> String {
     s
 }
 
-/// ノードの内容（アトムと入れ子の構造）のハッシュ（C++ 版と同じ直列化）
+/// ノードの内容（アトムと入れ子の構造）のハッシュ（差分の検出で、項目の内容が変わったかを見るのに使う）
 pub fn hash_node(n: &Node) -> u64 {
     let mut s = String::new();
     serialize(n, &mut s);

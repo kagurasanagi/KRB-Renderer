@@ -1,4 +1,4 @@
-//! kicad-cli が出力する SVG（pcb export svg）を多角形に変換する最小限のリーダー（C++ 版 raster/svg_reader）。
+//! kicad-cli が出力する SVG（pcb export svg）を多角形に変換する最小限のリーダー。
 //! 対応：<g> / <path> / <circle> / <polyline> / <polygon> / <rect> と、fill / stroke / stroke-width / fill-rule の継承
 //! （属性と style="..."）。変換は translate と scale だけ。<text> は KiCad が補助情報として出すだけなので無視する
 
@@ -7,7 +7,7 @@ use std::f64::consts::PI;
 
 use clipper2::FillRule;
 
-use crate::shapes::{append, bezier_points, circle_points, disc, stroke_polyline, to_path, unite, Paths, Vec2, ARC_TOL};
+use crate::shapes::{append, bezier_points, circle_points, disc, segments_for, stroke_polyline, to_path, unite, Paths, Vec2, ARC_TOL};
 
 #[derive(Debug, Default)]
 pub struct SvgResult {
@@ -52,6 +52,12 @@ impl Transform {
     /// self * inner
     fn then(&self, inner: &Transform) -> Transform {
         Transform { sx: self.sx * inner.sx, sy: self.sy * inner.sy, tx: self.sx * inner.tx + self.tx, ty: self.sy * inner.ty + self.ty }
+    }
+    /// mm の許容誤差を、変換前の座標（SVG のユーザー単位。kicad-cli では 1 単位 = 1 µm）に直す。
+    /// 縦横の倍率が違うときは小さい方に合わせる（どちらの向きでも mm で tol を超えない）
+    fn tol_in_user_units(&self, tol_mm: f64) -> f64 {
+        let s = self.sx.abs().max(self.sy.abs());
+        if s > 0.0 { tol_mm / s } else { tol_mm }
     }
 }
 
@@ -250,8 +256,8 @@ fn read_flag(d: &[u8], i: &mut usize) -> Option<bool> {
     Some(v)
 }
 
-/// SVG のパスデータ（M L H V C Q A Z とその相対版）
-fn parse_path_data(d: &str) -> Vec<SubPath> {
+/// SVG のパスデータ（M L H V C Q A Z とその相対版）。曲線は tol（変換前の座標の単位）以下のずれで折れ線にする
+fn parse_path_data(d: &str, tol: f64) -> Vec<SubPath> {
     let d = d.as_bytes();
     let mut out: Vec<SubPath> = Vec::new();
     let mut i = 0usize;
@@ -333,7 +339,7 @@ fn parse_path_data(d: &str) -> Vec<SubPath> {
                     let (p0, q, p2) = (ctrl[0], ctrl[1], ctrl[2]);
                     ctrl = vec![p0, p0 + 2.0 / 3.0 * (q - p0), p2 + 2.0 / 3.0 * (q - p2), p2];
                 }
-                let pts = bezier_points(&ctrl, ARC_TOL);
+                let pts = bezier_points(&ctrl, tol);
                 cur_path(&mut out, cur).pts.extend_from_slice(&pts[1..]);
                 cur = *ctrl.last().unwrap();
             }
@@ -376,7 +382,8 @@ fn parse_path_data(d: &str) -> Vec<SubPath> {
                     if sweep && dt < 0.0 {
                         dt += 2.0 * PI;
                     }
-                    let n = ((dt.abs() / (PI / 64.0)).ceil() as i64).clamp(2, 512);
+                    // 楕円の大きい方の半径の円とみなして分割数を決める（小さい方の半径の向きでは、ずれはそれより小さい）
+                    let n = segments_for(rx.max(ry), dt, tol);
                     for k in 1..=n {
                         let t = t1 + dt * k as f64 / n as f64;
                         let e = Vec2::new(rx * t.cos(), ry * t.sin());
@@ -453,7 +460,7 @@ pub fn read_kicad_svg(text: &str) -> SvgResult {
             }
             "path" => {
                 if let Some(d) = tag.attrs.get("d") {
-                    emit(&parse_path_data(d), &st, &xf, &mut res.paths);
+                    emit(&parse_path_data(d, xf.tol_in_user_units(ARC_TOL)), &st, &xf, &mut res.paths);
                     res.elements += 1;
                 }
             }
@@ -470,7 +477,7 @@ pub fn read_kicad_svg(text: &str) -> SvgResult {
             }
             "polyline" | "polygon" => {
                 let d = format!("M {}", tag.attrs.get("points").map(String::as_str).unwrap_or(""));
-                let mut subs = parse_path_data(&d);
+                let mut subs = parse_path_data(&d, xf.tol_in_user_units(ARC_TOL));
                 if tag.name == "polygon" {
                     if let Some(last) = subs.last_mut() {
                         last.closed = true;
@@ -545,9 +552,10 @@ mod tests {
 
     #[test]
     fn arc_makes_a_half_disc() {
-        // 半径 1 mm の半円（A）を閉じて塗る：面積 π/2
+        // 半径 1 mm の半円（A）を閉じて塗る：面積 π/2。折れ線は円弧より最大 ARC_TOL 内側なので、欠けは弧の長さ π × ARC_TOL まで
         let r = read_kicad_svg(&wrap(r#"<path style="stroke:none" d="M 14000 25000 A 1000 1000 0 0 1 16000 25000 Z"/>"#));
-        assert!((area(&r.paths) - PI / 2.0).abs() < 1e-3, "{}", area(&r.paths));
+        let a = area(&r.paths);
+        assert!(a <= PI / 2.0 && a > PI / 2.0 - PI * ARC_TOL, "{a}");
     }
 
     #[test]
@@ -561,6 +569,18 @@ mod tests {
         // 円 π 0.25 + 三角形（scale 2 で 2 mm 角の半分 = 2）。円は多角形で近似するので、その分だけ小さい
         let want = PI * 0.25 + 2.0;
         assert!((area(&r.paths) - want).abs() < 6e-3, "{} vs {want}", area(&r.paths));
+    }
+
+    #[test]
+    fn curves_are_split_by_the_tolerance_in_mm() {
+        // 半径 1 mm（1000 µm）の半円を A と C で描く。分割の細かさは mm の ARC_TOL で決まり、µm の単位に引きずられない
+        let a = parse_path_data("M 0 0 A 1000 1000 0 0 1 2000 0", ARC_TOL * 1000.0);
+        let want = segments_for(1.0, PI, ARC_TOL);
+        assert_eq!(a[0].pts.len(), want + 1);
+        let c = parse_path_data("M 0 0 C 0 -1000 2000 -1000 2000 0", ARC_TOL * 1000.0);
+        assert!(c[0].pts.len() < 100, "{}", c[0].pts.len()); // µm のまま 0.002 で分けると上限の 512 分割になる
+        let t = Transform { sx: 0.001, sy: 0.001, tx: 0.0, ty: 0.0 };
+        assert!((t.tol_in_user_units(ARC_TOL) - 2.0).abs() < 1e-12);
     }
 
     #[test]

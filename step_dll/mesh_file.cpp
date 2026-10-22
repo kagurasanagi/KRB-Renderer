@@ -1,7 +1,7 @@
 #include "mesh_file.hpp"
 
-#include <cstring>
 #include <fstream>
+#include <string_view>
 
 namespace krbr::model {
 
@@ -13,11 +13,13 @@ template <class T>
 void writeVec(std::ofstream& f, const std::vector<T>& v) {
     if (!v.empty()) f.write(reinterpret_cast<const char*>(v.data()), static_cast<std::streamsize>(v.size() * sizeof(T)));
 }
-template <class T>
-bool readVec(std::ifstream& f, std::vector<T>& v, size_t n) {
-    v.resize(n);
-    if (n == 0) return true;
-    return static_cast<bool>(f.read(reinterpret_cast<char*>(v.data()), static_cast<std::streamsize>(n * sizeof(T))));
+
+// UTF-8 の文字の途中で切らないように、max バイト以内に切り詰める（続きのバイト 10xxxxxx の前では切らない）
+std::string_view truncateUtf8(std::string_view s, size_t max) {
+    if (s.size() <= max) return s;
+    size_t n = max;
+    while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80) --n;
+    return s.substr(0, n);
 }
 
 }  // namespace
@@ -25,7 +27,10 @@ bool readVec(std::ifstream& f, std::vector<T>& v, size_t n) {
 bool writeMeshFile(const std::filesystem::path& p, const ModelMesh& m) {
     std::error_code ec;
     std::filesystem::create_directories(p.parent_path(), ec);
-    const auto tmp = p.string() + ".tmp";
+    // path のまま（Windows では wchar_t のまま）扱う。path::string() は ANSI コードページへの変換で、
+    // 表せない文字を含むパスでは例外になる
+    std::filesystem::path tmp = p;
+    tmp += ".tmp";
     {
         std::ofstream f(tmp, std::ios::binary);
         if (!f) return false;
@@ -38,42 +43,19 @@ bool writeMeshFile(const std::filesystem::path& p, const ModelMesh& m) {
         writeVec(f, m.mesh.indices);
         writeVec(f, m.mesh.triMaterial);
         for (const auto& part : m.parts) {
-            const uint32_t len = static_cast<uint32_t>(part.name.size());
+            const std::string_view name = truncateUtf8(part.name, kMaxPartNameBytes);
+            const uint32_t len = static_cast<uint32_t>(name.size());
             f.write(reinterpret_cast<const char*>(&len), 4);
-            f.write(part.name.data(), len);
+            f.write(name.data(), len);
             const float c[5] = {part.srgb.r, part.srgb.g, part.srgb.b, part.alpha, part.hasColor ? 1.0f : 0.0f};
             f.write(reinterpret_cast<const char*>(c), sizeof(c));
         }
         if (!f) return false;
     }
     std::filesystem::rename(tmp, p, ec);  // 書き込み途中のファイルを残さない
-    return !ec;
-}
-
-std::shared_ptr<ModelMesh> readMeshFile(const std::filesystem::path& p) {
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return nullptr;
-    char magic[4];
-    uint32_t hdr[4];
-    if (!f.read(magic, 4) || std::memcmp(magic, kMagic, 4) != 0) return nullptr;
-    if (!f.read(reinterpret_cast<char*>(hdr), sizeof(hdr)) || hdr[0] != kMeshFileVersion) return nullptr;
-    auto m = std::make_shared<ModelMesh>();
-    const size_t nv = hdr[1], nt = hdr[2], nc = hdr[3];
-    if (!readVec(f, m->mesh.positions, nv) || !readVec(f, m->mesh.normals, nv) || !readVec(f, m->mesh.indices, nt * 3) ||
-        !readVec(f, m->mesh.triMaterial, nt))
-        return nullptr;
-    m->parts.resize(nc);
-    for (auto& part : m->parts) {
-        uint32_t len = 0;
-        if (!f.read(reinterpret_cast<char*>(&len), 4) || len > 4096) return nullptr;
-        part.name.resize(len);
-        float c[5];
-        if (!f.read(part.name.data(), len) || !f.read(reinterpret_cast<char*>(c), sizeof(c))) return nullptr;
-        part.srgb = {c[0], c[1], c[2]};
-        part.alpha = c[3];
-        part.hasColor = c[4] != 0.0f;
-    }
-    return m;
+    if (!ec) return true;
+    std::filesystem::remove(tmp, ec);
+    return false;
 }
 
 }  // namespace krbr::model

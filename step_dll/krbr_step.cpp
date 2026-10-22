@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 #include "mesh_file.hpp"
 
@@ -55,7 +56,8 @@ std::string labelName(const TDF_Label& label) {
 
 std::once_flag g_occtInit;
 
-void setError(char* err, size_t len, const std::string& msg) {
+// メモリを確保しないで書く（例外の後始末の中からも呼ぶので）
+void setError(char* err, size_t len, std::string_view msg) noexcept {
     if (!err || len == 0) return;
     const size_t n = std::min(msg.size(), len - 1);
     std::memcpy(err, msg.data(), n);
@@ -159,23 +161,32 @@ bool tessellate(const std::filesystem::path& p, double linear, double angular, M
 
 extern "C" {
 
+// C の関数から C++ の例外を外へ出すと std::terminate で呼んだプロセス（krbr.exe）ごと落ちるので、
+// 本体全体を try で囲み、どんな例外もエラーの値（4）にして返す
 KRBR_STEP_API int krbr_step_to_mesh_file(const char* step_file, double linear_deflection, double angular_deflection,
                                          const char* out_file, char* err, size_t err_len) {
-    if (!step_file || !out_file) {
-        setError(err, err_len, "null path");
-        return 1;
+    try {
+        if (!step_file || !out_file) {
+            setError(err, err_len, "null path");
+            return 1;
+        }
+        ModelMesh mesh;
+        std::string error;
+        if (!tessellate(u8path(step_file), linear_deflection, angular_deflection, mesh, error)) {
+            setError(err, err_len, error);
+            return 2;
+        }
+        if (!writeMeshFile(u8path(out_file), mesh)) {
+            setError(err, err_len, std::string("cannot write ") + out_file);
+            return 3;
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        setError(err, err_len, e.what());
+    } catch (...) {
+        setError(err, err_len, "unexpected exception");
     }
-    ModelMesh mesh;
-    std::string error;
-    if (!tessellate(u8path(step_file), linear_deflection, angular_deflection, mesh, error)) {
-        setError(err, err_len, error);
-        return 2;
-    }
-    if (!writeMeshFile(u8path(out_file), mesh)) {
-        setError(err, err_len, std::string("cannot write ") + out_file);
-        return 3;
-    }
-    return 0;
+    return 4;
 }
 
 KRBR_STEP_API int krbr_step_api_version(void) { return KRBR_STEP_API_VERSION; }

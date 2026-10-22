@@ -1,5 +1,5 @@
 //! KRB-Renderer の土台：ログ、パス（設定・キャッシュの場所）、ハッシュ。
-//! C++ 版の `core/` に相当し、ファイルの置き場所と XXH64 のキーは C++ 版と同じにしてある（キャッシュを共有するため）。
+//! ファイルの置き場所と XXH64 のキーは、以前の C++ 版（リポジトリのタグ cpp-final）と同じにしてある（同じキャッシュを読み書きできるように）。
 
 pub mod file_watcher;
 pub mod log;
@@ -9,12 +9,12 @@ pub mod platform;
 pub use file_watcher::FileWatcher;
 pub use mesh::{Bounds3, Mesh};
 
-/// XXH64（seed 0）。C++ 版の `krbr::xxh64` と同じ値になる
+/// XXH64（seed 0）。キャッシュのキーに使うので、値を変えないこと
 pub fn xxh64(data: &[u8]) -> u64 {
     xxhash_rust::xxh64::xxh64(data, 0)
 }
 
-/// 16 桁の小文字 16 進（C++ 版の `toHex`）
+/// 16 桁の小文字 16 進（キャッシュのファイル名に使う）
 pub fn to_hex(v: u64) -> String {
     format!("{v:016x}")
 }

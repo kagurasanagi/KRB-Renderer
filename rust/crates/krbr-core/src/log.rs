@@ -1,4 +1,4 @@
-//! 起動からの秒数つきのログ（C++ 版と同じ見た目：`[   0.333] info  ...`）
+//! 起動からの秒数つきのログ（`[   0.333] info  ...`）
 
 use std::fmt::Arguments;
 use std::sync::atomic::{AtomicU8, Ordering};

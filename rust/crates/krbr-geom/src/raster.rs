@@ -1,22 +1,16 @@
 //! 層ごとの多角形の集め方（銅・レジスト開口・シルク）、被覆率のラスタライズ、縁からの距離場
 
 use clipper2::FillRule;
-use krbr_kicad::{Board, Box2, Graphic, GrKind, Pad, PadType, Via};
+use krbr_kicad::{Board, Box2, Pad, PadType, Via};
+/// 基板の面（krbr-kicad に移した。ここからも使えるように残す）
+pub use krbr_kicad::Side;
 
 use crate::shapes::*;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Side {
-    Front = 0,
-    Back = 1,
-}
 
 #[derive(Debug, Clone)]
 pub struct LayerArtOptions {
     /// 20 µm/px
     pub px_per_mm: f64,
-    pub max_dim: usize,
-    pub margin_mm: f64,
     pub clip_silk_by_mask: bool,
     /// kicad-cli から得たシルク（線フォントの文字など）。設定ごと複製されるので共有にしてある
     pub extra_silk: [Option<std::sync::Arc<Paths>>; 2],
@@ -24,7 +18,7 @@ pub struct LayerArtOptions {
 
 impl Default for LayerArtOptions {
     fn default() -> Self {
-        Self { px_per_mm: 50.0, max_dim: 8192, margin_mm: 0.5, clip_silk_by_mask: true, extra_silk: [None, None] }
+        Self { px_per_mm: 50.0, clip_silk_by_mask: true, extra_silk: [None, None] }
     }
 }
 
@@ -48,25 +42,6 @@ fn via_on_side(v: &Via, cu: &str) -> bool {
     v.layer_from == cu || v.layer_to == cu
 }
 
-pub fn graphic_box(g: &Graphic) -> Box2 {
-    let mut b = Box2::default();
-    let w = g.width / 2.0;
-    if matches!(g.kind, GrKind::Line | GrKind::Arc) {
-        b.add_radius(g.start, w);
-        b.add_radius(g.end, w);
-    }
-    if g.kind == GrKind::Arc {
-        b.add_radius(g.mid, w);
-    }
-    if g.kind == GrKind::Circle {
-        b.add_radius(g.start, (g.end - g.start).length() + w);
-    }
-    for &p in &g.pts {
-        b.add_radius(p, w);
-    }
-    b
-}
-
 fn path_box(p: &Path) -> Box2 {
     let mut b = Box2::default();
     for q in path_points(p) {
@@ -77,53 +52,34 @@ fn path_box(p: &Path) -> Box2 {
 
 /// clip を渡すと、その矩形にかかる項目だけを集め、結果も矩形で切り抜く（タイル単位の作り直し用）
 pub fn collect_side_paths(board: &Board, side: Side, opts: &LayerArtOptions, clip: Option<&Box2>) -> SidePaths {
-    let (cu, mask, silk) = match side {
-        Side::Front => ("F.Cu", "F.Mask", "F.SilkS"),
-        Side::Back => ("B.Cu", "B.Mask", "B.SilkS"),
-    };
-    let tent_default = if side == Side::Front { board.setup.tent_front } else { board.setup.tent_back };
+    let (cu, mask, silk) = (side.copper_layer(), side.mask_layer(), side.silk_layer());
     let mut sp = SidePaths::default();
-    // clip があれば、その範囲（少し広げた範囲）にかかる項目だけを集める
-    let area = clip.map(|c| c.expanded(1.0));
-    let near = |b: &Box2| area.map(|a| a.intersects(b)).unwrap_or(true);
-    let near_point = |p: Vec2, r: f64| {
-        let mut b = Box2::default();
-        b.add_radius(p, r);
-        near(&b)
-    };
+    // clip があれば、その範囲にかかる項目だけを集める。項目の範囲（Graphic::bbox、Pad::extent など）は線幅・レジストの広がり・
+    // カスタムパッドのプリミティブまで含めた外接矩形なので、広げずに判定してよい（差分の検出も同じ範囲を使う）
+    let near = |b: &Box2| clip.map(|c| c.intersects(b)).unwrap_or(true);
 
     for t in &board.tracks {
-        if t.layer != cu {
-            continue;
-        }
-        let mut b = Box2::default();
-        b.add_radius(t.start, t.width / 2.0);
-        b.add_radius(t.end, t.width / 2.0);
-        if let Some(m) = t.mid {
-            b.add_radius(m, t.width / 2.0);
-        }
-        if near(&b) {
+        if t.layer == cu && near(&t.bbox()) {
             append(&mut sp.copper, track_to_paths(t));
         }
     }
     for p in &board.pads {
-        if !near_point(p.pos, p.size.x.max(p.size.y) + 0.5) {
+        if !near(&p.extent(&board.setup)) {
             continue;
         }
         if p.on_layer(cu) && pad_has_copper(p) {
             append(&mut sp.copper, pad_to_paths(p, 0.0));
         }
         if p.on_layer(mask) {
-            append(&mut sp.mask_open, pad_to_paths(p, p.mask_margin.unwrap_or(board.setup.pad_to_mask_clearance)));
+            append(&mut sp.mask_open, pad_to_paths(p, p.mask_expansion(&board.setup)));
         }
     }
     for v in &board.vias {
-        if !via_on_side(v, cu) || !near_point(v.pos, v.size) {
+        if !via_on_side(v, cu) || !near(&v.bbox()) {
             continue;
         }
         append(&mut sp.copper, disc(v.pos, v.size / 2.0));
-        let tent = if side == Side::Front { v.tent_front } else { v.tent_back };
-        if !tent.unwrap_or(tent_default) {
+        if !v.tented(side, &board.setup) {
             append(&mut sp.mask_open, disc(v.pos, v.size / 2.0));
         }
     }
@@ -131,14 +87,8 @@ pub fn collect_side_paths(board: &Board, side: Side, opts: &LayerArtOptions, cli
         if z.layer != cu && z.layer != mask {
             continue;
         }
-        if clip.is_some() {
-            let mut b = Box2::default();
-            for &p in &z.pts {
-                b.add(p);
-            }
-            if !near(&b) {
-                continue;
-            }
+        if clip.is_some() && !near(&z.bbox()) {
+            continue;
         }
         if z.layer == cu {
             sp.copper.push(to_path(&z.pts));
@@ -150,7 +100,7 @@ pub fn collect_side_paths(board: &Board, side: Side, opts: &LayerArtOptions, cli
         if g.layer != cu && g.layer != mask && g.layer != silk {
             continue;
         }
-        if clip.is_some() && !near(&graphic_box(g)) {
+        if clip.is_some() && !near(&g.bbox()) {
             continue;
         }
         let paths = graphic_to_paths(g);
@@ -233,6 +183,7 @@ fn fill_span(acc: &mut [f32], width: usize, xa: f64, xb: f64, w: f32) {
     }
 }
 
+/// 行 row_begin..row_end を描く。cov はその帯だけの画素（先頭が row_begin の行）
 fn raster_band(edges: &[Edge], width: usize, row_begin: usize, row_end: usize, cov: &mut [f32]) {
     let mut active: Vec<&Edge> = Vec::new();
     // 帯の開始より前から続いている辺も含めて、帯に関係する辺を y0 順に処理する
@@ -274,16 +225,27 @@ fn raster_band(edges: &[Edge], width: usize, row_begin: usize, row_end: usize, c
                 }
             }
         }
-        let out = &mut cov[row * width..(row + 1) * width];
+        let r = row - row_begin;
+        let out = &mut cov[r * width..(r + 1) * width];
         for (o, a) in out.iter_mut().zip(acc.iter()) {
             *o = a.min(1.0);
         }
     }
 }
 
-/// 非ゼロ規則で塗った多角形の被覆率（0..1）。縦は 4 本のサブ走査線、横は厳密な被覆面積でアンチエイリアスする
+/// 非ゼロ規則で塗った多角形の被覆率（0..1）。縦は 4 本のサブ走査線、横は厳密な被覆面積でアンチエイリアスする。
+/// 横の帯に分けて krbr_core::platform::worker_threads() 本で並列に描く
 pub fn rasterize_coverage(paths: &Paths, g: &Grid) -> Vec<f32> {
+    rasterize_coverage_with(paths, g, krbr_core::platform::worker_threads())
+}
+
+/// rasterize_coverage を threads 本で描く。1 なら呼んだスレッドだけで描く（並列の処理の中から呼ぶときは 1 にして、
+/// スレッドの入れ子を作らない）
+pub fn rasterize_coverage_with(paths: &Paths, g: &Grid, threads: usize) -> Vec<f32> {
     let mut cov = vec![0.0f32; g.width * g.height];
+    if cov.is_empty() {
+        return cov;
+    }
     let mut edges: Vec<Edge> = Vec::new();
     for path in paths.iter() {
         let pts = from_path(path);
@@ -314,9 +276,13 @@ pub fn rasterize_coverage(paths: &Paths, g: &Grid) -> Vec<f32> {
     }
     edges.sort_by(|a, b| a.y0.partial_cmp(&b.y0).unwrap());
 
-    let threads = (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2) / 2).clamp(1, 8);
-    let band = g.height.div_ceil(threads);
     let width = g.width;
+    let threads = threads.clamp(1, g.height.max(1));
+    if threads == 1 {
+        raster_band(&edges, width, 0, g.height, &mut cov);
+        return cov;
+    }
+    let band = g.height.div_ceil(threads);
     std::thread::scope(|s| {
         for (t, chunk) in cov.chunks_mut(band * width).enumerate() {
             let edges = &edges;
@@ -324,20 +290,11 @@ pub fn rasterize_coverage(paths: &Paths, g: &Grid) -> Vec<f32> {
             let r1 = r0 + chunk.len() / width;
             s.spawn(move || {
                 krbr_core::platform::lower_thread_priority();
-                // 帯の中の行は chunk の先頭から並ぶので、行番号を引き直す
-                let mut local = vec![0.0f32; chunk.len()];
-                raster_band_offset(edges, width, r0, r1, &mut local);
-                chunk.copy_from_slice(&local);
+                raster_band(edges, width, r0, r1, chunk);
             });
         }
     });
     cov
-}
-
-fn raster_band_offset(edges: &[Edge], width: usize, r0: usize, r1: usize, out: &mut [f32]) {
-    // raster_band は行番号で cov を引くので、帯の先頭が 0 になるよう辺の y をずらす
-    let shifted: Vec<Edge> = edges.iter().map(|e| Edge { y0: e.y0 - r0 as f64, y1: e.y1 - r0 as f64, ..*e }).collect();
-    raster_band(&shifted, width, 0, r1 - r0, out);
 }
 
 // ---------------------------------------------------------------- 距離場
@@ -454,6 +411,18 @@ mod tests {
         let sq2 = rect_path(Vec2::new(0.55, 0.5), Vec2::new(1.55, 1.5));
         let cov2 = rasterize_coverage(&sq2, &g);
         assert!((cov2[10 * 20 + 5] - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn coverage_does_not_depend_on_the_number_of_bands() {
+        // 帯の境をまたぐ斜めの辺と円
+        let g = Grid { origin: Vec2::ZERO, px_per_mm: 10.0, width: 37, height: 41 };
+        let mut p = to_path(&[Vec2::new(0.3, 0.2), Vec2::new(3.4, 1.1), Vec2::new(1.2, 3.9)]).into();
+        append(&mut p, disc(Vec2::new(2.5, 2.5), 1.1));
+        let one = rasterize_coverage_with(&p, &g, 1);
+        for threads in [2, 3, 7, 64] {
+            assert_eq!(rasterize_coverage_with(&p, &g, threads), one, "{threads}");
+        }
     }
 
     #[test]

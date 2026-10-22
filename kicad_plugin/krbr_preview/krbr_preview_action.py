@@ -2,6 +2,7 @@
 # 押すと、開いている基板のファイルを krbr（Rust 版のビューア）で開く。ビューアは保存を監視しているので、
 # KiCad で保存するたびに描き直される。
 # インストール：krbr kicad-plugin install（このフォルダと krbr.exe の場所を KiCad のユーザーフォルダへ書く）
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -16,6 +17,11 @@ except ImportError:  # KiCad の外（テスト）では wx が無いことが�
 _HERE = os.path.dirname(os.path.abspath(__file__))
 # 開いたビューア（基板のパス → プロセス）。同じ基板を二重に開かない
 _viewers = {}
+# 起動してからこの時間（ミリ秒）のうちに失敗で終わったら、ログの末尾を添えて知らせる。
+# 起動の直後の失敗（Vulkan の初期化や基板の読み込みの失敗）を拾うための待ち時間
+_STARTUP_CHECK_MS = 3000
+# 知らせるときに添えるログの行数
+_LOG_TAIL_LINES = 15
 
 
 # 表示の文（KiCad の表示の言語に合わせる。訳の無い言語は英語）
@@ -26,6 +32,7 @@ _TEXTS = {
         "not_saved": "The board has not been saved yet. Save it once, then press the button again.",
         "no_exe": "krbr.exe was not found. Reinstall with krbr kicad-plugin install, or set its location in the KRBR_EXE environment variable.",
         "already_open": "A viewer for this board is already open. It is redrawn whenever you save in KiCad.",
+        "exited": "The viewer stopped right after starting (exit code {code}).\nLog: {log}",
     },
     "ja": {
         "name": "KRB Render でプレビュー",
@@ -33,6 +40,7 @@ _TEXTS = {
         "not_saved": "基板がまだ保存されていません。いったん保存してから押してください。",
         "no_exe": "krbr.exe が見つかりません。krbr kicad-plugin install でインストールし直すか、環境変数 KRBR_EXE に場所を設定してください。",
         "already_open": "この基板のビューアはもう開いています。KiCad で保存すると、そちらが描き直されます。",
+        "exited": "ビューアが起動の直後に終了しました（終了コード {code}）。\nログ: {log}",
     },
 }
 
@@ -73,6 +81,30 @@ def find_krbr():
     return None
 
 
+def _log_path(key):
+    """ビューアのログのファイル。基板ごとに分ける（ほかの基板のビューアのログを切り詰めないように）"""
+    digest = hashlib.sha1(key.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    return os.path.join(tempfile.gettempdir(), f"krbr_preview_{digest}.log")
+
+
+def _log_tail(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return "".join(f.readlines()[-_LOG_TAIL_LINES:]).strip()
+    except OSError:
+        return ""
+
+
+def _report_if_failed(proc, log_file):
+    """起動の直後にビューアが失敗で終わっていたら、ログの末尾を添えて知らせる（正常に閉じた場合は何もしない）"""
+    code = proc.poll()
+    if code is None or code == 0:
+        return
+    text = _text("exited").format(code=code, log=log_file)
+    tail = _log_tail(log_file)
+    _message(f"{text}\n\n{tail}" if tail else text)
+
+
 def launch(board_file, exe=None):
     """基板のファイルをビューアで開く。戻り値は (開いたか, 伝えること)"""
     if not board_file:
@@ -84,12 +116,17 @@ def launch(board_file, exe=None):
     p = _viewers.get(key)
     if p is not None and p.poll() is None:
         return False, _text("already_open")
-    log = open(os.path.join(tempfile.gettempdir(), "krbr_preview.log"), "w", encoding="utf-8", errors="replace")
     flags = 0
     if os.name == "nt":
         flags = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP（コンソールを出さない）
-    # 作業フォルダを基板のフォルダにする（ビューアで S を押したときの画像は、--out を付けなければ基板のフォルダに入る）
-    _viewers[key] = subprocess.Popen([exe, board_file], cwd=os.path.dirname(board_file) or None, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, creationflags=flags, close_fds=True)
+    log_file = _log_path(key)
+    # 子のプロセスにはハンドルの複製が渡るので、こちら側は起動したらすぐ閉じる
+    with open(log_file, "w", encoding="utf-8", errors="replace") as log:
+        # 作業フォルダを基板のフォルダにする（ビューアで S を押したときの画像は、--out を付けなければ基板のフォルダに入る）
+        proc = subprocess.Popen([exe, board_file], cwd=os.path.dirname(board_file) or None, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, creationflags=flags, close_fds=True)
+    _viewers[key] = proc
+    if wx is not None and wx.GetApp() is not None:
+        wx.CallLater(_STARTUP_CHECK_MS, _report_if_failed, proc, log_file)
     return True, ""
 
 

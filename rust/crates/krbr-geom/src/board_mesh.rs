@@ -1,9 +1,11 @@
 //! 基板外形を押し出した板（上下面・側面・穴の内壁）を作る
 
-use clipper2::FillRule;
+use std::collections::HashMap;
+
+use clipper2::{FillRule, PointScaler};
 use glam::Vec3;
 use krbr_core::Mesh;
-use krbr_kicad::{rotate_point, Board, GrKind, PadType};
+use krbr_kicad::{rotate_point, Board, Box2, GrKind, PadType};
 
 use crate::shapes::*;
 
@@ -20,33 +22,8 @@ pub enum BoardMat {
     Plated = 3,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Bounds2 {
-    pub lo: Vec2,
-    pub hi: Vec2,
-}
-
-impl Default for Bounds2 {
-    fn default() -> Self {
-        Self { lo: Vec2::splat(1e30), hi: Vec2::splat(-1e30) }
-    }
-}
-
-impl Bounds2 {
-    pub fn add(&mut self, p: Vec2) {
-        self.lo = self.lo.min(p);
-        self.hi = self.hi.max(p);
-    }
-    pub fn valid(&self) -> bool {
-        self.lo.x <= self.hi.x
-    }
-    pub fn center(&self) -> Vec2 {
-        (self.lo + self.hi) * 0.5
-    }
-    pub fn size(&self) -> Vec2 {
-        self.hi - self.lo
-    }
-}
+/// 2D の外接矩形は krbr-kicad の Box2 に一本化した（以前の名前で使っている所のための別名）
+pub type Bounds2 = Box2;
 
 #[derive(Debug, Clone, Default)]
 pub struct BoardGeometry {
@@ -55,7 +32,7 @@ pub struct BoardGeometry {
     /// 穴を開けた後の基板領域
     pub body: Paths,
     /// 基板座標での外形範囲
-    pub bounds: Bounds2,
+    pub bounds: Box2,
     /// ワールド原点に置く基板座標
     pub center: Vec2,
     pub thickness: f64,
@@ -157,12 +134,23 @@ fn outline_loops(board: &Board, open_chains: &mut usize) -> Vec<Vec<Vec2>> {
     loops
 }
 
+/// 2 つ以上の穴が同じ頂点を持つ印（どの穴の頂点とも決められない）
+const SHARED_VERTEX: u32 = u32::MAX;
+
+/// メッキ穴の形（長円は中心線 a-b、円なら a == b）
 #[derive(Clone, Copy)]
 struct PlatedHole {
     a: Vec2,
-    b: Vec2, // 長円の中心線（円なら a == b）
+    b: Vec2,
     r: f64,
 }
+
+/// 穴の多角形の辺と、穴の円（長円の縁）との距離の上限：頂点は円の上にあり（整数座標への丸めで最大 1 単位ずれる）、
+/// 辺は円より最大 ARC_TOL だけ内側を通る（circle_points の許容誤差）
+const HOLE_EDGE_TOL: f64 = ARC_TOL + 2.0 / Nano::MULTIPLIER;
+
+/// メッキ穴の空間索引の格子の大きさ（mm）。ビア（穴の直径 0.2〜0.4 mm 程度）が 1 マスに数個までに収まる大きさ
+const HOLE_GRID_MM: f64 = 1.0;
 
 fn dist_to_segment(p: Vec2, a: Vec2, b: Vec2) -> f64 {
     let ab = b - a;
@@ -171,22 +159,91 @@ fn dist_to_segment(p: Vec2, a: Vec2, b: Vec2) -> f64 {
     (p - (a + t * ab)).length()
 }
 
-fn add_hole(center: Vec2, angle_deg: f64, size: Vec2, oval: bool, plated: bool, holes: &mut Paths, plated_holes: &mut Vec<PlatedHole>) {
-    append(holes, drill_to_paths(center, angle_deg, size, oval));
-    if !plated {
-        return;
+/// Clipper2 の整数座標（基板の本体の輪郭は from_path で mm に直してあるので、倍率を掛けて戻す。値はちょうど整数に戻る）
+fn vertex_key(p: Vec2) -> (i64, i64) {
+    ((p.x * Nano::MULTIPLIER).round() as i64, (p.y * Nano::MULTIPLIER).round() as i64)
+}
+
+fn cell_of(p: Vec2) -> (i64, i64) {
+    ((p.x / HOLE_GRID_MM).floor() as i64, (p.y / HOLE_GRID_MM).floor() as i64)
+}
+
+/// 穴（合成する前の 1 つずつの形）と、その輪郭の頂点がどの穴から来たかの表。
+/// Clipper2 のブール演算は入力の頂点を整数座標のまま出力に残し、新しく作るのは辺どうしの交点だけなので、基板の本体の輪郭の
+/// 頂点をこの表で引けば、側壁がどの穴の内壁かを、距離の許容差に頼らずに決められる
+#[derive(Default)]
+struct Holes {
+    paths: Paths,
+    /// 頂点（Clipper2 の整数座標）→ 穴の番号（SHARED_VERTEX は複数の穴の頂点）
+    vertex_owner: HashMap<(i64, i64), u32>,
+    /// 穴の番号ごとのメッキの有無
+    hole_plated: Vec<bool>,
+    plated: Vec<PlatedHole>,
+    /// メッキ穴の空間索引（格子のマス → plated の番号）。頂点で決まらない辺だけに使う
+    grid: HashMap<(i64, i64), Vec<u32>>,
+}
+
+impl Holes {
+    fn add(&mut self, center: Vec2, angle_deg: f64, size: Vec2, oval: bool, plated: bool) {
+        let shape = drill_to_paths(center, angle_deg, size, oval);
+        let id = self.hole_plated.len() as u32;
+        self.hole_plated.push(plated);
+        for path in shape.iter() {
+            for q in path.iter() {
+                self.vertex_owner
+                    .entry((q.x_scaled(), q.y_scaled()))
+                    .and_modify(|o| {
+                        if *o != id {
+                            *o = SHARED_VERTEX;
+                        }
+                    })
+                    .or_insert(id);
+            }
+        }
+        append(&mut self.paths, shape);
+        if !plated {
+            return;
+        }
+        let min_dim = size.x.min(size.y);
+        let l = (size.x.max(size.y) - min_dim) / 2.0;
+        let dir = if size.x > size.y { Vec2::X } else { Vec2::Y };
+        let h = if !oval || l <= 0.0 {
+            PlatedHole { a: center, b: center, r: size.x / 2.0 }
+        } else {
+            PlatedHole { a: center + rotate_point(-l * dir, angle_deg), b: center + rotate_point(l * dir, angle_deg), r: min_dim / 2.0 }
+        };
+        let index = self.plated.len() as u32;
+        let reach = Vec2::splat(h.r + HOLE_EDGE_TOL);
+        let (lo, hi) = (cell_of(h.a.min(h.b) - reach), cell_of(h.a.max(h.b) + reach));
+        for cy in lo.1..=hi.1 {
+            for cx in lo.0..=hi.0 {
+                self.grid.entry((cx, cy)).or_default().push(index);
+            }
+        }
+        self.plated.push(h);
     }
-    let min_dim = size.x.min(size.y);
-    let l = (size.x.max(size.y) - min_dim) / 2.0;
-    let dir = if size.x > size.y { Vec2::X } else { Vec2::Y };
-    if !oval || l <= 0.0 {
-        plated_holes.push(PlatedHole { a: center, b: center, r: size.x / 2.0 });
-    } else {
-        plated_holes.push(PlatedHole {
-            a: center + rotate_point(-l * dir, angle_deg),
-            b: center + rotate_point(l * dir, angle_deg),
-            r: min_dim / 2.0,
-        });
+
+    /// 辺 p0-p1 が、メッキ穴の縁の上にあるか（空間索引で近くのメッキ穴だけを調べる）
+    fn on_plated_hole(&self, p0: Vec2, p1: Vec2) -> bool {
+        let mid = (p0 + p1) * 0.5;
+        let Some(near) = self.grid.get(&cell_of(mid)) else { return false };
+        near.iter().any(|&i| {
+            let h = &self.plated[i as usize];
+            [p0, p1, mid].iter().all(|&p| (dist_to_segment(p, h.a, h.b) - h.r).abs() <= HOLE_EDGE_TOL)
+        })
+    }
+
+    /// 側壁の辺 p0-p1 の材質。両端が同じ穴の頂点なら、その穴の縁の辺（穴は凸なので、2 つの頂点を結ぶ線は縁か穴の中を通り、
+    /// 穴の中の線は基板の本体の輪郭に残らない）。それ以外（ほかの輪郭との交点を端に持つ辺、外形の辺、穴の頂点がたまたま
+    /// 外形の上にある場合など）は、近くのメッキ穴の縁に乗っているかを幾何で調べる
+    fn wall_mat(&self, p0: Vec2, p1: Vec2) -> u32 {
+        let o0 = self.vertex_owner.get(&vertex_key(p0)).copied();
+        let o1 = self.vertex_owner.get(&vertex_key(p1)).copied();
+        let plated = match (o0, o1) {
+            (Some(a), Some(b)) if a == b && a != SHARED_VERTEX => self.hole_plated[a as usize],
+            _ => self.on_plated_hole(p0, p1),
+        };
+        if plated { BoardMat::Plated as u32 } else { BoardMat::Edge as u32 }
     }
 }
 
@@ -229,8 +286,8 @@ fn triangulate_faces(rings: &[Ring], caps: &[Cap], center: Vec2, mesh: &mut Mesh
     }
 }
 
-/// 輪郭の側面。材質が左側にある向き（外周は正の面積、穴は負）で外向き法線を決める
-fn build_walls(pts: &[Vec2], y_top: f64, y_bot: f64, center: Vec2, mat_at: &dyn Fn(Vec2) -> u32, mesh: &mut Mesh) {
+/// 輪郭の側面。材質が左側にある向き（外周は正の面積、穴は負）で外向き法線を決める。mat_at は辺の両端から材質を決める
+fn build_walls(pts: &[Vec2], y_top: f64, y_bot: f64, center: Vec2, mat_at: &dyn Fn(Vec2, Vec2) -> u32, mesh: &mut Mesh) {
     let n = pts.len();
     if n < 3 {
         return;
@@ -267,7 +324,7 @@ fn build_walls(pts: &[Vec2], y_top: f64, y_bot: f64, center: Vec2, mat_at: &dyn 
         }
         let n0 = vtx_normal(i, (i + n - 1) % n);
         let n1 = vtx_normal(i, j);
-        let mat = mat_at((p0 + p1) * 0.5);
+        let mat = mat_at(p0, p1);
         let wn0 = Vec3::new(n0.x as f32, 0.0, n0.y as f32);
         let wn1 = Vec3::new(n1.x as f32, 0.0, n1.y as f32);
         let a = mesh.add_vertex(board_to_world(p0, y_top, center), wn0);
@@ -303,7 +360,7 @@ pub fn extrude_region(region: &Paths, y_face: f64, y_base: f64, face_up: bool, f
     }
     let (hi, lo) = (y_face.max(y_base), y_face.min(y_base));
     for r in all_rings(&rings) {
-        build_walls(r, hi, lo, center, &|_| wall_mat, mesh);
+        build_walls(r, hi, lo, center, &|_, _| wall_mat, mesh);
     }
 }
 
@@ -321,7 +378,7 @@ pub fn build_board_geometry(board: &Board, opts: &BoardBuildOptions) -> BoardGeo
 
     if geo.region.is_empty() {
         // 外形が無い場合はパッド・配線の範囲から仮の外形を作る
-        let mut b = Bounds2::default();
+        let mut b = Box2::default();
         for p in &board.pads {
             b.add(p.pos);
         }
@@ -330,7 +387,7 @@ pub fn build_board_geometry(board: &Board, opts: &BoardBuildOptions) -> BoardGeo
             b.add(t.end);
         }
         if !b.valid() {
-            b = Bounds2 { lo: Vec2::splat(-10.0), hi: Vec2::splat(10.0) };
+            b = Box2 { lo: Vec2::splat(-10.0), hi: Vec2::splat(10.0) };
         }
         b.lo -= Vec2::splat(2.0);
         b.hi += Vec2::splat(2.0);
@@ -346,24 +403,23 @@ pub fn build_board_geometry(board: &Board, opts: &BoardBuildOptions) -> BoardGeo
     geo.center = geo.bounds.center();
 
     // 穴
-    let mut holes = Paths::new(Vec::new());
-    let mut plated: Vec<PlatedHole> = Vec::new();
+    let mut holes = Holes::default();
     for p in &board.pads {
         if !p.drill.present || !matches!(p.kind, PadType::ThruHole | PadType::NpThruHole) {
             continue;
         }
         let c = p.pos + rotate_point(p.drill.offset, p.angle_deg);
-        add_hole(c, p.angle_deg, p.drill.size, p.drill.oval, p.kind == PadType::ThruHole, &mut holes, &mut plated);
+        holes.add(c, p.angle_deg, p.drill.size, p.drill.oval, p.kind == PadType::ThruHole);
         geo.hole_count += 1;
     }
     for v in &board.vias {
         if v.drill <= 0.0 {
             continue;
         }
-        add_hole(v.pos, 0.0, Vec2::splat(v.drill), false, true, &mut holes, &mut plated);
+        holes.add(v.pos, 0.0, Vec2::splat(v.drill), false, true);
         geo.hole_count += 1;
     }
-    geo.body = subtract(&geo.region, &unite(&holes, FillRule::NonZero));
+    geo.body = subtract(&geo.region, &unite(&holes.paths, FillRule::NonZero));
     let rings = nest_rings(&geo.body);
 
     let (y_top, y_bot) = (geo.core_half, -geo.core_half);
@@ -375,16 +431,8 @@ pub fn build_board_geometry(board: &Board, opts: &BoardBuildOptions) -> BoardGeo
             &mut geo.mesh,
         );
     }
-    let wall_mat = |mid: Vec2| -> u32 {
-        for h in &plated {
-            if (dist_to_segment(mid, h.a, h.b) - h.r).abs() < 0.02 {
-                return BoardMat::Plated as u32;
-            }
-        }
-        BoardMat::Edge as u32
-    };
     for r in all_rings(&rings) {
-        build_walls(r, y_top, y_bot, geo.center, &wall_mat, &mut geo.mesh);
+        build_walls(r, y_top, y_bot, geo.center, &|p0, p1| holes.wall_mat(p0, p1), &mut geo.mesh);
     }
 
     krbr_core::info!(
@@ -444,5 +492,107 @@ mod tests {
         let b = geo.mesh.bounds();
         assert!((b.lo.x + 10.0).abs() < 1e-4 && (b.hi.x - 10.0).abs() < 1e-4);
         assert!((b.hi.y - 0.8).abs() < 1e-5);
+    }
+
+    fn hole_pad(pos: Vec2, angle_deg: f64, drill: Vec2, oval: bool, kind: PadType) -> Pad {
+        Pad {
+            number: "1".into(),
+            kind,
+            shape: PadShape::Circle,
+            pos,
+            angle_deg,
+            size: drill + Vec2::splat(0.5),
+            rect_delta: Vec2::ZERO,
+            round_ratio: 0.0,
+            chamfer_ratio: 0.0,
+            chamfer_corners: 0,
+            drill: Drill { present: true, oval, size: drill, offset: Vec2::ZERO },
+            layers: vec!["*.Cu".into()],
+            mask_margin: None,
+            custom_anchor: PadShape::Circle,
+            primitives: Vec::new(),
+            footprint: None,
+        }
+    }
+
+    /// 穴の種類が混ざった基板：円・長円のメッキ穴、メッキなし穴、外形にかかる穴、ビアの格子、ビアのすぐ近くのメッキなし穴
+    fn mixed_holes_board() -> Board {
+        let mut board = Board::default();
+        let c = [Vec2::new(0.0, 0.0), Vec2::new(30.0, 0.0), Vec2::new(30.0, 20.0), Vec2::new(0.0, 20.0)];
+        for i in 0..4 {
+            board.graphics.push(line(c[i], c[(i + 1) % 4]));
+        }
+        board.pads.push(hole_pad(Vec2::new(5.0, 5.0), 0.0, Vec2::splat(1.0), false, PadType::ThruHole));
+        board.pads.push(hole_pad(Vec2::new(10.0, 5.0), 30.0, Vec2::new(2.0, 1.0), true, PadType::ThruHole));
+        board.pads.push(hole_pad(Vec2::new(15.0, 5.0), 0.0, Vec2::splat(1.2), false, PadType::NpThruHole));
+        board.pads.push(hole_pad(Vec2::new(0.0, 10.0), 0.0, Vec2::splat(1.0), false, PadType::ThruHole));
+        for i in 0..10 {
+            for j in 0..5 {
+                board.vias.push(krbr_kicad::Via {
+                    pos: Vec2::new(3.0 + 2.0 * i as f64, 10.0 + 1.5 * j as f64),
+                    size: 0.6,
+                    drill: 0.3,
+                    layer_from: "F.Cu".into(),
+                    layer_to: "B.Cu".into(),
+                    tent_front: None,
+                    tent_back: None,
+                });
+            }
+        }
+        // ビア (25, 16)（穴の半径 0.15）から 0.01 mm だけ離れたメッキなし穴
+        board.vias.push(krbr_kicad::Via { pos: Vec2::new(25.0, 16.0), size: 0.6, drill: 0.3, layer_from: "F.Cu".into(), layer_to: "B.Cu".into(), tent_front: None, tent_back: None });
+        board.pads.push(hole_pad(Vec2::new(25.0 + 0.15 + 0.01 + 0.2, 16.0), 0.0, Vec2::splat(0.4), false, PadType::NpThruHole));
+        board
+    }
+
+    /// 側壁の材質の判定を変えても、基板のメッシュの形（頂点・三角形）は変わらない。材質は、穴ごとの正解と合う
+    #[test]
+    fn mixed_holes_walls() {
+        let board = mixed_holes_board();
+        let geo = build_board_geometry(&board, &BoardBuildOptions::default());
+        let m = &geo.mesh;
+        // 判定を作り直す前（全メッキ穴との距離を 0.02 mm の許容差で調べていたとき）と同じ形
+        let psum: f64 = m.positions.iter().map(|p| (p.x as f64) * 1.0 + (p.y as f64) * 3.0 + (p.z as f64) * 7.0).sum();
+        let isum: u64 = m.indices.iter().enumerate().map(|(k, &i)| (k as u64 % 13 + 1) * i as u64).sum();
+        assert_eq!((m.positions.len(), m.triangle_count(), isum), (7158, 4988, 303325092));
+        assert!((psum - 89399.969666).abs() < 1e-3, "{psum}");
+
+        // 側壁の四角形（三角形 2 枚）ごとに、上面の辺の中点が、どの穴の縁にあるかで正解を決める
+        let to_board = |p: Vec3| Vec2::new(p.x as f64 + geo.center.x, p.z as f64 + geo.center.y);
+        let mut plated_walls = 0;
+        let mut checked = 0;
+        for (t, &mat) in m.tri_material.iter().enumerate() {
+            if mat != BoardMat::Plated as u32 && mat != BoardMat::Edge as u32 {
+                continue;
+            }
+            let tri: Vec<Vec3> = (0..3).map(|k| m.positions[m.indices[3 * t + k] as usize]).collect();
+            let top: Vec<Vec2> = tri.iter().filter(|p| p.y > 0.0).map(|&p| to_board(p)).collect();
+            if top.len() != 2 {
+                continue; // 四角形のもう 1 枚（上面の辺を 1 本の頂点しか持たない）
+            }
+            let mid = (top[0] + top[1]) * 0.5;
+            let on = |c: Vec2, r: f64| ((mid - c).length() - r).abs() <= HOLE_EDGE_TOL;
+            // ビアのすぐ近くのメッキなし穴、メッキなしの大きい穴は基材。ビアと外形にかかる穴はメッキ
+            let want_plated = board.vias.iter().any(|v| on(v.pos, v.drill / 2.0)) || on(Vec2::new(5.0, 5.0), 0.5) || on(Vec2::new(0.0, 10.0), 0.5) || (mid - Vec2::new(10.0, 5.0)).length() < 1.01;
+            let want_edge = on(Vec2::new(25.36, 16.0), 0.2) || on(Vec2::new(15.0, 5.0), 0.6) || mid.x.abs() < 1e-6 || (mid.x - 30.0).abs() < 1e-6 || mid.y.abs() < 1e-6 || (mid.y - 20.0).abs() < 1e-6;
+            assert!(want_plated != want_edge, "ambiguous wall at {mid}");
+            assert_eq!(mat == BoardMat::Plated as u32, want_plated, "wall at {mid}");
+            plated_walls += want_plated as usize;
+            checked += 1;
+        }
+        assert!(plated_walls > 0 && checked > plated_walls);
+    }
+
+    #[test]
+    fn hole_vertices_survive_boolean_ops() {
+        // Clipper2 は入力の頂点を整数座標のまま残す（判定の前提）
+        let mut holes = Holes::default();
+        holes.add(Vec2::new(1.0, 1.0), 0.0, Vec2::splat(0.3), false, true);
+        let region = rect_path(Vec2::ZERO, Vec2::splat(2.0));
+        let body = subtract(&region, &unite(&holes.paths, FillRule::NonZero));
+        let ring = nest_rings(&body).remove(0);
+        assert_eq!(ring.holes.len(), 1);
+        assert!(ring.holes[0].iter().all(|&p| holes.vertex_owner.get(&vertex_key(p)) == Some(&0)));
+        assert!(ring.outer.iter().all(|&p| !holes.vertex_owner.contains_key(&vertex_key(p))));
     }
 }
