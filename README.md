@@ -7,9 +7,11 @@
   <img src="docs/images/usbhub_cm2.jpg" width="49%" alt="レンダリングの例：同じ基板に寄った画（薄レンズの被写界深度、金のシルク）">
 </p>
 
-**KRB-Renderer**（KiCad 連携 物理ベース レンダラー）は、KiCad の `.kicad_pcb` を読み込み、HDR 環境光で照らした基板を、Vulkan のレイトレーシング（`VK_KHR_ray_query`）を使った GPU パストレーサーで描画するツールです。
+**KRB-Renderer**（KiCad 連携 物理ベース レンダラー）は、KiCadの`.kicad_pcb`を読み込み、HDR 環境光で照らした基板を、Vulkanのレイトレーシング（`VK_KHR_ray_query`）を使ったGPUパストレーサーで描画するツールです。
 
-コマンド名・設定フォルダ名・環境変数の接頭辞は、短い **`krbr`** のままです（`krbr.exe`、基板の設定ファイル `<基板の名前>.krbr`、`%APPDATA%\krbr\`、`KRBR_CONFIG_DIR` など）。リポジトリ名だけが KRB-Renderer です。
+Kicadの基板の3Dプレビューは素晴らしい機能だが、PCBの編集の邪魔にならないようにか、表示が簡易すぎて気分がアガらないので、GPUのリアルタイムできれいに表示するものが欲しかったので作りました。
+
+----
 
 本体は Rust（`rust/`）です。C++ は、OpenCASCADE を使う STEP 変換器 DLL（`step_dll/`）だけに残しています。以前の C++ 版の本体は、タグ `cpp-final` で見られます。
 
