@@ -104,7 +104,7 @@ pub fn cmd_bench(b: &BenchOptions) -> anyhow::Result<()> {
         rs.spp = b.spp;
         let out = render_offscreen(&ctx, &gpu, &rs).map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
         let ms = out.seconds * 1000.0 / b.spp.max(1) as f64;
-        info!("bench: {name}: {ms:.1} ms/spp ({:.1} s for {} spp)", out.seconds, b.spp);
+        info!("bench: {name}: {} spp/s ({ms:.1} ms/spp, {:.1} s for {} spp)", fmt_rate(spp_per_second(ms)), out.seconds, b.spp);
         results.push((name, ms, out.seconds));
     }
 
@@ -124,15 +124,34 @@ pub fn cmd_bench(b: &BenchOptions) -> anyhow::Result<()> {
     println!();
     println!("{} ({}, driver {})", ctx.info.name, method, driver);
     println!("{}: {}x{}, {} spp per case, max depth {}", board_name, b.width, b.height, b.spp, cfg.max_depth);
-    println!("{:<12} {:>12} {:>10}   {}", "case", "ms/spp", "seconds", "vs. previous GPU");
+    println!("{:<12} {:>12} {:>10}   {}", "case", "spp/s", "seconds", "vs. previous GPU");
     for (name, ms, secs) in &results {
         // 同じ基板・同じ条件で、別の GPU の最後の記録
         let prev = previous.iter().rev().find(|r| r.board_hash == board_hash && r.conditions == conditions && r.case == *name && r.gpu != ctx.info.name);
-        let cmp = prev.map(|r| format!("{:.2}x faster than {} ({:.1} ms/spp)", r.ms_per_spp / ms, r.gpu, r.ms_per_spp)).unwrap_or_default();
-        println!("{:<12} {:>12.1} {:>10.1}   {}", name, ms, secs, cmp);
+        let cmp = prev.map(|r| format!("{:.2}x faster than {} ({} spp/s)", r.ms_per_spp / ms, r.gpu, fmt_rate(spp_per_second(r.ms_per_spp)))).unwrap_or_default();
+        println!("{:<12} {:>12} {:>10.1}   {}", name, fmt_rate(spp_per_second(*ms)), secs, cmp);
     }
     println!("recorded in {}", file.display());
     Ok(())
+}
+
+/// 1 秒あたりのサンプル数（表示用。大きいほど速い。CSV には互換のため 1 サンプルあたりの ms のまま残す）
+fn spp_per_second(ms_per_spp: f64) -> f64 {
+    if ms_per_spp > 0.0 {
+        1000.0 / ms_per_spp
+    } else {
+        0.0
+    }
+}
+
+/// 有効数字 3 桁ほどで（遅い GPU・大きな解像度で 1 未満になっても 0.0 と出さない）
+fn fmt_rate(v: f64) -> String {
+    match v {
+        v if v >= 100.0 => format!("{v:.0}"),
+        v if v >= 10.0 => format!("{v:.1}"),
+        v if v >= 1.0 => format!("{v:.2}"),
+        _ => format!("{v:.3}"),
+    }
 }
 
 /// ドライバの版（NVIDIA は 10 ビット・8 ビット・8 ビット・6 ビット、ほかは Vulkan と同じ並び）
@@ -265,5 +284,9 @@ mod tests {
         assert!(d.starts_with("20") && d.ends_with('Z'));
         // NVIDIA 581.57 = (581 << 22) | (57 << 14)
         assert_eq!(driver_string("NVIDIA GeForce GTX 1060", (581 << 22) | (57 << 14)), "581.57");
+        assert_eq!(fmt_rate(spp_per_second(12.5)), "80.0");
+        assert_eq!(fmt_rate(spp_per_second(686.116)), "1.46");
+        assert_eq!(fmt_rate(spp_per_second(2.0)), "500");
+        assert_eq!(fmt_rate(spp_per_second(4000.0)), "0.250");
     }
 }
