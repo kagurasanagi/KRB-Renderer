@@ -52,7 +52,10 @@ fn basis(elevation_deg: f64, azimuth_deg: f64) -> (DVec3, DVec3, DVec3) {
     let fwd = -to_cam.normalize();
     let mut world_up = DVec3::Y;
     if fwd.dot(world_up).abs() > 0.999 {
-        world_up = DVec3::NEG_Z; // 真上から見る場合
+        // 真上・真下から見る場合：仰角を ±90° に近づけたときの上の向きの極限（方位で回る。真上・方位 0° で -Z、
+        // つまり KiCad の画面と同じ向き。真下・方位 180° では左右が反転した、裏から見た KiCad の向き）
+        let h = DVec3::new(az.sin(), 0.0, az.cos());
+        world_up = if el > 0.0 { -h } else { h };
     }
     let right = fwd.cross(world_up).normalize();
     let up = right.cross(fwd);
@@ -129,6 +132,24 @@ pub fn orbit_camera(target: Vec3, distance: f32, elevation_deg: f64, azimuth_deg
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 真上（方位 0°）は KiCad の画面と同じ向き（x が右、基板の y が下 = ワールドの +Z が下）、真下（方位 180°）は左右が反転。
+    /// ±90° の手前から近づけても向きが跳ばない
+    #[test]
+    fn straight_down_and_up_views() {
+        let close = |a: DVec3, b: DVec3| (a - b).length() < 1e-3;
+        let (fwd, right, up) = basis(90.0, 0.0);
+        assert!(close(fwd, DVec3::NEG_Y) && close(right, DVec3::X) && close(up, DVec3::NEG_Z));
+        let (fwd, right, up) = basis(-90.0, 180.0);
+        assert!(close(fwd, DVec3::Y) && close(right, DVec3::NEG_X) && close(up, DVec3::NEG_Z));
+        for az in [0.0, 30.0, 135.0, 180.0, -60.0] {
+            for el in [90.0, -90.0] {
+                let near = basis(el - 0.01f64.copysign(el), az);
+                let at = basis(el, az);
+                assert!(close(near.1, at.1) && close(near.2, at.2), "el {el} az {az}");
+            }
+        }
+    }
 
     #[test]
     fn frames_all_points() {

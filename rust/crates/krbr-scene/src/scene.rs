@@ -33,6 +33,47 @@ pub struct Instance {
     pub owner: InstanceOwner,
 }
 
+/// インスタンスの種類のビット（表示・非表示の切り替え。GPU の加速構造のインスタンスのマスクと、光線の cull mask に使う）
+pub mod visibility {
+    /// 基板の本体・凹凸のタイル（いつも表示）
+    pub const BOARD: u8 = 1;
+    /// 表面実装の部品
+    pub const SMD: u8 = 2;
+    /// スルーホールの部品
+    pub const THROUGH_HOLE: u8 = 4;
+    /// どちらでもない部品（いつも表示）
+    pub const OTHER: u8 = 8;
+    pub const ALL: u8 = 0xFF;
+}
+
+/// 部品の種類（visibility::SMD / THROUGH_HOLE / OTHER）：フットプリントの属性（smd / through_hole）、
+/// 属性が無ければパッド（スルーホールのパッドがあればスルーホール、表面実装のパッドだけなら表面実装）
+pub fn footprint_class(board: &Board, footprint: usize) -> u8 {
+    let Some(fp) = board.footprints.get(footprint) else { return visibility::OTHER };
+    if fp.through_hole {
+        return visibility::THROUGH_HOLE;
+    }
+    if fp.smd {
+        return visibility::SMD;
+    }
+    let pads = board.pads.iter().filter(|p| p.footprint == Some(footprint));
+    let (mut tht, mut smd) = (false, false);
+    for p in pads {
+        match p.kind {
+            krbr_kicad::PadType::ThruHole => tht = true,
+            krbr_kicad::PadType::Smd => smd = true,
+            _ => {}
+        }
+    }
+    if tht {
+        visibility::THROUGH_HOLE
+    } else if smd {
+        visibility::SMD
+    } else {
+        visibility::OTHER
+    }
+}
+
 /// インスタンスの持ち主
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstanceOwner {
@@ -241,6 +282,28 @@ pub struct Scene {
     pub bounds: Bounds3,
     /// カメラの自動調整に使う点
     pub framing_points: Vec<Vec3>,
+    /// インスタンスごとの種類（visibility のビット。instances と同じ並び。足りなければ BOARD として扱う）
+    pub instance_class: Vec<u8>,
+}
+
+impl Scene {
+    /// インスタンスの種類（visibility のビット）
+    pub fn class_of(&self, instance: usize) -> u8 {
+        self.instance_class.get(instance).copied().unwrap_or(visibility::BOARD)
+    }
+
+    /// 部品の持ち主から instance_class を作り直す（インスタンスを足したり並べ替えたりした後に呼ぶ）
+    pub fn classify_instances(&mut self, board: &Board) {
+        let mut memo: HashMap<u32, u8> = HashMap::new();
+        self.instance_class = self
+            .instances
+            .iter()
+            .map(|i| match i.owner {
+                InstanceOwner::Board => visibility::BOARD,
+                InstanceOwner::Model { footprint, .. } | InstanceOwner::Placeholder { footprint } => *memo.entry(footprint).or_insert_with(|| footprint_class(board, footprint as usize)),
+            })
+            .collect();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -913,6 +976,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
             krbr_core::warn!("not rendered yet: {} used by {} material(s), e.g. {}", what, names.len(), names[0]);
         }
     }
+    s.classify_instances(board);
     krbr_core::debug!("scene: models placed and materials resolved in {:.0} ms", t_models.elapsed().as_secs_f64() * 1000.0);
     krbr_core::info!(
         "scene: {} meshes, {} instances ({} models, {} placeholders), {} materials",
@@ -943,8 +1007,16 @@ pub fn raycast(s: &Scene, origin: Vec3, dir: Vec3) -> Option<f32> {
 
 /// 光線と全三角形の交差（CPU、Möller–Trumbore。ピント合わせ・部品の選択の 1 回ごとに使う程度の速さ）
 pub fn raycast_pick(s: &Scene, origin: Vec3, dir: Vec3) -> Option<Pick> {
+    raycast_pick_visible(s, origin, dir, visibility::ALL)
+}
+
+/// raycast_pick の、種類（visibility のビット）が visible にあるインスタンスだけと交差を求めるもの（隠した部品は選べない）
+pub fn raycast_pick_visible(s: &Scene, origin: Vec3, dir: Vec3, visible: u8) -> Option<Pick> {
     let mut best: Option<Pick> = None;
     for (ii, i) in s.instances.iter().enumerate() {
+        if s.class_of(ii) & visible == 0 {
+            continue;
+        }
         // オブジェクト座標で交差を求める（t は変換しても同じ値になる）
         let inv = i.xform.inverse();
         let o = inv.transform_point3(origin);

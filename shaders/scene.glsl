@@ -21,6 +21,10 @@ struct RawHit {
     uint instCustom, instId, prim;
 };
 
+// 光線が当たるインスタンスの種類（加速構造のインスタンスのマスクと AND する。隠した部品の種類のビットを落としてある。
+// rust/crates/krbr-scene/src/scene.rs の visibility）
+uint rayCullMask() { return F.counts.z & 0xFFu; }
+
 #ifdef KRBR_RT_PIPELINE
 // ray tracing pipeline：traceRayEXT と最近接ヒット・ミスのシェーダ（rt_hit.rchit / rt_miss.rmiss / rt_shadow.rmiss）
 #include "rt_payload.glsl"
@@ -28,7 +32,7 @@ layout(location = 0) rayPayloadEXT RtHit rtPayload;
 layout(location = 1) rayPayloadEXT uint rtShadowPayload;
 
 bool rawTraceClosest(vec3 origin, vec3 dir, out RawHit r) {
-    traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFF, 0u, 0u, 0u, origin, 0.0, dir, 1e30, 0);
+    traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, rayCullMask(), 0u, 0u, 0u, origin, 0.0, dir, 1e30, 0);
     if (rtPayload.hit == 0u) return false;
     r.o2w = rtPayload.o2w;
     r.w2o = rtPayload.w2o;
@@ -43,14 +47,14 @@ bool rawTraceClosest(vec3 origin, vec3 dir, out RawHit r) {
 bool rawOccluded(vec3 origin, vec3 dir, float tmax) {
     rtShadowPayload = 1u;  // 影のミスシェーダが 0 にする
     traceRayEXT(tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
-                0xFF, 0u, 0u, 1u, origin, 0.0, dir, tmax, 1);
+                rayCullMask(), 0u, 0u, 1u, origin, 0.0, dir, tmax, 1);
     return rtShadowPayload != 0u;
 }
 #else
 // ray query：計算シェーダの中で辿る
 bool rawTraceClosest(vec3 origin, vec3 dir, out RawHit r) {
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT, 0xFF, origin, 0.0, dir, 1e30);
+    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT, rayCullMask(), origin, 0.0, dir, 1e30);
     while (rayQueryProceedEXT(rq)) {
     }
     if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) return false;
@@ -66,7 +70,7 @@ bool rawTraceClosest(vec3 origin, vec3 dir, out RawHit r) {
 
 bool rawOccluded(vec3 origin, vec3 dir, float tmax) {
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, origin, 0.0, dir,
+    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, rayCullMask(), origin, 0.0, dir,
                           tmax);
     while (rayQueryProceedEXT(rq)) {
     }

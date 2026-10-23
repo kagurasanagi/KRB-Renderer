@@ -309,6 +309,12 @@ struct ViewArgs {
     /// development: open this board from the File menu during the test
     #[arg(long)]
     test_open: Option<PathBuf>,
+    /// development: press "Top" or "Bottom" in the toolbar during the test (top | bottom)
+    #[arg(long, default_value = "")]
+    test_view: String,
+    /// development: hide these kinds of parts with the toolbar during the test (smd, tht or smd,tht)
+    #[arg(long, default_value = "")]
+    test_hide: String,
     /// rendering size: WxH (the window is resized so that the 3D view is that size / ratio) or "fit" (follow the window); default: last used
     #[arg(long, value_parser = parse_render_size)]
     render_size: Option<RenderSize>,
@@ -647,6 +653,8 @@ fn main() {
                     material_editor: args.test_material_editor,
                     select: args.test_select.clone(),
                     open: args.test_open.clone(),
+                    view: args.test_view.clone(),
+                    hide: args.test_hide.clone(),
                 },
             };
             krbr_app::run_viewer(vo).map(|rc| {

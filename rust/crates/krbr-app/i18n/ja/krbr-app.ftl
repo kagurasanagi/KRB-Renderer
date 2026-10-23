@@ -22,6 +22,10 @@ menu-quit = 終了
 menu-view = 表示
 menu-settings-panel = 設定パネル
 menu-pause = レンダリングを一時停止
+menu-top-view = 真上から見る
+menu-bottom-view = 真裏から見る
+menu-show-smd = 表面実装の部品を表示
+menu-show-tht = スルーホールの部品を表示
 menu-render-size = 描画のサイズ
 menu-render-ratio = レンダリングの比率
 menu-reset-view = 視点を戻す
@@ -51,13 +55,23 @@ key-display-mode = 画像 / アルベド / 法線
 key-quit = 終了
 
 ## ツールバー
-toolbar-done = ✔ 完了
+toolbar-done = 完了
 toolbar-done-tip = 最大 spp に達したので、描き終えて止まっている。続けて描くなら、設定パネルで最大 spp を上げる
-toolbar-resume = ▶ 再開
-toolbar-pause = ■ 一時停止
+toolbar-resume = 再開
+toolbar-pause = 一時停止
 toolbar-pause-tip =
     レンダリングを一時停止する（P）。サンプルを積み足さないので GPU の負荷がほぼ無くなり、操作が軽くなる。
     カメラを動かしたときは 1 サンプルだけ描いて止まる
+toolbar-top = 真上から
+toolbar-top-tip = 真上から、基板全体が入る構図で見る（KiCad の画面と同じ向き）
+toolbar-bottom = 真裏から
+toolbar-bottom-tip = 真裏から、基板全体が入る構図で見る（KiCad で裏から見たときと同じく、左右が反転した向き）
+toolbar-smd = 表面実装
+toolbar-smd-tip = 表面実装の部品を表示する・隠す（フットプリントの属性。無ければパッドで決める）
+toolbar-tht = スルーホール
+toolbar-tht-tip = スルーホールの部品を表示する・隠す（フットプリントの属性。無ければパッドで決める）
+toolbar-denoise = ノイズ除去
+toolbar-denoise-tip = ノイズ除去（OIDN）した画像を表示する（設定パネルの「ノイズ除去 (OIDN)」と同じ）
 
 ## ステータスバー
 status-paused = 一時停止中

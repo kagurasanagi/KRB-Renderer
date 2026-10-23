@@ -60,8 +60,15 @@ pub struct GpuScene<'a> {
     pub conductors: Buffer,
     pub emitters: Buffer,
     pub emitter_cdf: Buffer,
+    /// 発光体の表の三角形の数（隠した部品のものも含む。シェーダは CDF をこの数で二分探索する）
     pub emitter_count: u32,
+    /// 見えている発光体の Σ(輝度 × 面積)。0 なら発光体を選ばない
     pub emitter_power: f32,
+    /// 見せるインスタンスの種類（krbr_scene::visibility のビット）。光線の cull mask になる
+    pub visible_mask: u8,
+    /// 発光体の表の三角形ごとの、輝度 × 面積とインスタンスの種類（見せる種類を変えたときに CDF を作り直す）
+    emitter_weights: Vec<f64>,
+    emitter_classes: Vec<u8>,
     pub env_average_luminance: f32,
     pub scene_center: Vec3,
     pub scene_radius: f32,
@@ -110,6 +117,9 @@ impl<'a> GpuScene<'a> {
             emitter_cdf: Buffer::default(),
             emitter_count: 0,
             emitter_power: 0.0,
+            visible_mask: krbr_scene::visibility::ALL,
+            emitter_weights: Vec::new(),
+            emitter_classes: Vec::new(),
             env_average_luminance: 0.0,
             scene_center: Vec3::ZERO,
             scene_radius: 1.0,
@@ -288,7 +298,7 @@ impl<'a> GpuScene<'a> {
         // ---- TLAS（配置ごと）
         let mut inst: Vec<vk::AccelerationStructureInstanceKHR> = Vec::new();
         let mut inst_info: Vec<GpuInstanceInfo> = Vec::new();
-        for i in &sc.instances {
+        for (k, i) in sc.instances.iter().enumerate() {
             let w2o = Mat3::from_mat4(i.xform).inverse();
             let mut ii = GpuInstanceInfo { mesh: i.mesh, material_base: i.material_base, ..Default::default() };
             for c in 0..3 {
@@ -304,7 +314,8 @@ impl<'a> GpuScene<'a> {
             let addr = unsafe { ctx.as_device.get_acceleration_structure_device_address(&vk::AccelerationStructureDeviceAddressInfoKHR::default().acceleration_structure(self.blas[i.mesh as usize])) };
             inst.push(vk::AccelerationStructureInstanceKHR {
                 transform: vk::TransformMatrixKHR { matrix },
-                instance_custom_index_and_mask: vk::Packed24_8::new((inst_info.len() - 1) as u32, 0xFF),
+                // マスクはインスタンスの種類（visibility のビット）。シェーダは見せる種類を cull mask にして光線を飛ばす
+                instance_custom_index_and_mask: vk::Packed24_8::new((inst_info.len() - 1) as u32, sc.class_of(k)),
                 instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0, vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8),
                 acceleration_structure_reference: vk::AccelerationStructureReferenceKHR { device_handle: addr },
             });
@@ -366,12 +377,11 @@ impl<'a> GpuScene<'a> {
     fn build_emitters(&mut self, sc: &Scene) -> Result<(), String> {
         let (mut lo, mut hi) = (Vec3::splat(1e30), Vec3::splat(-1e30));
         let mut em: Vec<GpuEmitter> = Vec::new();
-        let mut cdf: Vec<f32> = vec![0.0];
-        let mut power = 0.0f64;
+        let (mut weights, mut classes) = (Vec::new(), Vec::new());
         // 発光体を選ぶ確率は 輝度 × 面積 に比例させる。シェーダの emitterPdfA は材質の発光から同じ式（emission_radiance と
         // 輝度の重み LUMINANCE_WEIGHTS）で求めるので、ここと食い違わない
         let emissions: Vec<Vec3> = sc.materials.iter().map(emission_radiance).collect();
-        for i in &sc.instances {
+        for (k, i) in sc.instances.iter().enumerate() {
             let m = &sc.meshes[i.mesh as usize].mesh;
             for p in &m.positions {
                 let w = i.xform.transform_point3(*p);
@@ -391,22 +401,22 @@ impl<'a> GpuScene<'a> {
                     continue;
                 }
                 em.push(GpuEmitter { p0: v[0].extend(f32::from_bits(mat)), p1: v[1].extend(area), p2: v[2].extend(0.0) });
-                power += y as f64 * area as f64;
-                cdf.push(power as f32);
+                weights.push(y as f64 * area as f64);
+                classes.push(sc.class_of(k));
             }
         }
         if lo.x > hi.x {
             lo = Vec3::ZERO;
             hi = Vec3::ZERO;
         }
+        // シーンの大きさは、隠した部品も含めて求める（見せる種類を変えても、環境光の扱いや VCM の半径が変わらないように）
         self.scene_center = 0.5 * (lo + hi);
         self.scene_radius = (0.5 * (hi - lo).length()).max(1.0);
         self.emitter_count = em.len() as u32;
-        self.emitter_power = power as f32;
         self.emissions = emissions;
-        for c in &mut cdf {
-            *c = if power > 0.0 { (*c as f64 / power) as f32 } else { 0.0 };
-        }
+        self.emitter_weights = weights;
+        self.emitter_classes = classes;
+        let mut cdf = self.emitter_cdf_values();
         if em.is_empty() {
             em.push(GpuEmitter::default());
             cdf.push(1.0);
@@ -417,6 +427,38 @@ impl<'a> GpuScene<'a> {
             krbr_core::info!("GPU scene: {} emissive triangles", self.emitter_count);
         }
         Ok(())
+    }
+
+    /// 見せる種類の発光体だけを選ぶ CDF（隠した部品の三角形は幅 0）。emitter_power もここで決める。長さは三角形の数 + 1
+    fn emitter_cdf_values(&mut self) -> Vec<f32> {
+        let mut power = 0.0f64;
+        let mut cdf: Vec<f64> = Vec::with_capacity(self.emitter_weights.len() + 1);
+        cdf.push(0.0);
+        for (w, c) in self.emitter_weights.iter().zip(&self.emitter_classes) {
+            if c & self.visible_mask != 0 {
+                power += w;
+            }
+            cdf.push(power);
+        }
+        self.emitter_power = power as f32;
+        cdf.into_iter().map(|c| if power > 0.0 { (c / power) as f32 } else { 0.0 }).collect()
+    }
+
+    /// 見せるインスタンスの種類を変える（GPU が待機中に呼ぶこと）。形状は作り直さない：光線は cull mask で隠した部品を通り抜け、
+    /// 発光体の表は今のバッファのまま、隠した部品の三角形を選ばない CDF を送り直す
+    pub fn set_visible_mask(&mut self, mask: u8) -> Result<(), String> {
+        if mask == self.visible_mask {
+            return Ok(());
+        }
+        self.visible_mask = mask;
+        if self.emitter_weights.is_empty() {
+            return Ok(());
+        }
+        let cdf = self.emitter_cdf_values();
+        let mut buf = std::mem::take(&mut self.emitter_cdf);
+        let r = self.ctx.upload(&mut buf, as_bytes(&cdf), 0);
+        self.emitter_cdf = buf;
+        r
     }
 
     /// 基板テクスチャ（レジストの厚みの距離場）を送る。大きさが同じ距離場なら、作り直したタイルの範囲だけを送る

@@ -22,6 +22,10 @@ menu-quit = Quit
 menu-view = View
 menu-settings-panel = Settings panel
 menu-pause = Pause rendering
+menu-top-view = View from the top
+menu-bottom-view = View from the bottom
+menu-show-smd = Show surface-mount parts
+menu-show-tht = Show through-hole parts
 menu-render-size = Rendering size
 menu-render-ratio = Rendering ratio
 menu-reset-view = Reset view
@@ -51,13 +55,23 @@ key-display-mode = image / albedo / normal
 key-quit = quit
 
 ## Toolbar
-toolbar-done = ✔ Done
+toolbar-done = Done
 toolbar-done-tip = The maximum spp is reached, so rendering has finished and stopped. To keep going, raise the maximum spp in the settings panel
-toolbar-resume = ▶ Resume
-toolbar-pause = ■ Pause
+toolbar-resume = Resume
+toolbar-pause = Pause
 toolbar-pause-tip =
     Pause rendering (P). No samples are added, so the GPU is almost idle and the controls feel lighter.
     When the camera moves, one sample is rendered and then it stops again
+toolbar-top = Top
+toolbar-top-tip = View from straight above, framing the whole board (oriented as in KiCad)
+toolbar-bottom = Bottom
+toolbar-bottom-tip = View from straight below, framing the whole board (mirrored left to right, as KiCad shows the back)
+toolbar-smd = SMD
+toolbar-smd-tip = Show or hide the surface-mount parts (the footprint attribute, or the pads if it has none)
+toolbar-tht = Through-hole
+toolbar-tht-tip = Show or hide the through-hole parts (the footprint attribute, or the pads if it has none)
+toolbar-denoise = Denoise
+toolbar-denoise-tip = Show the denoised (OIDN) image (the same as "Denoise (OIDN)" in the settings panel)
 
 ## Status bar
 status-paused = Paused

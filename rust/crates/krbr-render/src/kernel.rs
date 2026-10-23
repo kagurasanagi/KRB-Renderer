@@ -80,7 +80,8 @@ pub fn make_frame_ubo(sc: &GpuScene, width: u32, height: u32, fp: &FrameParams, 
         board_map: sc.board_map,
         env_params: Vec4::new(fp.env_intensity, fp.env_rotation_rad, fp.radiance_clamp, 0.0),
         dims: UVec4::new(width, height, sc.env_dist_w, sc.env_dist_h),
-        counts: UVec4::new(fp.max_depth, fp.rr_start_depth, 0, 0),
+        // z: 光線の cull mask（見せるインスタンスの種類）
+        counts: UVec4::new(fp.max_depth, fp.rr_start_depth, sc.visible_mask as u32, 0),
         mask_params: sc.mask_params,
         mask_params2: sc.mask_params2,
         spectral: Vec4::new(if fp.spectral { 1.0 } else { 0.0 }, 1.0 / spectrum::cmf_y_integral(), 0.0, 0.0),
@@ -95,11 +96,13 @@ pub fn make_frame_ubo(sc: &GpuScene, width: u32, height: u32, fp: &FrameParams, 
     let r = sc.scene_radius as f64;
     let env_power = pi * pi * r * r * sc.env_average_luminance as f64 * fp.env_intensity as f64;
     let tri_power = pi * sc.emitter_power as f64;
+    // 見えている発光体が無ければ（発光体が無い、または全部を隠した）、発光体を選ばない（数を 0 として渡す）
+    let emitters = if sc.emitter_power > 0.0 { sc.emitter_count } else { 0 };
     let mut p_env = 1.0f32;
-    if sc.emitter_count > 0 {
+    if emitters > 0 {
         p_env = if env_power > 0.0 { (env_power / (env_power + tri_power)).clamp(0.1, 0.9) as f32 } else { 0.0 };
     }
-    u.light_params = Vec4::new(p_env, sc.emitter_power, sc.scene_radius, sc.emitter_count as f32);
+    u.light_params = Vec4::new(p_env, sc.emitter_power, sc.scene_radius, emitters as f32);
     u.scene_center = sc.scene_center.extend(0.0);
     let radius = if fp.vcm_radius > 0.0 { fp.vcm_radius } else { 0.003 * sc.scene_radius };
     u.vcm_params = Vec4::new(radius, fp.vcm_alpha, width as f32 * height as f32, if merging { 1.0 } else { 0.0 });

@@ -18,7 +18,7 @@ use krbr_render::vk::{image_barrier, memory_barrier, Buffer};
 use krbr_render::studio_env::STUDIO;
 use krbr_render::{build_env_distribution, describe_environment, is_builtin, load_environment_map, Context, ContextOptions, DenoiseQuality, Denoiser, EnvDistribution, EnvironmentName, GpuScene, Progressive};
 use krbr_scene::config::apply_mask_color_spec;
-use krbr_scene::scene::{load_material_setup, raycast, raycast_pick, update_mask_material, update_substrate_material, MaterialAssignment};
+use krbr_scene::scene::{load_material_setup, raycast_pick_visible, update_mask_material, update_substrate_material, visibility, MaterialAssignment};
 use krbr_scene::{mask_presets, orbit_camera, Camera, InstanceOwner, IntegratorKind, LensModel, MaterialLibrary, MaterialStage, Scene, SceneOptions};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::application::ApplicationHandler;
@@ -86,6 +86,10 @@ pub struct TestOptions {
     pub select: String,
     /// テスト中に「ファイル → 開く...」でこの基板を選んだことにする
     pub open: Option<PathBuf>,
+    /// テスト中にボタン列の「真上から」（"top"）・「真裏から」（"bottom"）を押したことにする
+    pub view: String,
+    /// テスト中にボタン列で隠す部品の種類（"smd" / "tht" / "smd,tht"）
+    pub hide: String,
 }
 
 /// テストのパネルの操作（レジストの色・すべて既定に戻す）をするフレーム（0 から数える）。
@@ -126,6 +130,19 @@ impl TestHooks {
             }
             st.req.reset_all |= self.o.reset_settings;
             st.req.material_editor |= self.o.material_editor;
+            match self.o.view.as_str() {
+                "top" => st.req.view_preset = Some(TOP_VIEW),
+                "bottom" => st.req.view_preset = Some(BOTTOM_VIEW),
+                _ => {}
+            }
+            for kind in self.o.hide.split(',').map(str::trim) {
+                match kind {
+                    "smd" => st.show_smd = false,
+                    "tht" => st.show_tht = false,
+                    _ => continue,
+                }
+                st.changed.visibility = true;
+            }
         }
         if let Some(p) = self.o.open.clone().filter(|_| !self.open_done && frame >= TEST_SCENE_FRAME) {
             self.open_done = true;
@@ -316,6 +333,8 @@ struct Requests {
     reveal_settings: bool,
     /// 視点を戻す（R）
     reset_view: bool,
+    /// ボタン列・メニュー：この仰角・方位（度）にして、基板全体が入る構図にする（真上から・真裏から）
+    view_preset: Option<(f64, f64)>,
     /// 「すべて既定に戻す」の後：視点を戻した後で、覚える値の基準を今の値に取り直す（戻した値は覚えない）
     rebase_view: bool,
     auto_exposure: bool,
@@ -358,6 +377,8 @@ struct Changes {
     /// パネルでレジストの色を選び直した
     mask: bool,
     integrator: bool,
+    /// 部品の表示・非表示（表面実装・スルーホール）を変えた
+    visibility: bool,
 }
 
 /// 入力・操作パネルで変わる表示の状態
@@ -384,6 +405,9 @@ struct ViewState {
     mask_choice: Option<usize>,
     /// レンダリングを一時停止する（サンプルを積み足さない。GPU の弱い PC で操作を軽くする）
     paused: bool,
+    /// 表面実装の部品・スルーホールの部品を表示する（どちらでもない部品と基板はいつも表示）
+    show_smd: bool,
+    show_tht: bool,
     spectral: bool,
     rotating: bool,
     panning: bool,
@@ -412,12 +436,26 @@ impl ViewState {
     fn glow_params(&self) -> GlowParams {
         GlowParams { strength: self.glow, threshold: self.glow_threshold, spread: self.glow_spread }
     }
+
+    /// 見せるインスタンスの種類（krbr_scene::visibility のビット）
+    fn visible_mask(&self) -> u8 {
+        let mut m = visibility::ALL;
+        if !self.show_smd {
+            m &= !visibility::SMD;
+        }
+        if !self.show_tht {
+            m &= !visibility::THROUGH_HOLE;
+        }
+        m
+    }
 }
 
 /// ビューアだけの設定（パネルの表示の欄など）の初めの値：コマンドライン、覚えた値、既定の順に決める。
 /// 起動時は覚えた値で、「すべて既定に戻す」では空の値で作る（どちらも同じ決め方になる）
 struct ViewerSettings {
     max_spp: u32,
+    show_smd: bool,
+    show_tht: bool,
     denoise: bool,
     denoise_strength: f32,
     mode: DisplayMode,
@@ -427,6 +465,11 @@ struct ViewerSettings {
 
 /// 最大のサンプル数の既定値
 const DEFAULT_MAX_SPP: u32 = 4096;
+
+/// 「真上から」「真裏から」の仰角・方位（度）。真上・方位 0° は KiCad の画面と同じ向き、真下・方位 180° は左右が反転した、
+/// KiCad で裏から見た向き（krbr-scene の camera.rs の basis）。その後ドラッグしても向きが跳ばない
+const TOP_VIEW: (f64, f64) = (90.0, 0.0);
+const BOTTOM_VIEW: (f64, f64) = (-90.0, 180.0);
 
 impl ViewerSettings {
     fn new(vo: &ViewOptions, remembered: &remember::ViewValues) -> Self {
@@ -438,6 +481,8 @@ impl ViewerSettings {
         };
         Self {
             max_spp: pow2_spp(vo.common.spp.or(r.max_spp).unwrap_or(DEFAULT_MAX_SPP)),
+            show_smd: r.show_smd.unwrap_or(true),
+            show_tht: r.show_tht.unwrap_or(true),
             denoise: vo.common.denoise.or(r.denoise).unwrap_or(false),
             denoise_strength: vo.common.denoise_strength.or(r.denoise_strength).unwrap_or(1.0),
             mode: r.display_mode.as_deref().map(display_mode_of).unwrap_or(DisplayMode::Beauty),
@@ -448,6 +493,9 @@ impl ViewerSettings {
 
     fn apply(&self, st: &mut ViewState) {
         st.max_spp = self.max_spp;
+        st.show_smd = self.show_smd;
+        st.show_tht = self.show_tht;
+        st.changed.visibility = true;
         st.denoise = self.denoise;
         st.denoise_strength = self.denoise_strength;
         st.mode = self.mode;
@@ -963,7 +1011,16 @@ impl App {
         c.render_size = st.size_mode;
         let mut v = c.values();
         remember::set_camera(&mut v, st.target, st.distance);
-        remember::ViewerValues { denoise: Some(st.denoise), denoise_strength: Some(st.denoise_strength), max_spp: Some(st.max_spp), display_mode: Some(display_mode_name(st.mode).into()), render_ratio: Some(st.render_ratio) }.write(&mut v);
+        remember::ViewerValues {
+            denoise: Some(st.denoise),
+            denoise_strength: Some(st.denoise_strength),
+            max_spp: Some(st.max_spp),
+            display_mode: Some(display_mode_name(st.mode).into()),
+            render_ratio: Some(st.render_ratio),
+            show_smd: Some(st.show_smd),
+            show_tht: Some(st.show_tht),
+        }
+        .write(&mut v);
         v
     }
 
@@ -1155,6 +1212,22 @@ impl App {
         self.st.elevation = cfg.elevation_deg;
         self.st.azimuth = cfg.azimuth_deg;
         self.st.fov = cfg.fov_deg;
+        self.st.tan_half_fov_y = c.tan_half_fov_y;
+        self.st.changed.frame = true;
+    }
+
+    /// 仰角・方位を決めて、基板全体が入る構図にする（ボタン列の「真上から」「真裏から」。画角は今のまま）
+    fn preset_camera(&mut self, elevation: f64, azimuth: f64, w: u32, h: u32) {
+        let mut cfg = self.prep.configured.clone();
+        cfg.elevation_deg = elevation;
+        cfg.azimuth_deg = azimuth;
+        cfg.fov_deg = self.st.fov;
+        // コマンドラインの注視点・拡大率は使わない（基板全体を入れる）
+        let c = framed_camera(&cfg, &self.prep, &RenderOptions::default(), w, h);
+        self.st.target = c.target;
+        self.st.distance = c.distance;
+        self.st.elevation = elevation;
+        self.st.azimuth = azimuth;
         self.st.tan_half_fov_y = c.tan_half_fov_y;
         self.st.changed.frame = true;
     }
@@ -1578,7 +1651,7 @@ impl App {
         self.flush_emit_edit(true);
         self.emit_edit = None;
         let (c, dir) = self.view_ray(p);
-        let hit = raycast_pick(&self.prep.scene, c.position, dir);
+        let hit = raycast_pick_visible(&self.prep.scene, c.position, dir, self.st.visible_mask());
         self.selected = hit.and_then(|h| Selected::from_instance(&self.prep.scene, &self.prep.board, h.instance));
         self.material_error.clear();
         self.refresh_outline();
@@ -1591,7 +1664,7 @@ impl App {
     /// Ctrl + クリック：画面の点（物理ピクセル）にある面にピントを合わせる（ピンホールなら薄レンズにする）
     fn focus_at(&mut self, p: (f64, f64)) {
         let (c, dir) = self.view_ray(p);
-        if let Some(t) = raycast(&self.prep.scene, c.position, dir) {
+        if let Some(t) = raycast_pick_visible(&self.prep.scene, c.position, dir, self.st.visible_mask()).map(|h| h.t) {
             self.prep.cfg.lens.focus_distance_mm = t * dir.dot(c.forward);
             if self.prep.cfg.lens.model == LensModel::Pinhole {
                 self.prep.cfg.lens.model = LensModel::Thin;
@@ -2259,21 +2332,43 @@ impl App {
     }
 
     /// ウィンドウ上端のメニュー
-    /// メニューの下のボタン列（レンダリングの一時停止）
+    /// メニューの下のボタン列：一時停止、真上から・真裏から、表面実装・スルーホールの部品の表示、ノイズ除去
     fn tool_bar(&mut self, root: &mut egui::Ui) {
+        use crate::toolbar::{button, Icon};
         // 最大 spp に達したら、止めるものが無いので「完了」にして押せなくする（視点などを変えて累積をやり直すと元に戻る）
         let done = self.gpu.as_ref().is_some_and(|g| g.prog.samples() >= self.st.max_spp);
+        let board = self.has_board();
         let st = &mut self.st;
         egui::Panel::top("toolbar").show(root, |ui| {
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
                 if done {
-                    ui.add_enabled(false, egui::Button::new(fl!("toolbar-done"))).on_disabled_hover_text(fl!("toolbar-done-tip"));
-                    return;
+                    button(ui, Icon::Done, &fl!("toolbar-done"), false, false, false).on_hover_text(fl!("toolbar-done-tip"));
+                } else {
+                    let (icon, label) = if st.paused { (Icon::Resume, fl!("toolbar-resume")) } else { (Icon::Pause, fl!("toolbar-pause")) };
+                    if button(ui, icon, &label, st.paused, false, true).on_hover_text(fl!("toolbar-pause-tip")).clicked() {
+                        st.paused = !st.paused;
+                    }
                 }
-                let label = if st.paused { fl!("toolbar-resume") } else { fl!("toolbar-pause") };
-                let tip = fl!("toolbar-pause-tip");
-                if ui.add(egui::Button::new(label).selected(st.paused)).on_hover_text(tip).clicked() {
-                    st.paused = !st.paused;
+                ui.separator();
+                if button(ui, Icon::TopView, &fl!("toolbar-top"), false, false, board).on_hover_text(fl!("toolbar-top-tip")).clicked() {
+                    st.req.view_preset = Some(TOP_VIEW);
+                }
+                if button(ui, Icon::BottomView, &fl!("toolbar-bottom"), false, false, board).on_hover_text(fl!("toolbar-bottom-tip")).clicked() {
+                    st.req.view_preset = Some(BOTTOM_VIEW);
+                }
+                ui.separator();
+                if button(ui, Icon::Smd, &fl!("toolbar-smd"), st.show_smd, !st.show_smd, board).on_hover_text(fl!("toolbar-smd-tip")).clicked() {
+                    st.show_smd = !st.show_smd;
+                    st.changed.visibility = true;
+                }
+                if button(ui, Icon::ThroughHole, &fl!("toolbar-tht"), st.show_tht, !st.show_tht, board).on_hover_text(fl!("toolbar-tht-tip")).clicked() {
+                    st.show_tht = !st.show_tht;
+                    st.changed.visibility = true;
+                }
+                ui.separator();
+                if button(ui, Icon::Denoise, &fl!("toolbar-denoise"), st.denoise, false, true).on_hover_text(fl!("toolbar-denoise-tip")).clicked() {
+                    st.denoise = !st.denoise;
                 }
             });
         });
@@ -2352,6 +2447,7 @@ impl App {
         let language_choice = self.language_choice.clone();
         let editor_open = self.editor.open;
         let mut toggle_editor = false;
+        let board = self.has_board();
         let st = &mut self.st;
         egui::Panel::top("menu").show(root, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -2409,6 +2505,29 @@ impl App {
                     }
                     if ui.add(egui::Button::new(fl!("menu-pause")).selected(st.paused).shortcut_text("P")).clicked() {
                         st.paused = !st.paused;
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new(fl!("denoise")).selected(st.denoise)).clicked() {
+                        st.denoise = !st.denoise;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.add_enabled(board, egui::Button::new(fl!("menu-top-view"))).clicked() {
+                        st.req.view_preset = Some(TOP_VIEW);
+                        ui.close();
+                    }
+                    if ui.add_enabled(board, egui::Button::new(fl!("menu-bottom-view"))).clicked() {
+                        st.req.view_preset = Some(BOTTOM_VIEW);
+                        ui.close();
+                    }
+                    if ui.add_enabled(board, egui::Button::new(fl!("menu-show-smd")).selected(st.show_smd)).clicked() {
+                        st.show_smd = !st.show_smd;
+                        st.changed.visibility = true;
+                        ui.close();
+                    }
+                    if ui.add_enabled(board, egui::Button::new(fl!("menu-show-tht")).selected(st.show_tht)).clicked() {
+                        st.show_tht = !st.show_tht;
+                        st.changed.visibility = true;
                         ui.close();
                     }
                     ui.separator();
@@ -2716,6 +2835,23 @@ impl App {
         if std::mem::take(&mut self.st.changed.mask) {
             self.apply_mask_choice();
         }
+        if std::mem::take(&mut self.st.changed.visibility) {
+            let mask = self.st.visible_mask();
+            let g = self.gpu.as_mut().unwrap();
+            if g.gpu.visible_mask != mask {
+                g.ctx.wait_idle();
+                if let Err(e) = g.gpu.set_visible_mask(mask) {
+                    error!("visibility: {e}");
+                }
+                self.st.changed.frame = true;
+            }
+            // 隠した部品を選んでいたら、選択を外す
+            let hidden = self.selected.as_ref().and_then(|s| s.find_instance(&self.prep.scene, &self.prep.board)).is_some_and(|i| self.prep.scene.class_of(i) & mask == 0);
+            if hidden {
+                self.selected = None;
+                self.refresh_outline();
+            }
+        }
         if std::mem::take(&mut self.st.changed.materials) {
             let g = self.gpu.as_mut().unwrap();
             g.ctx.wait_idle();
@@ -2782,6 +2918,9 @@ impl App {
         }
         if std::mem::take(&mut self.st.req.reset_view) {
             self.reset_camera(self.st.display.w, self.st.display.h);
+        }
+        if let Some((el, az)) = self.st.req.view_preset.take() {
+            self.preset_camera(el, az, self.st.display.w, self.st.display.h);
         }
         if std::mem::take(&mut self.st.req.rebase_view) {
             // 戻した値は覚えない：今の値を基準にする（忘れた状態のまま。次に変えたときから、また覚える）
@@ -3199,7 +3338,7 @@ impl ApplicationHandler for App {
                 }
                 if self.st.rotating {
                     self.st.azimuth -= dx * 0.3;
-                    self.st.elevation = (self.st.elevation + dy * 0.3).clamp(-89.0, 89.0);
+                    self.st.elevation = (self.st.elevation + dy * 0.3).clamp(-90.0, 90.0);
                     self.st.changed.frame = true;
                 } else if self.st.panning {
                     let c = orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, 1.0);
@@ -3296,6 +3435,8 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         show_panel: win.panel_shown,
         mask_choice: mask_choice_of(&cfg.scene),
         paused: vo.paused,
+        show_smd: true,
+        show_tht: true,
         spectral: cfg.spectral,
         rotating: false,
         panning: false,

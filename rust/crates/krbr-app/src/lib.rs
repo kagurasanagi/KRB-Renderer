@@ -12,6 +12,7 @@ pub mod remember;
 pub mod selection;
 pub mod swapchain;
 pub mod swatch_cache;
+pub mod toolbar;
 pub mod viewer;
 pub mod watch;
 

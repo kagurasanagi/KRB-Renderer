@@ -176,6 +176,9 @@ pub struct ViewerValues {
     pub display_mode: Option<String>,
     /// レンダリングの比率
     pub render_ratio: Option<f32>,
+    /// 表面実装・スルーホールの部品を表示するか
+    pub show_smd: Option<bool>,
+    pub show_tht: Option<bool>,
 }
 
 impl ViewerValues {
@@ -184,6 +187,8 @@ impl ViewerValues {
     const MAX_SPP: &'static str = "max_spp";
     const DISPLAY_MODE: &'static str = "display_mode";
     const RENDER_RATIO: &'static str = "render_ratio";
+    const SHOW_SMD: &'static str = "show_smd";
+    const SHOW_THT: &'static str = "show_tht";
 
     /// 覚えた値から読む
     pub fn of(v: &ViewValues) -> Self {
@@ -193,6 +198,8 @@ impl ViewerValues {
             max_spp: v.get(Self::MAX_SPP).and_then(|x| x.as_integer()).and_then(|x| u32::try_from(x).ok()),
             display_mode: v.get(Self::DISPLAY_MODE).and_then(|x| x.as_str()).map(str::to_string),
             render_ratio: v.get(Self::RENDER_RATIO).and_then(|x| x.as_float()).map(|x| x as f32),
+            show_smd: v.get(Self::SHOW_SMD).and_then(|x| x.as_bool()),
+            show_tht: v.get(Self::SHOW_THT).and_then(|x| x.as_bool()),
         }
     }
 
@@ -212,6 +219,11 @@ impl ViewerValues {
         }
         if let Some(r) = self.render_ratio {
             v.insert(Self::RENDER_RATIO.into(), Value::Float(r as f64));
+        }
+        for (key, b) in [(Self::SHOW_SMD, self.show_smd), (Self::SHOW_THT, self.show_tht)] {
+            if let Some(b) = b {
+                v.insert(key.into(), Value::Boolean(b));
+            }
         }
     }
 }
@@ -625,7 +637,7 @@ mod tests {
 
     #[test]
     fn viewer_values_round_trip_and_render_size_limit() {
-        let v = ViewerValues { denoise: Some(true), denoise_strength: Some(0.5), max_spp: Some(256), display_mode: Some("albedo".into()), render_ratio: Some(1.5) };
+        let v = ViewerValues { denoise: Some(true), denoise_strength: Some(0.5), max_spp: Some(256), display_mode: Some("albedo".into()), render_ratio: Some(1.5), show_smd: Some(false), show_tht: Some(true) };
         let mut t = ViewValues::new();
         v.write(&mut t);
         let t: Table = t.to_string().parse().unwrap();
