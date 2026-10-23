@@ -3414,6 +3414,7 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
             ctx.device.destroy_fence(g.fence, None);
             ctx.device.destroy_semaphore(g.acquired, None);
         }
+        app.editor.release_gpu();
         drop(g.egui_renderer);
         drop(g.tone_denoised);
         drop(g.denoiser);

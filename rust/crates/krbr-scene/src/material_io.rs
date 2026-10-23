@@ -89,7 +89,7 @@ pub fn read_color(v: &Value) -> Option<Vec3> {
 }
 
 /// [krbr] の下に書ける項目
-const KRBR_KEYS: &[&str] = &["bump_pattern", "bump_strength", "bump_scale", "roughness_variation", "base_color_from_model", "sellmeier_b", "sellmeier_c", "conductor", "category"];
+const KRBR_KEYS: &[&str] = &["bump_pattern", "bump_strength", "bump_scale", "roughness_variation", "base_color_from_model", "sellmeier_b", "sellmeier_c", "conductor", "category", "swatch_color"];
 
 /// 測定値の金属をやめる（[krbr] conductor に書く名前）
 pub const NO_CONDUCTOR: &str = "none";
@@ -199,6 +199,11 @@ fn read_krbr(k: &toml::Table, m: &mut Material, problems: &mut Vec<String>) {
         Some(_) => wrong("category", "a string"),
         None => {}
     }
+    match k.get("swatch_color").map(read_color) {
+        Some(Some(c)) => m.swatch_color = Some(c),
+        Some(None) => wrong("swatch_color", "[r, g, b] or a number (linear)"),
+        None => {}
+    }
     for key in k.keys() {
         if !KRBR_KEYS.contains(&key.as_str()) {
             problems.push(format!("unknown parameter 'krbr.{key}'"));
@@ -272,6 +277,9 @@ pub fn write_material(m: &Material) -> toml::Table {
     if let Some(c) = m.category {
         k.insert("category".into(), Value::String(c.as_str().into()));
     }
+    if let Some(c) = m.swatch_color {
+        k.insert("swatch_color".into(), color_array(c));
+    }
     if !k.is_empty() {
         t.insert("krbr".into(), Value::Table(k));
     }
@@ -284,7 +292,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let mut m = Material { name: "x".into(), base_color: Vec3::new(0.1, 0.2, 0.3), coat_weight: 1.0, bump_pattern: BumpPattern::Weave, bump_strength: 0.1, bump_scale: 0.4, ..Default::default() };
+        let mut m = Material { name: "x".into(), base_color: Vec3::new(0.1, 0.2, 0.3), coat_weight: 1.0, bump_pattern: BumpPattern::Weave, bump_strength: 0.1, bump_scale: 0.4, swatch_color: Some(Vec3::new(0.5, 0.25, 0.125)), ..Default::default() };
         m.sellmeier = Some(Sellmeier { b: [1.0, 0.2, 1.0], c: [0.006, 0.02, 103.0] });
         let t = write_material(&m);
         let text = toml::to_string(&Value::Table(t.clone())).unwrap();
@@ -297,6 +305,7 @@ mod tests {
         assert_eq!(r.coat_weight, 1.0);
         assert_eq!(r.bump_pattern, BumpPattern::Weave);
         assert_eq!(r.sellmeier, m.sellmeier);
+        assert_eq!(r.swatch_color, m.swatch_color);
         // 未知の項目・型の誤り・知らない模様は報告して読み飛ばす
         let t2: toml::Table = toml::from_str("foo = 1\nbase_metalness = 1\nspecular_roughness = \"0.5\"\n[krbr]\nbump_pattern = \"Noise\"\nbump_sclae = 1").unwrap();
         read_material(&t2, &mut r, &mut problems);

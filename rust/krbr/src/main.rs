@@ -121,6 +121,16 @@ enum MaterialCmd {
         #[arg(long)]
         global: bool,
     },
+    /// development: render the swatches of the built-in materials (RGB and spectral) with many samples and OIDN,
+    /// for embedding in the exe (rebuild afterwards)
+    BakeSwatches {
+        /// samples per swatch
+        #[arg(long, default_value_t = krbr_app::swatch_cache::BAKE_SPP)]
+        spp: u32,
+        /// output folder (default: the source tree's crates/krbr-app/swatches)
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -634,6 +644,10 @@ fn main() {
                 material: material.clone(),
                 global: *global,
             }),
+            MaterialCmd::BakeSwatches { spp, out } => match out.clone().or_else(krbr_app::swatch_cache::default_bake_dir) {
+                Some(out) => krbr_app::swatch_cache::bake_builtin(&out, *spp).map_err(|e| anyhow::anyhow!(e)),
+                None => Err(anyhow::anyhow!("give --out (the source tree's crates/krbr-app/swatches was not found)")),
+            },
         },
         Command::Mask { cmd: MaskCmd::List } => krbr_app::material_cmd::cmd_mask_list(),
         Command::KicadPlugin { cmd: KicadPluginCmd::Install { dir } } => krbr_app::kicad_plugin::cmd_install(dir.as_deref()),

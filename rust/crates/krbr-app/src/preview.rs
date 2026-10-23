@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 use krbr_core::mesh::Mesh;
-use krbr_render::{build_env_distribution, Context, EnvDistribution, FrameParams, GpuScene, ImageF, Progressive};
+use krbr_render::{build_env_distribution, denoiser_available, Context, DenoiseQuality, Denoiser, EnvDistribution, FrameParams, GpuScene, ImageF, Progressive};
 use krbr_scene::camera::Camera;
 use krbr_scene::scene::{Instance, InstanceOwner, Scene, SceneMesh};
 use krbr_scene::{orbit_camera, IntegratorKind, Material};
@@ -24,9 +24,12 @@ impl PreviewLight {
     }
 }
 
-/// 小さなオフスクリーンの描画 1 つ（シーン・累積・積分器）
+/// 小さなオフスクリーンの描画 1 つ（シーン・累積・積分器と、ノイズ除去）
 pub struct Preview {
-    // 積分器は GpuScene を参照するので、先に捨てる（フィールドは宣言の順に捨てられる）
+    // ノイズ除去は累積の画像を、積分器は GpuScene を参照するので、先に捨てる（フィールドは宣言の順に捨てられる）
+    denoiser: Option<Denoiser<'static>>,
+    /// ノイズ除去が使えない（DLL が無い・デバイスが作れない）と分かった
+    no_denoiser: bool,
     prog: Progressive<'static>,
     gpu: Box<GpuScene<'static>>,
     /// 発光が変わったときに形状ごと送り直すための、シーンの写し
@@ -45,7 +48,7 @@ impl Preview {
         // 安全性：Box の中身はムーブされず、prog は gpu より先に捨てる（フィールドの順）
         let gpu_ref: &'static GpuScene<'static> = unsafe { &*(&*gpu as *const GpuScene<'static>) };
         let prog = Progressive::new(ctx, gpu_ref, IntegratorKind::Pt, width, height, preview_frame(camera, spectral))?;
-        Ok(Self { prog, gpu, scene })
+        Ok(Self { denoiser: None, no_denoiser: !denoiser_available(), prog, gpu, scene })
     }
 
     pub fn scene(&self) -> &Scene {
@@ -81,6 +84,11 @@ impl Preview {
         self.prog.samples()
     }
 
+    /// 累積を 0 から
+    pub fn reset(&mut self) {
+        self.prog.reset();
+    }
+
     /// サンプルを count 積んで完了を待つ。GPU が待機中に呼ぶこと
     pub fn add_samples(&mut self, ctx: &Context, count: u32) -> Result<(), String> {
         let prog = &mut self.prog;
@@ -89,10 +97,48 @@ impl Preview {
 
     /// 今の累積を、表示と同じトーンマッピングで egui の画像にする。GPU が待機中に呼ぶこと
     pub fn image(&self, exposure_ev: f32) -> Result<egui::ColorImage, String> {
-        let aov = self.prog.readback()?;
-        let rgba = krbr_render::image_io::tonemap_rgba8(&aov.color, exposure_ev, &krbr_render::glow::GlowParams::OFF);
-        Ok(egui::ColorImage::from_rgba_unmultiplied([aov.color.width as usize, aov.color.height as usize], &rgba))
+        Ok(color_image(&self.prog.readback()?.color, exposure_ev))
     }
+
+    /// 今の累積をノイズ除去（OIDN）して egui の画像にする。ノイズ除去が使えなければ image と同じ。GPU が待機中に呼ぶこと
+    pub fn image_denoised(&mut self, ctx: &'static Context, exposure_ev: f32) -> Result<egui::ColorImage, String> {
+        if self.denoiser.is_none() && !self.no_denoiser {
+            match Denoiser::new(ctx, self.prog.targets(), DenoiseQuality::High) {
+                Ok(d) => self.denoiser = Some(d),
+                Err(e) => {
+                    krbr_core::warn!("preview: denoiser not available ({e})");
+                    self.no_denoiser = true;
+                }
+            }
+        }
+        let Some(d) = &self.denoiser else { return self.image(exposure_ev) };
+        let xyz = self.prog.xyz_output();
+        let run = || -> Result<ImageF, String> {
+            ctx.submit_and_wait(|_, cmd| d.record_prepare(cmd, xyz))?;
+            d.execute()?;
+            ctx.submit_and_wait(|_, cmd| d.record_output(cmd, 1.0, xyz))?;
+            let mut img = d.read_output()?;
+            if xyz {
+                krbr_render::integrator::xyz_to_linear_srgb(&mut img);
+            }
+            Ok(img)
+        };
+        match run() {
+            Ok(img) => Ok(color_image(&img, exposure_ev)),
+            Err(e) => {
+                krbr_core::warn!("preview: denoising failed ({e})");
+                self.denoiser = None;
+                self.no_denoiser = true;
+                self.image(exposure_ev)
+            }
+        }
+    }
+}
+
+/// リニア sRGB の画像を、表示と同じトーンマッピングで egui の画像にする
+fn color_image(img: &ImageF, exposure_ev: f32) -> egui::ColorImage {
+    let rgba = krbr_render::image_io::tonemap_rgba8(img, exposure_ev, &krbr_render::glow::GlowParams::OFF);
+    egui::ColorImage::from_rgba_unmultiplied([img.width as usize, img.height as usize], &rgba)
 }
 
 // ---------------------------------------------------------------- 形状
@@ -147,7 +193,7 @@ fn floor_materials() -> [Material; 2] {
 const SWATCH_R: f32 = 10.0;
 
 /// 見本の大きさ（画素）
-pub const SWATCH_PX: u32 = 96;
+pub const SWATCH_PX: u32 = 192;
 
 /// 見本のシーン：材質 0 が球、1・2 が床
 pub fn swatch_scene(m: &Material) -> Scene {
@@ -167,11 +213,11 @@ pub fn swatch_scene(m: &Material) -> Scene {
 /// 大きさの球の見え方にする（描く球は SWATCH_R の大きさなので、吸収の深さをその比で伸ばす）
 const SWATCH_REPRESENTS_MM: f32 = 4.0;
 
-/// 見本に描く材質：3D モデルの面の色を使う材質は、明るめの灰色で見せる
+/// 見本に描く材質：3D モデルの面の色を使う材質は、代表の色（swatch_color。無ければ明るめの灰色）で見せる
 pub fn swatch_material(m: &Material) -> Material {
     let mut m = m.clone();
     if m.base_color_from_model {
-        m.base_color = Vec3::splat(0.5);
+        m.base_color = m.swatch_color.unwrap_or(Vec3::splat(0.5));
     }
     let scale = 2.0 * SWATCH_R / SWATCH_REPRESENTS_MM;
     m.transmission_depth *= scale;

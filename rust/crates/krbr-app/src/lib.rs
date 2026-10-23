@@ -11,6 +11,7 @@ pub mod prepare;
 pub mod remember;
 pub mod selection;
 pub mod swapchain;
+pub mod swatch_cache;
 pub mod viewer;
 pub mod watch;
 

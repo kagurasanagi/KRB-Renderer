@@ -172,6 +172,8 @@ pub struct Material {
     pub conductor: Option<usize>,
     /// 一覧での分類。書かなければパラメータから決める（category()）
     pub category: Option<Category>,
+    /// 見本の色（リニア）：3D モデルの色を使う材質を、材質の一覧で見分けられるように塗る代表の色。描画には使わない
+    pub swatch_color: Option<Vec3>,
 }
 
 impl Default for Material {
@@ -226,6 +228,7 @@ impl Default for Material {
             sellmeier: None,
             conductor: None,
             category: None,
+            swatch_color: None,
         }
     }
 }

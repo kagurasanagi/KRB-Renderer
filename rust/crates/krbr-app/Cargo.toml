@@ -30,6 +30,4 @@ rust-embed = "8"
 sys-locale = "0.3"
 unic-langid = "0.9"
 serde_json.workspace = true
-
-[dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
