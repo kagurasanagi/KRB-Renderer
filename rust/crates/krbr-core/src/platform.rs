@@ -103,9 +103,39 @@ pub fn lower_thread_priority() {
 
 /// 裏の重い処理（タイルの作り直し・被覆率のラスタライズなど）で並列に動かすスレッドの数：論理コアの半分（最低 1）。
 /// 半分にするのは、ビューアのウィンドウのスレッドや KiCad など、ほかのアプリの分を空けておくため。
+/// 基板の読み込み（起動・開く）の間（AllCores を持っている間）は、利用者がそれを待っているので、論理コアをすべて使う。
 /// 並列の処理を入れ子にしない（外側で並列にしたら、内側は 1 本で動かす）こと
 pub fn worker_threads() -> usize {
-    (std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2) / 2).max(1)
+    let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+    if ALL_CORES.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+        n
+    } else {
+        (n / 2).max(1)
+    }
+}
+
+static ALL_CORES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// これを持っている間、worker_threads は論理コアをすべて使う（基板の読み込みの間。作業用のスレッドは低優先度のまま）
+pub struct AllCores(());
+
+impl AllCores {
+    pub fn new() -> Self {
+        ALL_CORES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        AllCores(())
+    }
+}
+
+impl Default for AllCores {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for AllCores {
+    fn drop(&mut self) {
+        ALL_CORES.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// 今のスレッドが lower_thread_priority で下げた優先度か（テスト用）

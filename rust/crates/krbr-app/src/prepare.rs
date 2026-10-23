@@ -262,6 +262,8 @@ fn apply_command_line(cfg: &mut ProjectConfig, o: &RenderOptions) {
 }
 
 pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
+    // 読み込みは利用者が待っているので、凹凸のタイルなどの並列の処理に論理コアをすべて使う（保存のたびの読み直しは半分のまま）
+    let _all_cores = krbr_core::platform::AllCores::new();
     let board = load_board_or_report(&o.pcb)?;
     if o.init {
         write_default_configs(&board.file);

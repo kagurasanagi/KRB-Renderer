@@ -90,10 +90,18 @@ pub fn collect_side_paths(board: &Board, side: Side, opts: &LayerArtOptions, cli
         if clip.is_some() && !near(&z.bbox()) {
             continue;
         }
+        // 向きをそろえ（outer_path）、範囲があれば先に切る（大きなベタを丸ごと和に入れると、タイルごとの和と切り抜きが重い）
+        let pts = match clip {
+            Some(c) => clip_to_box(&z.pts, c.lo, c.hi),
+            None => z.pts.clone(),
+        };
+        if pts.len() < 3 {
+            continue;
+        }
         if z.layer == cu {
-            sp.copper.push(to_path(&z.pts));
+            sp.copper.push(outer_path(&pts));
         } else {
-            sp.mask_open.push(to_path(&z.pts));
+            sp.mask_open.push(outer_path(&pts));
         }
     }
     for g in &board.graphics {
@@ -302,84 +310,90 @@ pub fn rasterize_coverage_with(paths: &Paths, g: &Grid, threads: usize) -> Vec<f
 /// これより遠い距離は同じ値にまとめる（mm）
 pub const SDF_RANGE_MM: f64 = 0.3;
 
-const INF: f64 = 1e20;
-
-/// 1 次元の距離変換（放物線の下側包絡線）。f は 0（対象）か INF
-fn dt1d(f: &[f64], n: usize, d: &mut [f64], v: &mut [usize], z: &mut [f64]) {
-    let mut k = 0usize;
-    v[0] = 0;
-    z[0] = -INF;
-    z[1] = INF;
-    let inter = |q: usize, p: usize| ((f[q] + (q * q) as f64) - (f[p] + (p * p) as f64)) / (2.0 * (q as f64 - p as f64));
-    for q in 1..n {
-        let mut s = inter(q, v[k]);
-        while s <= z[k] && k > 0 {
-            k -= 1;
-            s = inter(q, v[k]);
-        }
-        if s <= z[k] {
-            // k == 0 で、最初の放物線を置き換える
-            v[0] = q;
-            continue;
-        }
-        k += 1;
-        v[k] = q;
-        z[k] = s;
-        z[k + 1] = INF;
-    }
-    k = 0;
-    for q in 0..n {
-        while z[k + 1] < q as f64 {
-            k += 1;
-        }
-        let dq = q as f64 - v[k] as f64;
-        d[q] = dq * dq + f[v[k]];
-    }
-}
-
-/// target の画素までの距離の 2 乗
-fn squared_distance(mask: &[u8], target: u8, w: usize, h: usize) -> Vec<f32> {
-    let mut g: Vec<f64> = mask.iter().map(|&m| if m == target { 0.0 } else { INF }).collect();
-    let n = w.max(h);
-    let (mut f, mut d, mut z, mut v) = (vec![0.0; n], vec![0.0; n], vec![0.0; n + 1], vec![0usize; n]);
-    for x in 0..w {
-        for y in 0..h {
-            f[y] = g[y * w + x];
-        }
-        dt1d(&f, h, &mut d, &mut v, &mut z);
-        for y in 0..h {
-            g[y * w + x] = d[y];
-        }
-    }
-    for y in 0..h {
-        f[..w].copy_from_slice(&g[y * w..(y + 1) * w]);
-        dt1d(&f, w, &mut d, &mut v, &mut z);
-        g[y * w..(y + 1) * w].copy_from_slice(&d[..w]);
-    }
-    g.iter().map(|&x| x.min(1e12) as f32).collect()
-}
-
 /// 2 値の画像（inside）から、各画素の中心と反対側の画素の中心との最短距離（画素単位）。符号付き（外側が正）
 pub fn signed_distance_px(inside: &[u8], w: usize, h: usize) -> Vec<f32> {
-    let to_inside = squared_distance(inside, 1, w, h);
-    let to_outside = squared_distance(inside, 0, w, h);
-    (0..w * h)
-        .map(|i| {
-            // 縁は隣り合う画素の中心の中間にあるので 0.5 画素ずらす
-            if inside[i] != 0 {
-                -(to_outside[i].min(1e12).sqrt() - 0.5)
-            } else {
-                to_inside[i].min(1e12).sqrt() - 0.5
+    signed_distance_px_capped(inside, w, h, w + h)
+}
+
+/// signed_distance_px の、cap 画素未満だけを正確に求めるもの（それより遠い所の絶対値は cap - 0.5 以上）。
+/// 縦は、列ごとに反対側の最寄りの画素までの距離を上下 2 回の走査で求め（行を順に読むのでキャッシュに乗る）、
+/// 横は ±cap の窓の中で dx² + dy² の最小を探す。cap 未満の距離を決める画素は必ず窓の中にあるので、そこは正確
+pub fn signed_distance_px_capped(inside: &[u8], w: usize, h: usize, cap: usize) -> Vec<f32> {
+    let cap = cap.max(1).min(u16::MAX as usize - 1) as u16;
+    // 画素ごとに、縦に反対側（内側の画素なら外側、外側なら内側）の画素までの距離（cap で打ち切り）
+    let mut dy = vec![cap; w * h];
+    let (mut to_in, mut to_out) = (vec![cap; w], vec![cap; w]);
+    let step = |r: u16| r.saturating_add(1).min(cap);
+    for pass in 0..2 {
+        to_in.fill(cap);
+        to_out.fill(cap);
+        for k in 0..h {
+            let y = if pass == 0 { k } else { h - 1 - k };
+            let row = y * w;
+            for x in 0..w {
+                let ins = inside[row + x] != 0;
+                to_in[x] = if ins { 0 } else { step(to_in[x]) };
+                to_out[x] = if ins { step(to_out[x]) } else { 0 };
+                let e = if ins { to_out[x] } else { to_in[x] };
+                if e < dy[row + x] {
+                    dy[row + x] = e;
+                }
             }
-        })
-        .collect()
+        }
+    }
+    let cap_sq = cap as u32 * cap as u32;
+    let mut out = vec![0.0f32; w * h];
+    // 行の中で、窓に効く列（縦の距離が cap 未満か、横の隣と側が変わる列）までの最短の横の距離。
+    // cap 以上離れていれば、窓の中はすべて同じ側で縦の距離も cap なので、答えは cap²（縁から遠い大部分の画素）
+    let mut near = vec![cap; w];
+    for y in 0..h {
+        let row = y * w;
+        let useful = |x: usize| dy[row + x] < cap || (x > 0 && inside[row + x - 1] != inside[row + x]) || (x + 1 < w && inside[row + x + 1] != inside[row + x]);
+        let mut run = cap;
+        for x in 0..w {
+            run = if useful(x) { 0 } else { step(run) };
+            near[x] = run;
+        }
+        run = cap;
+        for x in (0..w).rev() {
+            run = if near[x] == 0 { 0 } else { step(run) };
+            near[x] = near[x].min(run);
+        }
+        for x in 0..w {
+            let ins = inside[row + x] != 0;
+            if near[x] >= cap {
+                let d = cap as f32 - 0.5;
+                out[row + x] = if ins { -d } else { d };
+                continue;
+            }
+            let mut best = (dy[row + x] as u32).pow(2).min(cap_sq);
+            // 反対側の画素の縦の距離を、横にずらしながら見る（dx² が今の最小を超えたら打ち切り）
+            let mut dx = 1u32;
+            while dx * dx < best {
+                for xx in [x.wrapping_sub(dx as usize), x + dx as usize] {
+                    if xx >= w {
+                        continue;
+                    }
+                    // 隣の列の画素が反対側なら縦の距離 0、同じ側ならその画素の dy（同じ側から見た反対側までの縦の距離）
+                    let e = if (inside[row + xx] != 0) != ins { 0 } else { dy[row + xx] as u32 };
+                    best = best.min(dx * dx + e * e);
+                }
+                dx += 1;
+            }
+            let d = (best as f32).sqrt() - 0.5;
+            out[row + x] = if ins { -d } else { d };
+        }
+    }
+    out
 }
 
 /// 被覆率（0..1）から符号付き距離を求め、8bit に詰める（128 が縁、+ が外側、1 単位 = SDF_RANGE_MM / 127 mm）
 pub fn encode_sdf(coverage: &[f32], w: usize, h: usize, px_per_mm: f64) -> Vec<u8> {
     let inside: Vec<u8> = coverage.iter().map(|&c| if c >= 0.5 { 1 } else { 0 }).collect();
-    let sd = signed_distance_px(&inside, w, h);
-    let scale = (127.0 / (SDF_RANGE_MM * px_per_mm)) as f32;
+    // 符号化で端に丸まる距離（SDF_RANGE_MM）より 2 画素遠い所までを正確に求めれば、結果は全体を求めたときと同じ
+    let range_px = SDF_RANGE_MM * px_per_mm;
+    let sd = signed_distance_px_capped(&inside, w, h, range_px.ceil() as usize + 2);
+    let scale = (127.0 / range_px) as f32;
     sd.iter()
         .zip(coverage)
         .map(|(&s, &c)| {
@@ -397,6 +411,57 @@ pub fn decode_sdf_mm(v: u8) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn area(p: &Paths) -> f64 {
+        p.iter().map(signed_area).sum()
+    }
+
+    /// 向きの違うベタが重なっても、銅は消えない（以前は非ゼロ規則の回転数が打ち消し合って穴になった）。
+    /// タイルの範囲で切ったときも、切らずに集めて範囲で切ったものと同じ
+    #[test]
+    fn zones_of_either_orientation_add_up() {
+        let mut board = Board::default();
+        let sq = |x0: f64, y0: f64, x1: f64, y1: f64| vec![Vec2::new(x0, y0), Vec2::new(x1, y0), Vec2::new(x1, y1), Vec2::new(x0, y1)];
+        let mut cw = sq(1.0, 1.0, 3.0, 3.0);
+        cw.reverse();
+        board.zones.push(krbr_kicad::ZoneFill { layer: "F.Cu".into(), pts: sq(0.0, 0.0, 2.0, 2.0) });
+        board.zones.push(krbr_kicad::ZoneFill { layer: "F.Cu".into(), pts: cw });
+        let opts = LayerArtOptions::default();
+        let all = collect_side_paths(&board, Side::Front, &opts, None);
+        assert!((area(&all.copper) - 7.0).abs() < 1e-6, "{}", area(&all.copper));
+        let clip = Box2 { lo: Vec2::new(0.5, 0.5), hi: Vec2::new(2.5, 1.5) };
+        let tile = collect_side_paths(&board, Side::Front, &opts, Some(&clip));
+        let expect = intersect(&all.copper, &rect_path(clip.lo, clip.hi));
+        assert!((area(&tile.copper) - area(&expect)).abs() < 1e-6 && (area(&expect) - 1.75).abs() < 1e-6, "{} {}", area(&tile.copper), area(&expect));
+    }
+
+    #[test]
+    fn clip_to_box_keeps_the_area_inside() {
+        // 凹んだ U 字（面積 5）を、くぼみを横切る矩形で切る
+        let u = [(0.0, 0.0), (3.0, 0.0), (3.0, 3.0), (2.0, 3.0), (2.0, 1.0), (1.0, 1.0), (1.0, 3.0), (0.0, 3.0)].map(|(x, y)| Vec2::new(x, y));
+        let c = clip_to_box(&u, Vec2::new(0.5, 0.5), Vec2::new(2.5, 2.0));
+        let got = area(&unite(&to_path(&c).into(), FillRule::NonZero));
+        // 下の帯 2 x 0.5 と、左右の柱 0.5 x 1 が 2 本
+        assert!((got - 2.0).abs() < 1e-9, "{got}");
+        assert!(clip_to_box(&u, Vec2::new(5.0, 5.0), Vec2::new(6.0, 6.0)).is_empty());
+        assert!(signed_area_pts(&u) > 0.0 && signed_area(&outer_path(&u.iter().rev().copied().collect::<Vec<_>>())) > 0.0);
+    }
+
+    /// 打ち切った距離変換は、打ち切りより近い所では全体を求めたものと同じ
+    #[test]
+    fn capped_distance_matches_the_full_one_inside_the_cap() {
+        let (w, h) = (64usize, 48usize);
+        let inside: Vec<u8> = (0..w * h).map(|i| (((i % w) as f64 - 30.0).hypot((i / w) as f64 - 20.0) < 11.0 || (i % w > 50 && i / w > 30)) as u8).collect();
+        let full = signed_distance_px(&inside, w, h);
+        let capped = signed_distance_px_capped(&inside, w, h, 6);
+        for (a, b) in full.iter().zip(&capped) {
+            if a.abs() < 5.5 {
+                assert_eq!(a, b);
+            } else {
+                assert!(b.abs() >= 5.5 && a.signum() == b.signum());
+            }
+        }
+    }
 
     #[test]
     fn coverage_of_a_square() {

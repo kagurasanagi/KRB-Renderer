@@ -30,6 +30,61 @@ pub fn path_points(p: &Path) -> impl Iterator<Item = Vec2> + '_ {
     p.iter().map(|q| Vec2::new(q.x(), q.y()))
 }
 
+/// 点の並びの符号付き面積（signed_area と同じ向き：Clipper2 の外周が正）
+pub fn signed_area_pts(pts: &[Vec2]) -> f64 {
+    let n = pts.len();
+    (0..n).map(|i| pts[i].x * pts[(i + 1) % n].y - pts[(i + 1) % n].x * pts[i].y).sum::<f64>() * 0.5
+}
+
+/// 多角形を、外周の向き（正の面積）にそろえた Path。KiCad のゾーンの塗りは向きがまちまちなので、ほかの銅と一緒に
+/// 非ゼロ規則で和をとる前にそろえる（逆向きのまま重ねると、重なった所の回転数が打ち消し合って銅が消える）
+pub fn outer_path(pts: &[Vec2]) -> Path {
+    if signed_area_pts(pts) < 0.0 {
+        to_path(&pts.iter().rev().copied().collect::<Vec<_>>())
+    } else {
+        to_path(pts)
+    }
+}
+
+/// 多角形を軸に平行な矩形で切る（Sutherland–Hodgman）。凹んだ多角形では、矩形の辺の上に幅 0 の橋が残るが、
+/// 塗る範囲は正しい（後で非ゼロ規則の和をとれば消える）。Clipper2 の積よりずっと軽いので、大きなベタをタイルごとに切るのに使う
+pub fn clip_to_box(pts: &[Vec2], lo: Vec2, hi: Vec2) -> Vec<Vec2> {
+    let mut cur: Vec<Vec2> = pts.to_vec();
+    let mut next: Vec<Vec2> = Vec::with_capacity(pts.len() + 8);
+    // (軸, 境界, 内側が値より大きい側か)
+    for (axis, bound, keep_above) in [(0, lo.x, true), (0, hi.x, false), (1, lo.y, true), (1, hi.y, false)] {
+        if cur.is_empty() {
+            break;
+        }
+        next.clear();
+        let inside = |p: Vec2| if keep_above { p[axis] >= bound } else { p[axis] <= bound };
+        let cross = |a: Vec2, b: Vec2| {
+            let t = (bound - a[axis]) / (b[axis] - a[axis]);
+            let mut q = a + (b - a) * t;
+            q[axis] = bound;
+            q
+        };
+        let mut prev = *cur.last().unwrap();
+        for &p in &cur {
+            match (inside(prev), inside(p)) {
+                (true, true) => next.push(p),
+                (true, false) => next.push(cross(prev, p)),
+                (false, true) => {
+                    next.push(cross(prev, p));
+                    next.push(p);
+                }
+                (false, false) => {}
+            }
+            prev = p;
+        }
+        std::mem::swap(&mut cur, &mut next);
+    }
+    if cur.len() < 3 {
+        cur.clear();
+    }
+    cur
+}
+
 /// 符号付き面積（シューレース公式）。Clipper2 の出力は外周が正、穴が負
 pub fn signed_area(p: &Path) -> f64 {
     let pts: Vec<Vec2> = from_path(p);

@@ -73,6 +73,10 @@ enum Command {
     Geom {
         /// .kicad_pcb file
         pcb: PathBuf,
+        /// write the distance fields (sdf_front.bin / sdf_back.bin) and the relief area per side and material (areas.txt) here,
+        /// to check that an optimization did not change the result
+        #[arg(long)]
+        dump: Option<PathBuf>,
     },
     /// development: compare two images (PNG / EXR) and print the mean and max difference
     Diff {
@@ -424,8 +428,9 @@ fn cmd_diff(a: &PathBuf, b: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_geom(pcb: &PathBuf) -> anyhow::Result<()> {
+fn cmd_geom(pcb: &PathBuf, dump: Option<&std::path::Path>) -> anyhow::Result<()> {
     use krbr_geom::{build_board_geometry, tiles::build_relief_tiles, BoardBuildOptions, LayerArtOptions, ReliefParams, ReliefTileCache};
+    let _all_cores = krbr_core::platform::AllCores::new(); // 読み込みと同じ並列の数で測る
     let board = load_board(pcb)?;
     let mut rp = ReliefParams::default();
     if board.stackup.copper_thickness > 0.0 {
@@ -437,6 +442,25 @@ fn cmd_geom(pcb: &PathBuf) -> anyhow::Result<()> {
     let rebuilt = build_relief_tiles(&mut cache, &board, &geo, &rp, &LayerArtOptions::default());
     let tris: usize = (0..2).map(|s| cache.tiles[s].iter().map(|m| m.triangle_count()).sum::<usize>()).sum();
     info!("geom: {} tiles rebuilt, {} relief triangles, sdf {}x{} px", rebuilt, tris, cache.sdf_grid.width, cache.sdf_grid.height);
+    if let Some(dir) = dump {
+        std::fs::create_dir_all(dir)?;
+        for (side, name) in [(0, "front"), (1, "back")] {
+            std::fs::write(dir.join(format!("sdf_{name}.bin")), &cache.sdf_image[side])?;
+        }
+        // 面と材質ごとの凹凸の面積（三角形の分け方が変わっても、形が同じなら同じ値になる）
+        let mut areas = std::collections::BTreeMap::<(usize, u32), f64>::new();
+        for side in 0..2 {
+            for m in &cache.tiles[side] {
+                for (t, tri) in m.indices.chunks_exact(3).enumerate() {
+                    let [a, b, c] = [0, 1, 2].map(|k| m.positions[tri[k] as usize].as_dvec3());
+                    *areas.entry((side, m.tri_material.get(t).copied().unwrap_or(0))).or_default() += 0.5 * (b - a).cross(c - a).length();
+                }
+            }
+        }
+        let text: String = areas.iter().map(|((s, mat), a)| format!("{s} {mat} {a:.6}\n")).collect();
+        std::fs::write(dir.join("areas.txt"), text)?;
+        info!("geom: wrote {}", dir.display());
+    }
     Ok(())
 }
 
@@ -654,7 +678,7 @@ fn main() {
         Command::KicadPlugin { cmd: KicadPluginCmd::Install { dir } } => krbr_app::kicad_plugin::cmd_install(dir.as_deref()),
         Command::KicadPlugin { cmd: KicadPluginCmd::Uninstall { dir } } => krbr_app::kicad_plugin::cmd_uninstall(dir.as_deref()),
         Command::Bench { pcb, spp, width, height } => krbr_app::bench::cmd_bench(&krbr_app::bench::BenchOptions { pcb: pcb.clone(), width: *width, height: *height, spp: *spp }),
-        Command::Geom { pcb } => cmd_geom(pcb),
+        Command::Geom { pcb, dump } => cmd_geom(pcb, dump.as_deref()),
         Command::Diff { a, b } => cmd_diff(a, b),
         Command::Models { pcb, no_cache } => cmd_models(pcb, *no_cache),
     };
