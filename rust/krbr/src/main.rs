@@ -682,6 +682,8 @@ fn main() {
         Command::Diff { a, b } => cmd_diff(a, b),
         Command::Models { pcb, no_cache } => cmd_models(pcb, *no_cache),
     };
+    // 凹凸のタイルのディスクのキャッシュを裏で書いていれば、書き終えるまで待つ
+    krbr_geom::tile_file::wait_for_writes();
     if let Err(e) = result {
         krbr_core::error!("{e}");
         exit_with(1, explorer);

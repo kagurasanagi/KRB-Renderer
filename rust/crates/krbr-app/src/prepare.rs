@@ -312,38 +312,72 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
 
     // 部品の材質：材質ライブラリ、全体の対応表、プロジェクトの上書き
     let materials = if o.builtin_settings_only { MaterialSetup::builtin_only() } else { load_material_setup(&board.file) };
-    let kicad_cli = setup_stroke_silk(&board, &mut cfg, o, &cache_dir);
     let resolver = model_resolver(&board, &cfg);
     let library = Arc::new(ModelLibrary::new(cache_dir.clone(), MeshParams::default(), !o.no_cache));
     info!("mesh cache: {}{}", cache_dir.join("meshes").display(), if o.no_cache { " (disabled)" } else { "" });
-    let mut source = SceneSource { resolver, library, materials, tiles: ReliefTileCache::default() };
-    let scene = source.build(&board, &cfg.scene, false);
+    // 互いに待たない 3 つを同時に進める：環境マップ（読み込みと重点サンプリングの表）、3D モデルの先読み、
+    // kicad-cli のシルク → 凹凸のタイルと組み立て（シルクの文字はタイルに入るので、この 2 つは順に）
+    let hdr = cfg.hdr.clone();
+    let (env, kicad_cli, scene, source) = std::thread::scope(|sc| {
+        let env_job = sc.spawn(|| {
+            krbr_core::platform::lower_thread_priority();
+            let env = match load_environment_map(&hdr) {
+                Ok(e) => (e, hdr.clone()),
+                // コマンドラインで指定したものは誤りとして止める。設定ファイルのものは内蔵のスタジオで代える
+                Err(e) if from_cli || hdr == STUDIO => {
+                    krbr_core::error!("environment map {}: {}", hdr, e);
+                    return None;
+                }
+                Err(e) => {
+                    warn!("environment map {}: {} (using the built-in studio instead)", hdr, e);
+                    (load_environment_map(STUDIO).ok()?, STUDIO.to_string())
+                }
+            };
+            let dist = build_env_distribution(&env.0, ENV_DIST_RESOLUTION);
+            // GPU へ送るときに使う RGB → スペクトルの表（プロセスで 1 回だけ読む）も、ここで読んでおく
+            krbr_scene::spectrum::rgb2spec_table();
+            Some((env, dist))
+        });
+        let include_dnp = cfg.scene.include_dnp;
+        let (board, resolver, library) = (&board, &resolver, &library);
+        sc.spawn(move || {
+            krbr_core::platform::lower_thread_priority();
+            prefetch_models(board, resolver, library, include_dnp);
+        });
+        let kicad_cli = setup_stroke_silk(board, &mut cfg, o, &cache_dir);
+        let mut tiles = ReliefTileCache::default();
+        // 凹凸のタイルのディスクのキャッシュ（基板のパスごと。変えていない基板を開き直すときに作り直さない）
+        if !o.no_cache {
+            let key = krbr_core::to_hex(krbr_core::xxh64(krbr_scene::board_file::board_key(&board.file).as_bytes()));
+            tiles.disk_file = Some(cache_dir.join("relief").join(format!("{key}.krbt")));
+        }
+        let mut source = SceneSource { resolver: resolver.clone(), library: Arc::clone(library), materials, tiles };
+        let scene = source.build(board, &cfg.scene, false);
+        (env_job.join().ok().flatten(), kicad_cli, scene, source)
+    });
     let st = source.library.stats();
     info!("models: {} loaded+meshed, {} from cache, {} failed", st.loaded, st.cache_hits, st.failed);
     for a in &scene.assignments {
         debug!("material: {} {} [{}] -> {} ({})", a.reference, a.model_file, a.part_keys, a.material, a.source);
     }
-
-    let env = match load_environment_map(&cfg.hdr) {
-        Ok(e) => e,
-        // コマンドラインで指定したものは誤りとして止める。設定ファイルのものは内蔵のスタジオで代える
-        Err(e) if from_cli || cfg.hdr == STUDIO => {
-            krbr_core::error!("environment map {}: {}", cfg.hdr, e);
-            return None;
-        }
-        Err(e) => {
-            warn!("environment map {}: {} (using the built-in studio instead)", cfg.hdr, e);
-            cfg.hdr = STUDIO.into();
-            load_environment_map(STUDIO).ok()?
-        }
-    };
+    let ((env, hdr), dist) = env?;
+    cfg.hdr = hdr;
     info!("environment: {} ({}x{})", cfg.hdr, env.width, env.height);
     if from_cli && !o.ignore_remembered {
         cfg.hdr = remember::normalize_hdr(&cfg.hdr);
         remember::remember_hdr(&board.file, &cfg.hdr, &config_hdr);
     }
-    let dist = build_env_distribution(&env, ENV_DIST_RESOLUTION);
     Some(PreparedScene { board, cfg, scene, env, dist, config_hdr, configured, config_view, remembered_view, kicad_cli, source: Some(source) })
+}
+
+/// prepare_scene と、ウィンドウを持たない Vulkan の準備（0.3〜0.5 秒）を同時に進める（render・watch・bench）。
+/// GPU の準備に失敗しても、シーンの準備は最後まで行う（エラーは呼ぶ側で）
+pub fn prepare_scene_and_context(o: &RenderOptions, validation: bool) -> (Option<PreparedScene>, anyhow::Result<Context>) {
+    std::thread::scope(|sc| {
+        let ctx = sc.spawn(move || Context::new(&ContextOptions { validation, low_queue_priority: true, ..Default::default() }).map_err(|e| anyhow::anyhow!(e)));
+        let prep = prepare_scene(o);
+        (prep, ctx.join().unwrap_or_else(|_| Err(anyhow::anyhow!("GPU initialization panicked"))))
+    })
 }
 
 /// 基板を開かずに起動したビューアの状態（環境マップだけ。基板は「ファイル → 開く...」で読む）
@@ -369,6 +403,20 @@ pub fn prepare_empty(o: &RenderOptions) -> Option<PreparedScene> {
 }
 
 /// 3D モデルのパスの解決：基板のフォルダと、設定ファイル（<名前>.krbr）の [paths] の変数・探す場所
+/// 組み立てで使う 3D モデルを先に読んでおく（ModelLibrary が覚えるので、組み立てのときはすぐ返る）。
+/// 凹凸のタイルと同時に進めるためのもの。STEP の分割は 1 本ずつ（OCCT の読み込みを並べない）
+fn prefetch_models(board: &Board, resolver: &ModelResolver, library: &ModelLibrary, include_dnp: bool) {
+    let mut seen = std::collections::HashSet::new();
+    for fp in board.footprints.iter().filter(|f| include_dnp || !f.dnp) {
+        for m in fp.models.iter().filter(|m| !m.hidden && m.opacity > 0.0) {
+            let r = resolver.resolve(&m.path);
+            if r.found && seen.insert(r.path.clone()) {
+                library.get(&r.path);
+            }
+        }
+    }
+}
+
 pub fn model_resolver(board: &Board, cfg: &ProjectConfig) -> ModelResolver {
     ModelResolver::new(&board.project_dir, &cfg.path_vars, &cfg.model_search_dirs)
 }
@@ -444,13 +492,14 @@ pub fn cmd_render(o: &RenderOptions) -> anyhow::Result<()> {
     let stem = o.out.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "board".into());
     std::fs::create_dir_all(&out_dir)?;
 
-    let Some(mut prep) = prepare_scene(o) else { anyhow::bail!("scene preparation failed") };
+    let (prep, ctx) = prepare_scene_and_context(o, o.validate);
+    let Some(mut prep) = prep else { anyhow::bail!("scene preparation failed") };
+    let ctx = ctx?;
     info!("project: {} ({})", prep.board.project_name, prep.board.project_dir.display());
     let cfg = &prep.cfg;
     let cam = initial_camera(&prep, o, cfg.width, cfg.height);
     info!("camera: elevation {:.1} deg, azimuth {:.1} deg, fov {:.1} deg, position ({:.1}, {:.1}, {:.1}) mm", cfg.elevation_deg, cfg.azimuth_deg, cfg.fov_deg, cam.position.x, cam.position.y, cam.position.z);
 
-    let ctx = Context::new(&ContextOptions { validation: o.validate, low_queue_priority: true, ..Default::default() }).map_err(|e| anyhow::anyhow!(e))?;
     let result = {
         let mut gpu = GpuScene::new(&ctx);
         gpu.build(&prep.scene, &prep.env, &prep.dist, cfg.scene.bump_intensity).map_err(|e| anyhow::anyhow!("GPU scene: {e}"))?;

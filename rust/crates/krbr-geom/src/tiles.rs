@@ -18,6 +18,9 @@ use crate::shapes::*;
 /// 補間するときに、画像の外を引かないように）。丸めの分よりずっと大きいが、画像が数 % 大きくなるだけなので余裕を取る
 const OUTER_TILE_MARGIN_MM: f64 = 1.0;
 
+/// ディスクのキャッシュに残す基板の数（1 枚で数十 MB）
+const RELIEF_CACHE_BOARDS: usize = 8;
+
 /// タイルの距離場を求めるときに、タイルの外側へ広げる画素数：距離場は縁から SDF_RANGE_MM 先までを表すので、その先まで
 /// の図形を集める（＋2 画素は、縁の画素の補正と丸めの分）
 fn sdf_extent_px(px_per_mm: f64) -> usize {
@@ -51,8 +54,12 @@ pub struct ReliefTileCache {
     pub sdf_grid: Grid,
     /// 基板全体の距離場（RG8：R = 銅, G = レジスト開口）
     pub sdf_image: [Vec<u8>; 2],
-    /// 直前の構築で作り直した（面, タイル）
+    /// 直前の構築で作り直した（またはディスクのキャッシュから読んだ）（面, タイル）
     pub last_rebuilt: Vec<(usize, usize)>,
+    /// ディスクのキャッシュ（tile_file）。Some なら、最初の構築でここから読めるタイルを読み、作り直したら書き出す
+    pub disk_file: Option<std::path::PathBuf>,
+    /// ディスクのキャッシュを一度見たか（見るのは最初の構築だけ。保存のたびの読み直しでは見ない・書かない）
+    disk_checked: bool,
 }
 
 impl Default for ReliefTileCache {
@@ -70,6 +77,8 @@ impl Default for ReliefTileCache {
             sdf_grid: Grid::default(),
             sdf_image: [Vec::new(), Vec::new()],
             last_rebuilt: Vec::new(),
+            disk_file: None,
+            disk_checked: false,
         }
     }
 }
@@ -156,12 +165,100 @@ impl ReliefTileCache {
     }
 }
 
+/// ディスクのキャッシュの版：タイルの作り方（relief.rs・raster.rs・このファイル）を変えたら上げる。
+/// krbr.exe を作り直すとキー（tile_keys）が変わるので、開発中は上げ忘れても古いタイルは使わない
+const TILE_KEY_VERSION: u32 = 1;
+
+fn hash_paths(h: &mut Vec<u8>, p: &Paths) {
+    for path in p.iter() {
+        for q in path.iter() {
+            h.extend_from_slice(&q.x().to_le_bytes());
+            h.extend_from_slice(&q.y().to_le_bytes());
+        }
+        h.push(0xFF);
+    }
+}
+
+/// タイルごとの入力のキー：全体の条件（作り方の版、krbr.exe、凹凸の設定、解像度、基板の外形と setup、kicad-cli のシルク）と、
+/// タイルの影響範囲（invalidate と同じ範囲）にかかる基板の項目の内容。キーが同じなら、作ったタイルも同じ
+pub fn tile_keys(cache: &ReliefTileCache, board: &Board, geo: &BoardGeometry, rp: &ReliefParams, layer_art: &LayerArtOptions) -> [Vec<u64>; 2] {
+    let mut g: Vec<u8> = Vec::new();
+    g.extend_from_slice(&TILE_KEY_VERSION.to_le_bytes());
+    if let Some(m) = std::env::current_exe().ok().and_then(|e| std::fs::metadata(e).ok()) {
+        g.extend_from_slice(&m.len().to_le_bytes());
+        if let Ok(t) = m.modified().map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default()) {
+            g.extend_from_slice(&t.as_nanos().to_le_bytes());
+        }
+    }
+    for v in [rp.copper, rp.mask_on_copper, rp.mask_on_substrate, rp.silk, rp.via_dimple, layer_art.px_per_mm, cache.tile_size, geo.core_half, geo.thickness, geo.center.x, geo.center.y] {
+        g.extend_from_slice(&v.to_le_bytes());
+    }
+    g.push(layer_art.clip_silk_by_mask as u8);
+    g.extend_from_slice(&board.setup_hash.to_le_bytes());
+    hash_paths(&mut g, &geo.region);
+    for side in &layer_art.extra_silk {
+        if let Some(p) = side {
+            hash_paths(&mut g, p);
+        }
+        g.push(0xFE);
+    }
+    let global = krbr_core::xxh64(&g);
+    let ppm = cache.sdf_grid.px_per_mm;
+    let influence = if ppm > 0.0 { (sdf_extent_px(ppm) + 1) as f64 / ppm } else { 0.0 };
+    let mut keys: [Vec<u64>; 2] = [Vec::with_capacity(cache.count()), Vec::with_capacity(cache.count())];
+    for t in 0..cache.count() {
+        let r = cache.tile_rect(t).expanded(influence);
+        let mut hashes: Vec<u64> = board.items.iter().filter(|i| r.intersects(&i.bbox)).map(|i| i.hash).collect();
+        hashes.sort_unstable();
+        let mut b: Vec<u8> = Vec::with_capacity(16 + hashes.len() * 8);
+        b.extend_from_slice(&global.to_le_bytes());
+        b.extend_from_slice(&(t as u64).to_le_bytes());
+        for h in hashes {
+            b.extend_from_slice(&h.to_le_bytes());
+        }
+        for (side, k) in keys.iter_mut().enumerate() {
+            b.push(side as u8);
+            k.push(krbr_core::xxh64(&b));
+            b.pop();
+        }
+    }
+    keys
+}
+
 /// 凹凸メッシュをタイルごとに作る（キャッシュにある有効なタイルはそのまま使う）。タイルは並列に作る。
+/// cache.disk_file があれば、最初の構築ではそこからキーの同じタイルを読み、作り直したタイルがあれば書き出す。
 /// 戻り値は作り直したタイルの数
 pub fn build_relief_tiles(cache: &mut ReliefTileCache, board: &Board, geo: &BoardGeometry, rp: &ReliefParams, layer_art: &LayerArtOptions) -> usize {
     let t0 = Instant::now();
     if !cache.matches(geo) {
         cache.reset(geo, layer_art.px_per_mm);
+    }
+    // ディスクのキャッシュ（最初の構築だけ）
+    let use_disk = cache.disk_file.is_some() && !cache.disk_checked;
+    let keys = if use_disk { tile_keys(cache, board, geo, rp, layer_art) } else { [Vec::new(), Vec::new()] };
+    let t_keys = t0.elapsed();
+    let mut loaded: Vec<(usize, usize)> = Vec::new();
+    if use_disk {
+        cache.disk_checked = true;
+        let file = cache.disk_file.clone().unwrap();
+        let read = crate::tile_file::read_file(&file, cache.count());
+        krbr_core::debug!("relief cache: keys {:.0} ms, read {:.0} ms", t_keys.as_secs_f64() * 1000.0, (t0.elapsed() - t_keys).as_secs_f64() * 1000.0);
+        match read {
+            Ok(sides) => {
+                for (s, side) in sides.into_iter().enumerate() {
+                    for (t, tile) in side.into_iter().enumerate() {
+                        if !cache.valid[s][t] && tile.key == keys[s][t] {
+                            cache.tiles[s][t] = tile.mesh;
+                            cache.sdf[s][t] = tile.sdf;
+                            cache.valid[s][t] = true;
+                            loaded.push((s, t));
+                        }
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => krbr_core::debug!("relief cache {}: {} (rebuilding)", file.display(), e),
+        }
     }
 
     // 面を張る範囲（表裏それぞれ、ふさがれたビアの穴を含める）
@@ -271,24 +368,46 @@ pub fn build_relief_tiles(cache: &mut ReliefTileCache, board: &Board, geo: &Boar
             cache.sdf_image[side] = vec![255; bytes];
         }
     }
-    for &(side, t) in &todo {
-        let s = side as usize;
+    for (s, t) in todo.iter().map(|&(side, t)| (side as usize, t)).chain(loaded.iter().copied()) {
         let p = &cache.sdf[s][t];
         for y in 0..p.h {
             let row = ((p.y0 + y) * g.width + p.x0) * 2;
-            for x in 0..p.w {
-                cache.sdf_image[s][row + x * 2] = p.copper[y * p.w + x];
-                cache.sdf_image[s][row + x * 2 + 1] = p.mask_open[y * p.w + x];
+            let dst = &mut cache.sdf_image[s][row..row + p.w * 2];
+            let (cu, mo) = (&p.copper[y * p.w..(y + 1) * p.w], &p.mask_open[y * p.w..(y + 1) * p.w]);
+            for ((d, &c), &m) in dst.chunks_exact_mut(2).zip(cu).zip(mo) {
+                d[0] = c;
+                d[1] = m;
             }
         }
     }
-    cache.last_rebuilt = todo.iter().map(|&(side, t)| (side as usize, t)).collect();
+    cache.last_rebuilt = todo.iter().map(|&(side, t)| (side as usize, t)).chain(loaded.iter().copied()).collect();
+    // 作り直したタイルがあれば、全部のタイルをディスクのキャッシュに書く（書き出しは裏で。読み込みを待たせない）
+    if use_disk && !todo.is_empty() {
+        let file = cache.disk_file.clone().unwrap();
+        let tiles: [Vec<(u64, &Mesh, &SdfPatch)>; 2] = std::array::from_fn(|s| (0..cache.count()).map(|t| (keys[s][t], &cache.tiles[s][t], &cache.sdf[s][t])).collect());
+        let encoded = crate::tile_file::encode(&tiles);
+        crate::tile_file::write_in_background(move || {
+            let bytes = match encoded {
+                Ok(b) => b,
+                Err(e) => return krbr_core::debug!("relief cache: not written ({e})"),
+            };
+            krbr_core::platform::lower_thread_priority();
+            match crate::tile_file::write_file(&file, &bytes) {
+                Ok(()) => krbr_core::debug!("relief cache: wrote {} ({:.1} MB)", file.display(), bytes.len() as f64 / 1e6),
+                Err(e) => krbr_core::warn!("relief cache {}: {}", file.display(), e),
+            }
+            if let Some(dir) = file.parent() {
+                crate::tile_file::prune(dir, RELIEF_CACHE_BOARDS);
+            }
+        });
+    }
 
     let tris: usize = (0..2).map(|s| cache.tiles[s].iter().map(|m| m.triangle_count()).sum::<usize>()).sum();
     krbr_core::info!(
-        "relief: rebuilt {} of {} tiles ({}x{}, {:.0} mm) in {:.0} ms, {} triangles",
+        "relief: rebuilt {} of {} tiles{} ({}x{}, {:.0} mm) in {:.0} ms, {} triangles",
         todo.len(),
         2 * cache.count(),
+        if loaded.is_empty() { String::new() } else { format!(", {} from the disk cache", loaded.len()) },
         cache.nx,
         cache.ny,
         cache.tile_size,

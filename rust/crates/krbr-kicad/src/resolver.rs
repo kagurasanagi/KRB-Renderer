@@ -18,6 +18,7 @@ pub struct ResolvedModel {
     pub substituted: bool,
 }
 
+#[derive(Clone)]
 pub struct ModelResolver {
     project_dir: PathBuf,
     vars: BTreeMap<String, String>,

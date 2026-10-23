@@ -7,11 +7,11 @@ use ash::vk;
 use krbr_core::{info, warn, FileWatcher};
 use krbr_render::tonemapper::{DisplayMode, Tonemapper};
 use krbr_render::vk::memory_barrier;
-use krbr_render::{image_io, Context, ContextOptions, DenoiseQuality, Denoiser, FrameParams, GpuScene};
+use krbr_render::{image_io, Context, DenoiseQuality, Denoiser, FrameParams, GpuScene};
 use krbr_scene::IntegratorKind;
 
 use crate::kicad_cli::SilkJob;
-use crate::prepare::{frame_params, initial_camera, prepare_scene, progressive_or_pt, ReloadStats, RenderOptions};
+use crate::prepare::{frame_params, initial_camera, prepare_scene_and_context, progressive_or_pt, ReloadStats, RenderOptions};
 
 #[derive(Debug, Clone, Default)]
 pub struct WatchOptions {
@@ -55,7 +55,9 @@ pub enum WatchEvent<'a> {
 pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(WatchEvent) -> bool) -> anyhow::Result<()> {
     let mut common = o.common.clone();
     common.spp = Some(common.spp.unwrap_or(32));
-    let Some(mut prep) = prepare_scene(&common) else { anyhow::bail!("scene preparation failed") };
+    let (prep, ctx) = prepare_scene_and_context(&common, common.validate);
+    let Some(mut prep) = prep else { anyhow::bail!("scene preparation failed") };
+    let ctx = ctx?;
     let out = common.out.clone();
     if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
@@ -64,7 +66,6 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
     // カメラは最初の構図で固定する（基板の形が変わっても視点は動かさない）
     let frame = frame_params(&prep.cfg, initial_camera(&prep, &common, w, h), common.seed);
 
-    let ctx = Context::new(&ContextOptions { validation: common.validate, low_queue_priority: true, ..Default::default() }).map_err(|e| anyhow::anyhow!(e))?;
     let mut gpu = GpuScene::new(&ctx);
     gpu.build(&prep.scene, &prep.env, &prep.dist, prep.cfg.scene.bump_intensity).map_err(|e| anyhow::anyhow!("GPU scene: {e}"))?;
     prep.env.rgba = Vec::new();

@@ -141,11 +141,21 @@ impl<'a> GpuScene<'a> {
 
     /// シーン・環境マップを GPU へ送る。VRAM が足りないなどで失敗したら Err（作った分は Drop が解放する。この GpuScene では描かない）
     pub fn build(&mut self, sc: &Scene, env: &ImageF, dist: &EnvDistribution, bump_intensity: f32) -> Result<(), String> {
+        let t0 = std::time::Instant::now();
+        let lap = |what: &str, t: &mut std::time::Instant| {
+            krbr_core::debug!("GPU scene: {what} {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+            *t = std::time::Instant::now();
+        };
+        let mut t = t0;
         self.build_spectral_table()?; // 材質の分光の係数に使うので、形状より先に
+        lap("spectral table", &mut t);
         self.build_geometry(sc, bump_intensity)?;
+        lap("geometry", &mut t);
         self.set_environment(env, dist)?;
+        lap("environment", &mut t);
         self.upload_board_texture(sc)?;
         self.update_board_params(sc);
+        lap("board texture", &mut t);
         krbr_core::info!(
             "GPU scene: {} triangles, {} BLAS, {} instances, env {}x{} (distribution {}x{})",
             self.triangle_count,
@@ -214,15 +224,14 @@ impl<'a> GpuScene<'a> {
         let ctx = self.ctx;
 
         // ---- メッシュを 1 本のバッファにまとめる
-        let mut verts: Vec<GpuVertex> = Vec::new();
-        let mut idx: Vec<u32> = Vec::new();
-        let mut tmat: Vec<u32> = Vec::new();
-        let mut infos: Vec<GpuMeshInfo> = Vec::new();
+        // 大きさは先に分かるので、伸ばしながら写し直さない（凹凸のタイルで数百万の頂点になる）
+        let mut verts: Vec<GpuVertex> = Vec::with_capacity(sc.meshes.iter().map(|m| m.mesh.positions.len()).sum());
+        let mut idx: Vec<u32> = Vec::with_capacity(sc.meshes.iter().map(|m| m.mesh.indices.len()).sum());
+        let mut tmat: Vec<u32> = Vec::with_capacity(sc.meshes.iter().map(|m| m.mesh.tri_material.len()).sum());
+        let mut infos: Vec<GpuMeshInfo> = Vec::with_capacity(sc.meshes.len());
         for m in &sc.meshes {
             infos.push(GpuMeshInfo { vertex_offset: verts.len() as u32, index_offset: idx.len() as u32, tri_offset: tmat.len() as u32, pad: 0 });
-            for (p, n) in m.mesh.positions.iter().zip(&m.mesh.normals) {
-                verts.push(GpuVertex { pos: *p, pad0: 0.0, nrm: *n, pad1: 0.0 });
-            }
+            verts.extend(m.mesh.positions.iter().zip(&m.mesh.normals).map(|(p, n)| GpuVertex { pos: *p, pad0: 0.0, nrm: *n, pad1: 0.0 }));
             idx.extend_from_slice(&m.mesh.indices);
             tmat.extend_from_slice(&m.mesh.tri_material);
         }
@@ -427,9 +436,7 @@ impl<'a> GpuScene<'a> {
         if sdf {
             // 距離場（RG8、表・裏の 2 層）
             self.board_image = ctx.create_image_2d(g.width as u32, g.height as u32, 2, vk::Format::R8G8_UNORM, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)?;
-            let mut both = sc.sdf_image[0].clone();
-            both.extend_from_slice(&sc.sdf_image[1]);
-            ctx.upload_image(&self.board_image, &both, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
+            ctx.upload_image_parts(&self.board_image, &[&sc.sdf_image[0], &sc.sdf_image[1]], vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
             self.board_image_is_sdf = true;
         } else {
             // 距離場が無い（基板の凹凸を作らないシーン）。記述子には画像が要るので、同じ形式の 1x1 の画像を置く。

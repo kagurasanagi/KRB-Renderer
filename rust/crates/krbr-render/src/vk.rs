@@ -511,9 +511,21 @@ impl Context {
 
     /// 画像全体にデータを転送して最終レイアウトへ遷移する
     pub fn upload_image(&self, img: &Image, data: &[u8], final_layout: vk::ImageLayout) -> Result<(), String> {
-        let mut staging = self.create_buffer(data.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC, true, false)?;
+        self.upload_image_parts(img, &[data], final_layout)
+    }
+
+    /// upload_image の、データを幾つかに分けて渡すもの（層ごとなど。つないだものが画像全体）。転送用のバッファへ直接写すので、
+    /// 呼ぶ側で 1 本につなぎ直さなくてよい（基板の距離場は表・裏で 100 MB 近い）
+    pub fn upload_image_parts(&self, img: &Image, parts: &[&[u8]], final_layout: vk::ImageLayout) -> Result<(), String> {
+        let total: usize = parts.iter().map(|p| p.len()).sum();
+        let mut staging = self.create_buffer(total as u64, vk::BufferUsageFlags::TRANSFER_SRC, true, false)?;
         let r = (|| {
-            staging.mapped_bytes_mut().ok_or("the staging buffer is not mapped")?.copy_from_slice(data);
+            let dst = staging.mapped_bytes_mut().ok_or("the staging buffer is not mapped")?;
+            let mut at = 0;
+            for p in parts {
+                dst[at..at + p.len()].copy_from_slice(p);
+                at += p.len();
+            }
             let (sb, image, w, h, layers) = (staging.buffer, img.image, img.width, img.height, img.layers);
             let trace = self.trace_stages();
             self.submit_and_wait(|dev, cmd| {

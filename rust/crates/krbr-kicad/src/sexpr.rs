@@ -213,8 +213,112 @@ impl<'a> Parser<'a> {
 }
 
 pub fn parse(text: &str) -> Result<Node, ParseError> {
+    if text.len() >= PARALLEL_MIN_BYTES {
+        if let Some(n) = parse_parallel(text) {
+            return n;
+        }
+    }
     let mut p = Parser { s: text.as_bytes(), pos: 0 };
     p.parse_node()
+}
+
+/// これより大きいファイルは、最上位のリストの要素を並列に読む（大きな基板は数 MB あり、1 本では数百 ms かかる）
+const PARALLEL_MIN_BYTES: usize = 1 << 20;
+
+/// 最上位のリストの要素の始まりの位置。読み飛ばしの規則が Parser と違いうるもの（行頭の # のコメント）や、
+/// 括弧の合わないものは None（1 本で読み、誤りの位置もそちらで出す）
+fn top_level_starts(s: &[u8]) -> Option<(usize, Vec<usize>)> {
+    let mut i = 0;
+    while i < s.len() && matches!(s[i], b' ' | b'\t' | b'\r' | b'\n') {
+        i += 1;
+    }
+    if i >= s.len() || s[i] != b'(' {
+        return None;
+    }
+    let open = i;
+    let mut starts = Vec::new();
+    let mut depth = 0usize;
+    let mut in_atom = false;
+    while i < s.len() {
+        let c = s[i];
+        match c {
+            b'#' if i == 0 || s[i - 1] == b'\n' => return None,
+            // アトムの途中の " はアトムの一部（Parser と同じ）
+            b'"' if !in_atom => {
+                if depth == 1 {
+                    starts.push(i);
+                }
+                in_atom = false;
+                i += 1;
+                while i < s.len() && s[i] != b'"' {
+                    i += if s[i] == b'\\' { 2 } else { 1 };
+                }
+                if i >= s.len() {
+                    return None;
+                }
+            }
+            b'(' => {
+                if depth == 1 {
+                    starts.push(i);
+                }
+                depth += 1;
+                in_atom = false;
+            }
+            b')' => {
+                depth = depth.checked_sub(1)?;
+                in_atom = false;
+                if depth == 0 {
+                    return Some((open, starts));
+                }
+            }
+            b' ' | b'\t' | b'\r' | b'\n' => in_atom = false,
+            _ => {
+                if depth == 1 && !in_atom {
+                    starts.push(i);
+                }
+                in_atom = true;
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 最上位のリストの要素を、いくつかのスレッドで分けて読む（結果は 1 本で読んだものと同じ）
+fn parse_parallel(text: &str) -> Option<Result<Node, ParseError>> {
+    let s = text.as_bytes();
+    let (_, starts) = top_level_starts(s)?;
+    let threads = krbr_core::platform::worker_threads().min(starts.len() / 64).max(1);
+    if threads < 2 {
+        return None;
+    }
+    let per = starts.len().div_ceil(threads);
+    let parts: Vec<Result<Vec<Node>, ParseError>> = std::thread::scope(|sc| {
+        let handles: Vec<_> = starts
+            .chunks(per)
+            .map(|chunk| {
+                sc.spawn(move || {
+                    let mut p = Parser { s, pos: 0 };
+                    chunk
+                        .iter()
+                        .map(|&at| {
+                            p.pos = at;
+                            p.parse_node()
+                        })
+                        .collect()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(ParseError { message: "parser thread panicked", offset: 0 }))).collect()
+    });
+    let mut root = Node { is_list: true, ..Default::default() };
+    for p in parts {
+        match p {
+            Ok(v) => root.items.extend(v),
+            Err(e) => return Some(Err(e)),
+        }
+    }
+    Some(Ok(root))
 }
 
 fn serialize(n: &Node, out: &mut String) {
@@ -282,6 +386,30 @@ pub fn write(n: &Node) -> String {
     s
 }
 
+/// 並べたノードそれぞれの hash_node（多ければ並列に。大きな基板では数千の項目がある）
+pub fn hash_items(items: &[Node]) -> Vec<u64> {
+    // 書き出しの文字列は使い回す（項目ごとに確保し直さない）
+    let hash_all = |c: &[Node]| {
+        let mut buf = String::new();
+        c.iter()
+            .map(|n| {
+                buf.clear();
+                serialize(n, &mut buf);
+                xxh64(buf.as_bytes())
+            })
+            .collect::<Vec<u64>>()
+    };
+    let threads = krbr_core::platform::worker_threads().min(items.len() / 256).max(1);
+    if threads < 2 {
+        return hash_all(items);
+    }
+    let per = items.len().div_ceil(threads);
+    std::thread::scope(|sc| {
+        let hs: Vec<_> = items.chunks(per).map(|c| sc.spawn(move || hash_all(c))).collect();
+        hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
+    })
+}
+
 /// ノードの内容（アトムと入れ子の構造）のハッシュ（差分の検出で、項目の内容が変わったかを見るのに使う）
 pub fn hash_node(n: &Node) -> u64 {
     let mut s = String::new();
@@ -292,6 +420,32 @@ pub fn hash_node(n: &Node) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn same(a: &Node, b: &Node) -> bool {
+        a.is_list == b.is_list && a.quoted == b.quoted && a.text == b.text && a.items.len() == b.items.len() && a.items.iter().zip(&b.items).all(|(x, y)| same(x, y))
+    }
+
+    /// 最上位の要素を並列に読んでも、1 本で読んだものと同じ木（文字列の中の括弧・エスケープ、アトムの中の " も）
+    #[test]
+    fn parallel_parse_matches_the_sequential_one() {
+        let mut text = String::from("(kicad_pcb (version 20260206) top_atom \"q(\\\"x)\" a\"b");
+        for i in 0..400 {
+            text += &format!("
+	(segment (start {i} 0) (end 1 2) (layer \"F.Cu\") (net \"n)(\\\"{i}\"))");
+        }
+        text += ")
+";
+        let mut p = Parser { s: text.as_bytes(), pos: 0 };
+        let seq = p.parse_node().unwrap();
+        let par = parse_parallel(&text).expect("parallel").unwrap();
+        assert!(same(&seq, &par));
+        assert_eq!(seq.items.len(), 405);
+        // 行頭のコメントや括弧の合わないものは 1 本で読む
+        assert!(top_level_starts(b"(a
+# (x
+ b)").is_none() && top_level_starts(b"(a (b)").is_none());
+        assert_eq!(hash_items(&seq.items), seq.items.iter().map(hash_node).collect::<Vec<_>>());
+    }
 
     #[test]
     fn parses_nested_lists_and_strings() {

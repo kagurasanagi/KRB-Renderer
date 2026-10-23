@@ -11,10 +11,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use krbr_core::{info, warn};
-use krbr_render::{render_offscreen, Context, ContextOptions, GpuScene, RenderSettings};
+use krbr_render::{render_offscreen, GpuScene, RenderSettings};
 use krbr_scene::{IntegratorKind, LensModel};
 
-use crate::prepare::{frame_params, initial_camera, prepare_scene, trace_method_name, RenderOptions};
+use crate::prepare::{frame_params, initial_camera, prepare_scene_and_context, trace_method_name, RenderOptions};
 
 #[derive(Debug, Clone)]
 pub struct BenchOptions {
@@ -78,7 +78,9 @@ pub fn cmd_bench(b: &BenchOptions) -> anyhow::Result<()> {
         ..Default::default()
     };
     let t0 = Instant::now();
-    let Some(prep) = prepare_scene(&o) else { anyhow::bail!("scene preparation failed") };
+    let (prep, ctx) = prepare_scene_and_context(&o, false);
+    let Some(prep) = prep else { anyhow::bail!("scene preparation failed") };
+    let ctx = ctx?;
     let prepare_s = t0.elapsed().as_secs_f64();
     if bundled && !prep.scene.missing.is_empty() {
         // 箱で代えたまま測ると、別の PC の記録と比べられない
@@ -86,7 +88,6 @@ pub fn cmd_bench(b: &BenchOptions) -> anyhow::Result<()> {
     }
     let cfg = &prep.cfg;
     let cam = initial_camera(&prep, &o, b.width, b.height);
-    let ctx = Context::new(&ContextOptions { low_queue_priority: true, ..Default::default() }).map_err(|e| anyhow::anyhow!(e))?;
     let method = trace_method_name(&ctx);
     let driver = driver_string(&ctx.info.name, ctx.info.driver_version);
     let mut gpu = GpuScene::new(&ctx);

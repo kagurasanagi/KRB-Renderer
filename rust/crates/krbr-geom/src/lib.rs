@@ -6,6 +6,7 @@ pub mod raster;
 pub mod relief;
 pub mod shapes;
 pub mod svg_reader;
+pub mod tile_file;
 pub mod tiles;
 
 pub use board_mesh::{build_board_geometry, extrude_region, BoardBuildOptions, BoardGeometry, BoardMat};

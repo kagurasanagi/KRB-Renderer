@@ -176,29 +176,52 @@ pub fn plot_stroke_silk(cli: &Path, board_file: &Path, project_name: &str, cache
             return out;
         }
     };
-    let filtered = match stroke_silk_only_board(&board_text) {
-        Ok(t) => t,
-        Err(e) => {
-            warn!("kicad-cli silk: {}: {e}", board_file.display());
-            return out;
-        }
-    };
     let dir = board_file.parent().unwrap_or(Path::new("."));
     let pro = dir.join(format!("{project_name}.kicad_pro"));
     let pro_text = std::fs::read_to_string(&pro).ok();
-
-    // キャッシュのキー：渡す基板のコピー、プロジェクト（文字の変数）、kicad-cli の場所。
-    // 中身が C++ 版（シルク層全体）と違うので、名前を変えて C++ 版のキャッシュとは分ける
-    let key_src = format!("krbr-stroke-silk-v1\n{filtered}{}{}", pro_text.as_deref().unwrap_or(""), cli.to_string_lossy());
-    let key = krbr_core::to_hex(krbr_core::xxh64(key_src.as_bytes()));
     let cdir = cache_dir.join("silk");
+
+    // キャッシュのキー：渡す基板のコピー（シルクの線フォントの文字だけを残したもの）、プロジェクト（文字の変数）、kicad-cli の場所。
+    // 中身が C++ 版（シルク層全体）と違うので、名前を変えて C++ 版のキャッシュとは分ける。
+    // コピーを作るには基板全体を解析し直す（大きな基板で 0.5 秒前後）ので、元の基板の中身から引ける索引（<元のキー>.key）も残し、
+    // 基板が前と同じなら解析を省く
+    let tail = format!("{}{}", pro_text.as_deref().unwrap_or(""), cli.to_string_lossy());
+    let raw_key = krbr_core::to_hex(krbr_core::xxh64(format!("krbr-stroke-silk-raw-v1\n{board_text}{tail}").as_bytes()));
+    let index = cdir.join(format!("{raw_key}.key"));
+    let mut filtered: Option<String> = None;
+    let key = match std::fs::read_to_string(&index).ok().filter(|k| use_cache && k.len() == 16) {
+        Some(k) => k,
+        None => {
+            let f = match stroke_silk_only_board(&board_text) {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("kicad-cli silk: {}: {e}", board_file.display());
+                    return out;
+                }
+            };
+            let k = krbr_core::to_hex(krbr_core::xxh64(format!("krbr-stroke-silk-v1\n{f}{tail}").as_bytes()));
+            filtered = Some(f);
+            k
+        }
+    };
     let cached = [cdir.join(format!("{key}-stroke-F.svg")), cdir.join(format!("{key}-stroke-B.svg"))];
     let mut svg: [Option<String>; 2] = [None, None];
     if use_cache && cached.iter().all(|c| c.is_file()) {
         svg = [std::fs::read_to_string(&cached[0]).ok(), std::fs::read_to_string(&cached[1]).ok()];
         out.from_cache = svg.iter().all(Option::is_some);
     }
+    if out.from_cache && filtered.is_some() {
+        let _ = std::fs::create_dir_all(&cdir);
+        let _ = std::fs::write(&index, &key);
+    }
     if !out.from_cache {
+        let filtered = match filtered.map(Ok).unwrap_or_else(|| stroke_silk_only_board(&board_text)) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("kicad-cli silk: {}: {e}", board_file.display());
+                return out;
+            }
+        };
         let work = work_dir();
         if let Err(e) = std::fs::create_dir_all(&work) {
             warn!("kicad-cli silk: {}: {e}", work.display());
@@ -231,6 +254,7 @@ pub fn plot_stroke_silk(cli: &Path, board_file: &Path, project_name: &str, cache
             if let (Some(text), true) = (&svg[s], use_cache) {
                 let _ = std::fs::create_dir_all(&cdir);
                 let _ = std::fs::write(&cached[s], text);
+                let _ = std::fs::write(&index, &key);
             }
         }
         let _ = std::fs::remove_dir_all(&work);

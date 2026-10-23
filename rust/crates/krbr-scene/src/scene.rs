@@ -736,6 +736,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
             None => &mut local,
         };
         build_relief_tiles(cache, board, &s.board, &rp, &opts.layer_art);
+        let t_copy = std::time::Instant::now();
         for side in 0..2 {
             for t in 0..cache.count() {
                 let m = &cache.tiles[side][t];
@@ -751,6 +752,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
                 s.instances.push(Instance { mesh: id, xform: Mat4::IDENTITY, material_base: 0, owner: InstanceOwner::Board });
             }
         }
+        krbr_core::debug!("scene: relief meshes copied in {:.0} ms", t_copy.elapsed().as_secs_f64() * 1000.0);
         s.sdf_grid = cache.sdf_grid;
         s.sdf_image = [cache.sdf_image[0].clone(), cache.sdf_image[1].clone()];
         s.sdf_dirty = cache
@@ -782,6 +784,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
     let mut mesh_of: HashMap<*const ModelMesh, u32> = HashMap::new();
     let mut material_set_of: BTreeMap<String, u32> = BTreeMap::new();
 
+    let t_models = std::time::Instant::now();
     for (fi, fp) in board.footprints.iter().enumerate() {
         if fp.dnp && !opts.include_dnp {
             continue;
@@ -910,6 +913,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
             krbr_core::warn!("not rendered yet: {} used by {} material(s), e.g. {}", what, names.len(), names[0]);
         }
     }
+    krbr_core::debug!("scene: models placed and materials resolved in {:.0} ms", t_models.elapsed().as_secs_f64() * 1000.0);
     krbr_core::info!(
         "scene: {} meshes, {} instances ({} models, {} placeholders), {} materials",
         s.meshes.len(),

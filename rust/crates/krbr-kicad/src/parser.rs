@@ -472,8 +472,7 @@ fn mark_of(b: &Board) -> ItemMark {
     ItemMark { g: b.graphics.len(), p: b.pads.len(), t: b.tracks.len(), v: b.vias.len(), z: b.zones.len(), s: b.stroke_texts.len() }
 }
 
-fn add_item(n: &Node, m: &ItemMark, b: &mut Board) {
-    let hash = sexpr::hash_node(n);
+fn add_item(n: &Node, hash: u64, m: &ItemMark, b: &mut Board) {
     let mut key = n.child_str("uuid").or_else(|| n.child_str("tstamp")).unwrap_or("").to_string();
     if key.is_empty() {
         key = format!("h:{}", to_hex(hash));
@@ -547,13 +546,14 @@ pub fn load_board(file: &Path) -> Result<Board, LoadError> {
 
     let ident = Xform::default();
     let mut setup_key = String::new();
-    for it in &root.items {
+    let hashes = sexpr::hash_items(&root.items);
+    for (it, &hash) in root.items.iter().zip(&hashes) {
         if !it.is_list {
             continue;
         }
         let tag = it.tag();
         if matches!(tag, "general" | "layers" | "setup") {
-            setup_key += &to_hex(sexpr::hash_node(it));
+            setup_key += &to_hex(hash);
         }
         let is_item = matches!(tag, "footprint" | "module" | "segment" | "arc" | "via" | "zone") || tag.starts_with("gr_");
         let mark = mark_of(&board);
@@ -599,7 +599,7 @@ pub fn load_board(file: &Path) -> Result<Board, LoadError> {
             }
         }
         if is_item {
-            add_item(it, &mark, &mut board);
+            add_item(it, hash, &mark, &mut board);
         }
     }
     board.setup_hash = xxh64(setup_key.as_bytes());
