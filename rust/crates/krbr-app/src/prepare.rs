@@ -402,7 +402,6 @@ pub fn prepare_empty(o: &RenderOptions) -> Option<PreparedScene> {
     Some(PreparedScene { board: Board::default(), cfg, scene, env, dist, config_hdr: String::new(), configured, config_view, remembered_view: remember::ViewValues::new(), kicad_cli: None, source: None })
 }
 
-/// 3D モデルのパスの解決：基板のフォルダと、設定ファイル（<名前>.krbr）の [paths] の変数・探す場所
 /// 組み立てで使う 3D モデルを先に読んでおく（ModelLibrary が覚えるので、組み立てのときはすぐ返る）。
 /// 凹凸のタイルと同時に進めるためのもの。STEP の分割は 1 本ずつ（OCCT の読み込みを並べない）
 fn prefetch_models(board: &Board, resolver: &ModelResolver, library: &ModelLibrary, include_dnp: bool) {
@@ -417,6 +416,7 @@ fn prefetch_models(board: &Board, resolver: &ModelResolver, library: &ModelLibra
     }
 }
 
+/// 3D モデルのパスの解決：基板のフォルダと、設定ファイル（<名前>.krbr）の [paths] の変数・探す場所
 pub fn model_resolver(board: &Board, cfg: &ProjectConfig) -> ModelResolver {
     ModelResolver::new(&board.project_dir, &cfg.path_vars, &cfg.model_search_dirs)
 }

@@ -715,7 +715,8 @@ struct App {
     env_job: Option<EnvJob>,
     /// 「ファイル → 開く...」：基板を選ぶダイアログ（別スレッド）と、選んだ基板の読み込み（別スレッド）
     board_dialog: Option<mpsc::Receiver<Option<PathBuf>>>,
-    board_job: Option<(PathBuf, mpsc::Receiver<Option<PreparedScene>>)>,
+    /// 読み込み中の基板。3 つ目は起動時の基板か（コマンドラインの指定をその基板に使う）
+    board_job: Option<(PathBuf, mpsc::Receiver<Option<PreparedScene>>, bool)>,
     env_error: String,
     /// 保存の監視（--no-watch なら None）
     watcher: Option<FileWatcher>,
@@ -2105,19 +2106,24 @@ impl App {
         self.board_dialog = Some(rx);
     }
 
-    /// 基板を裏のスレッドで読み込む（読み終えるまで、今の基板を表示し続ける）
-    fn start_board_load(&mut self, pcb: PathBuf) {
+    /// 基板を裏のスレッドで読み込む（読み終えるまで、今の基板を表示し続ける）。startup なら起動時に指定された基板で、
+    /// コマンドラインの指定（環境マップ・注視点・拡大率・保存先など）をそのまま使う
+    fn start_board_load(&mut self, pcb: PathBuf, startup: bool) {
         let pcb = std::path::absolute(&pcb).unwrap_or(pcb);
         info!("opening {}", pcb.display());
         // コマンドラインの指定のうち、前の基板のためのもの（環境マップ・注視点・拡大率・保存先）は持ち越さない
-        let o = RenderOptions { pcb: pcb.clone(), hdr: String::new(), look_at: Vec::new(), zoom: None, init: false, out: PathBuf::new(), ..self.vo.common.clone() };
+        let o = if startup {
+            RenderOptions { pcb: pcb.clone(), ..self.vo.common.clone() }
+        } else {
+            RenderOptions { pcb: pcb.clone(), hdr: String::new(), look_at: Vec::new(), zoom: None, init: false, out: PathBuf::new(), ..self.vo.common.clone() }
+        };
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             krbr_core::platform::lower_thread_priority();
             let _ = tx.send(prepare_scene(&o));
         });
         self.last_update = fl!("board-loading", name = pcb.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default());
-        self.board_job = Some((pcb, rx));
+        self.board_job = Some((pcb, rx, startup));
     }
 
     /// 基板を選ぶダイアログ・読み込みの結果を見る。読み終えていれば、その基板に切り替える
@@ -2126,21 +2132,22 @@ impl App {
             self.start_board_dialog();
         }
         if let Some(p) = self.st.req.open_path.take() {
-            self.start_board_load(p);
+            self.start_board_load(p, false);
         }
         if let Some(rx) = &self.board_dialog {
             match rx.try_recv() {
                 Ok(picked) => {
                     self.board_dialog = None;
                     if let Some(p) = picked {
-                        self.start_board_load(p);
+                        self.start_board_load(p, false);
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => self.board_dialog = None,
             }
         }
-        let Some((pcb, rx)) = &self.board_job else { return Ok(()) };
+        let Some((pcb, rx, startup)) = &self.board_job else { return Ok(()) };
+        let startup = *startup;
         let prep = match rx.try_recv() {
             Ok(p) => p,
             Err(mpsc::TryRecvError::Empty) => return Ok(()),
@@ -2149,7 +2156,7 @@ impl App {
         let pcb = pcb.clone();
         self.board_job = None;
         match prep {
-            Some(prep) => self.switch_board(prep),
+            Some(prep) => self.switch_board(prep, startup),
             None => {
                 warn!("cannot open {}", pcb.display());
                 self.last_update = fl!("board-open-failed", path = pcb.display().to_string());
@@ -2158,8 +2165,9 @@ impl App {
         }
     }
 
-    /// 読み込んだ基板に切り替える：起動し直したのと同じ状態を作り、ウィンドウ・GPU・egui・材質エディタは引き継ぐ
-    fn switch_board(&mut self, prep: PreparedScene) -> Result<(), String> {
+    /// 読み込んだ基板に切り替える：起動し直したのと同じ状態を作り、ウィンドウ・GPU・egui・材質エディタは引き継ぐ。
+    /// startup（起動時に指定された基板）なら、コマンドラインの指定を持ち越す
+    fn switch_board(&mut self, prep: PreparedScene, startup: bool) -> Result<(), String> {
         self.flush_emit_edit(true);
         self.save_view(true); // 前の基板のパネルの設定を覚える
         let pcb = prep.board.file.clone();
@@ -2168,7 +2176,11 @@ impl App {
         }
         let stem = pcb.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "board".into());
         let mut vo = ViewOptions { test: TestOptions::default(), ..self.vo.clone() };
-        vo.common = RenderOptions { pcb: pcb.clone(), hdr: String::new(), look_at: Vec::new(), zoom: None, init: false, out: board_file::base_dir(&pcb).join(format!("{stem}.png")), ..self.vo.common.clone() };
+        vo.common = if startup {
+            RenderOptions { pcb: pcb.clone(), ..self.vo.common.clone() }
+        } else {
+            RenderOptions { pcb: pcb.clone(), hdr: String::new(), look_at: Vec::new(), zoom: None, init: false, out: board_file::base_dir(&pcb).join(format!("{stem}.png")), ..self.vo.common.clone() }
+        };
         let mut fresh = new_app(vo, prep);
         fresh.window = self.window.take();
         fresh.egui_ctx = self.egui_ctx.clone();
@@ -2544,7 +2556,7 @@ impl App {
             self.draw_outline(root, central);
             if !self.has_board() {
                 let text = match &self.board_job {
-                    Some((p, _)) => fl!("board-loading", name = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()),
+                    Some((p, _, _)) => fl!("board-loading", name = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()),
                     None => fl!("no-board-hint"),
                 };
                 let galley = root.painter().layout(text, egui::FontId::proportional(18.0), egui::Color32::from_gray(220), (central.width() - 40.0).max(100.0));
@@ -3396,13 +3408,25 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
 }
 
 pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
-    let prep = if vo.common.pcb.as_os_str().is_empty() { prepare_empty(&vo.common) } else { prepare_scene(&vo.common) };
+    // 基板があれば、ウィンドウを先に出し、基板は裏で読む（読み込みの間に、ウィンドウと GPU の準備も進む）。
+    // テストモードは、決まったフレームで操作を流し込むので、これまでどおり読み終えてから始める
+    let pcb = vo.common.pcb.clone();
+    let background = !pcb.as_os_str().is_empty() && vo.test.frames == 0 && !vo.hidden;
+    let prep = if pcb.as_os_str().is_empty() || background {
+        // 読み込みの間に映すのは内蔵のスタジオ（--hdr は基板を読んだときに使う）
+        prepare_empty(&RenderOptions { pcb: PathBuf::new(), hdr: if background { STUDIO.into() } else { vo.common.hdr.clone() }, ..vo.common.clone() })
+    } else {
+        prepare_scene(&vo.common)
+    };
     let Some(prep) = prep else { anyhow::bail!("scene preparation failed") };
     // 引数なしで起動したときに開く基板（テストでは覚えない）
     if vo.test.frames == 0 && !vo.hidden && !prep.board.file.as_os_str().is_empty() {
         remember::remember_last_board(&prep.board.file);
     }
     let mut app = new_app(vo, prep);
+    if background {
+        app.start_board_load(pcb, true);
+    }
     let event_loop = EventLoop::new().map_err(|e| anyhow::anyhow!("event loop: {e}"))?;
     event_loop.run_app(&mut app).map_err(|e| anyhow::anyhow!("event loop: {e}"))?;
     // GPU の資源はコンテキストより先に捨てる
