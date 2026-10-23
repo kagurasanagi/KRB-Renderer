@@ -58,6 +58,10 @@ if ($rootDlls) { throw "直下に DLL があります: $($rootDlls.Name -join ',
 # KiCad のプラグインと、そのインストール・削除（バッチは同じフォルダの krbr.exe を使う）
 Copy-Item "$repo\kicad_plugin\krbr_preview\*" "$dst\kicad_plugin\krbr_preview" -Exclude "krbr_path.txt", "__pycache__"
 Copy-Item "$repo\scripts\install_kicad_plugin.bat", "$repo\scripts\uninstall_kicad_plugin.bat" $dst
+# krbr bench の同梱の基板と、その 3D モデル（基板の設定ファイル .krbr は入れない）
+New-Item -ItemType Directory -Force "$dst\bench" | Out-Null
+Copy-Item "$repo\bench\krbr_bench.kicad_pcb", "$repo\bench\LICENSE.md" "$dst\bench"
+Copy-Item "$repo\bench\3dmodels" "$dst\bench" -Recurse
 # ライセンス
 Copy-Item "$repo\third_party\oidn\doc\LICENSE.txt" "$dst\licenses\OpenImageDenoise-LICENSE.txt"
 Copy-Item "$repo\third_party\oidn\doc\third-party-programs-oneTBB.txt" "$dst\licenses\oneTBB-third-party-programs.txt"
@@ -87,6 +91,7 @@ KRB-Renderer $version（Rust 版）  KiCad の基板の物理ベースのレン�
 ・dll\oidn\         ノイズ除去（Intel Open Image Denoise）
 ・dll\vcruntime\    Visual C++ ランタイム（インストール不要）
 ・kicad_plugin\     KiCad のプラグイン（install_kicad_plugin.bat で入れる）
+・bench\           krbr.exe bench で速さを測る基板（3D モデルも同梱。KiCad が無くても動く）
 ・licenses\         同梱物のライセンス
 
 ■ 動かすのに必要なもの
@@ -97,6 +102,7 @@ KRB-Renderer $version（Rust 版）  KiCad の基板の物理ベースのレン�
 ■ 同梱物のライセンス（licenses フォルダ）
 ・Intel Open Image Denoise（Apache-2.0）、oneTBB（Apache-2.0）、Open CASCADE Technology（LGPL-2.1、例外条項付き）。
 ・Microsoft Visual C++ ランタイム（再頒布用ファイル）。
+・bench\3dmodels の STEP：KiCad の標準ライブラリ（CC-BY-SA 4.0、例外条項付き。bench\LICENSE.md）。
 "@
 [System.IO.File]::WriteAllText("$dst\README.txt", $readme, (New-Object System.Text.UTF8Encoding $true))
 

@@ -983,6 +983,14 @@ pub struct MaterialSetup {
     pub project_file: PathBuf,
 }
 
+impl MaterialSetup {
+    /// 組み込みの材質だけで、対応表も上書きも無いもの（krbr bench の同梱の基板：全体設定で結果が変わらないように）。
+    /// 書き込み先のファイルは無い（空のパス）
+    pub fn builtin_only() -> Self {
+        MaterialSetup { library: crate::material_library::MaterialLibrary::builtin(), global: Default::default(), project: Default::default(), global_file: PathBuf::new(), project_file: PathBuf::new() }
+    }
+}
+
 /// 材質ライブラリ（組み込み＋全体設定 materials/*.toml）、全体の対応表、プロジェクトの上書きを読む
 pub fn load_material_setup(pcb: &std::path::Path) -> MaterialSetup {
     let config_dir = krbr_core::platform::config_dir();

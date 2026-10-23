@@ -2,6 +2,9 @@
 //! 覚えた設定（パネルの設定・視点・環境マップ）は使わず、条件を固定する：内蔵のスタジオ、自動の構図（仰角 35°・方位 45°・画角 30°）、
 //! ピンホール、露出 0、乱数の種 0、ノイズ除去なし。PT（RGB）・PT（分光）・BDPT・VCM をそれぞれ測る。
 //! 結果は `%APPDATA%\krbr\bench.csv` に追記し、同じ基板・同じ条件で別の GPU の記録があれば、それと比べる。
+//! 基板を指定しなければ、同梱のベンチマークの基板（`bench\krbr_bench.kicad_pcb`。scripts/gen_bench_board.py が作る）を使う。
+//! 同梱の基板は 3D モデルも同じフォルダに持ち、設定ファイル（基板の .krbr、全体設定の材質と対応表）と kicad-cli を使わないので、
+//! どの PC でも同じシーンになる。
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,7 +18,8 @@ use crate::prepare::{frame_params, initial_camera, prepare_scene, trace_method_n
 
 #[derive(Debug, Clone)]
 pub struct BenchOptions {
-    pub pcb: PathBuf,
+    /// None なら同梱のベンチマークの基板
+    pub pcb: Option<PathBuf>,
     pub width: u32,
     pub height: u32,
     /// 場合ごとに測るサンプル数（この前に準備として WARMUP_SPP を流す）
@@ -28,6 +32,14 @@ const WARMUP_SPP: u32 = 8;
 /// 測る場合：(表示名, 積分器, 分光)
 const CASES: [(&str, IntegratorKind, bool); 4] = [("PT", IntegratorKind::Pt, false), ("PT spectral", IntegratorKind::Pt, true), ("BDPT", IntegratorKind::Bdpt, false), ("VCM", IntegratorKind::Vcm, false)];
 
+/// 同梱のベンチマークの基板のファイル名
+pub const BUNDLED_BOARD: &str = "krbr_bench.kicad_pcb";
+
+/// 同梱のベンチマークの基板：配布の一式では exe の横の bench\、開発中はリポジトリの bench\（exe のフォルダから上へたどる）
+pub fn bundled_board() -> Option<PathBuf> {
+    krbr_core::platform::exe_dir().ancestors().take(6).map(|d| d.join("bench").join(BUNDLED_BOARD)).find(|f| f.is_file())
+}
+
 const CSV_HEADER: &str = "date,gpu,driver,method,board,board_hash,width,height,spp,max_depth,case,ms_per_spp";
 
 struct Row {
@@ -39,8 +51,13 @@ struct Row {
 }
 
 pub fn cmd_bench(b: &BenchOptions) -> anyhow::Result<()> {
+    let bundled = b.pcb.is_none();
+    let pcb = match &b.pcb {
+        Some(p) => p.clone(),
+        None => bundled_board().ok_or_else(|| anyhow::anyhow!("the bundled benchmark board (bench\\{BUNDLED_BOARD}) was not found next to krbr.exe; give a .kicad_pcb"))?,
+    };
     let o = RenderOptions {
-        pcb: b.pcb.clone(),
+        pcb,
         hdr: krbr_render::studio_env::STUDIO.into(),
         width: Some(b.width),
         height: Some(b.height),
@@ -56,11 +73,17 @@ pub fn cmd_bench(b: &BenchOptions) -> anyhow::Result<()> {
         spectral: Some(false),
         denoise: Some(false),
         ignore_remembered: true,
+        builtin_settings_only: bundled,
+        no_kicad_cli: bundled,
         ..Default::default()
     };
     let t0 = Instant::now();
     let Some(prep) = prepare_scene(&o) else { anyhow::bail!("scene preparation failed") };
     let prepare_s = t0.elapsed().as_secs_f64();
+    if bundled && !prep.scene.missing.is_empty() {
+        // 箱で代えたまま測ると、別の PC の記録と比べられない
+        anyhow::bail!("{} 3D model(s) of the bundled benchmark board are missing or unreadable (e.g. {}); reinstall krbr", prep.scene.missing.len(), prep.scene.missing[0].spec);
+    }
     let cfg = &prep.cfg;
     let cam = initial_camera(&prep, &o, b.width, b.height);
     let ctx = Context::new(&ContextOptions { low_queue_priority: true, ..Default::default() }).map_err(|e| anyhow::anyhow!(e))?;
@@ -211,6 +234,28 @@ mod tests {
         assert_eq!(rows[1].gpu, "GPU, \"quoted\"");
         assert_eq!(rows[0].conditions, "1920,1080,64,8");
         assert_eq!((rows[2].case.as_str(), rows[2].ms_per_spp), ("PT", 30.0));
+    }
+
+    /// 同梱のベンチマークの基板が、そのフォルダだけで閉じている：3D モデルはどれも ${KIPRJMOD} の中にあり、
+    /// kicad-cli の要る文字と塗りの無いゾーンが無い（環境によって結果が変わるものを含まない）
+    #[test]
+    fn bundled_board_is_self_contained() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bench");
+        let board = krbr_kicad::load_board(&dir.join(BUNDLED_BOARD)).expect("bench board");
+        assert!(board.footprints.len() > 100 && board.vias.len() > 100);
+        assert_eq!(board.stroke_silk_count(), 0);
+        assert_eq!(board.unfilled_zones, 0);
+        let resolver = krbr_kicad::ModelResolver::new(&board.project_dir, &Default::default(), &[]);
+        let models_dir = std::fs::canonicalize(dir.join("3dmodels")).unwrap();
+        let mut n = 0;
+        for m in board.footprints.iter().flat_map(|f| &f.models) {
+            assert!(m.path.starts_with("${KIPRJMOD}/3dmodels/"), "{}", m.path);
+            let r = resolver.resolve(&m.path);
+            assert!(r.found && !r.substituted, "{}", m.path);
+            assert!(std::fs::canonicalize(&r.path).unwrap().starts_with(&models_dir), "{}", r.path.display());
+            n += 1;
+        }
+        assert!(n > 100);
     }
 
     #[test]

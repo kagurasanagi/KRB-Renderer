@@ -71,6 +71,9 @@ pub struct RenderOptions {
     pub denoise_strength: Option<f32>,
     /// この基板で覚えた設定（パネルの設定・視点・環境マップ）を使わない（krbr bench：同じ条件で測るため）
     pub ignore_remembered: bool,
+    /// 設定ファイル（基板の <名前>.krbr、全体設定の材質ライブラリと対応表）を読まず、既定値と組み込みの材質だけで作る
+    /// （krbr bench の同梱の基板：どの PC でも同じシーンにするため）
+    pub builtin_settings_only: bool,
 }
 
 pub struct PreparedScene {
@@ -264,7 +267,12 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
         write_default_configs(&board.file);
     }
     // 設定ファイル → この基板で覚えたパネルの設定 → コマンドライン の順に重ねる
-    let files = load_project_config(&board.file);
+    let files = if o.builtin_settings_only {
+        info!("config: built-in defaults only (board and global settings are not read)");
+        ProjectConfig::default()
+    } else {
+        load_project_config(&board.file)
+    };
     let config_view = remember::ViewSettings::of(&files).values();
     let remembered_view = if o.ignore_remembered { remember::ViewValues::new() } else { remember::remembered_view(&board.file, &config_view) };
     let mut configured = files.clone();
@@ -301,7 +309,7 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
     let cache_dir = krbr_core::platform::cache_dir();
 
     // 部品の材質：材質ライブラリ、全体の対応表、プロジェクトの上書き
-    let materials = load_material_setup(&board.file);
+    let materials = if o.builtin_settings_only { MaterialSetup::builtin_only() } else { load_material_setup(&board.file) };
     let kicad_cli = setup_stroke_silk(&board, &mut cfg, o, &cache_dir);
     let resolver = model_resolver(&board, &cfg);
     let library = Arc::new(ModelLibrary::new(cache_dir.clone(), MeshParams::default(), !o.no_cache));

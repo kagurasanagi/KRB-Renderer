@@ -59,8 +59,8 @@ enum Command {
     },
     /// measure the rendering speed under fixed conditions (to compare GPUs); results are appended to bench.csv in the config folder
     Bench {
-        /// .kicad_pcb file
-        pcb: PathBuf,
+        /// .kicad_pcb file (default: the bundled benchmark board, bench\krbr_bench.kicad_pcb next to krbr.exe)
+        pcb: Option<PathBuf>,
         /// samples per case (after 8 warm-up samples)
         #[arg(long, default_value_t = 64)]
         spp: u32,
@@ -360,6 +360,7 @@ impl RenderArgs {
             denoise: if self.no_denoise { Some(false) } else if self.denoise { Some(true) } else { None },
             denoise_strength: self.denoise_strength.map(|v| v.clamp(0.0, 1.0)),
             ignore_remembered: false,
+            builtin_settings_only: false,
             validate: self.validate,
             spectral: if self.spectral { Some(true) } else if self.rgb { Some(false) } else { None },
             lens: self.lens,

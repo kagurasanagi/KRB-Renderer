@@ -11,3 +11,5 @@
 /rust/target/
 # 配布用の一式（scripts\make_dist.ps1 で作る）
 /dist/
+# ビューアで開いたときにできる、同梱のベンチマークの基板の設定ファイル
+/bench/*.krbr
