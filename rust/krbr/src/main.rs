@@ -339,6 +339,9 @@ struct ViewArgs {
     /// else the language chosen in KiCad, else the OS language
     #[arg(long)]
     lang: Option<String>,
+    /// draw the toolbar and the status bar with a WebView (WebView2) instead of the built-in UI (prototype)
+    #[arg(long)]
+    web_ui: bool,
 }
 
 #[derive(Args, Debug)]
@@ -651,6 +654,7 @@ fn main() {
                 render_ratio: args.render_ratio,
                 paused: args.paused,
                 language: args.lang.clone(),
+                web_ui: args.web_ui,
                 test: TestOptions {
                     frames: args.test_frames,
                     screenshot: args.screenshot.clone(),

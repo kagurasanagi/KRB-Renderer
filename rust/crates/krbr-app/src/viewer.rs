@@ -23,7 +23,7 @@ use krbr_scene::{mask_presets, orbit_camera, Camera, InstanceOwner, IntegratorKi
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
@@ -56,6 +56,8 @@ pub struct ViewOptions {
     pub render_ratio: Option<f32>,
     /// 表示の言語（--lang。"ja" など）。None なら環境変数 KRBR_LANG、メニューで選んだもの、KiCad、OS の順
     pub language: Option<String>,
+    /// ボタン列とステータスバーを WebView で描く（--web-ui。試作）
+    pub web_ui: bool,
     /// 開発用のテストの操作（--test-*）
     pub test: TestOptions,
 }
@@ -478,6 +480,79 @@ struct ViewerSettings {
 /// 最大のサンプル数の既定値
 const DEFAULT_MAX_SPP: u32 = 4096;
 
+/// --web-ui のボタン列とステータスバーの高さ（egui のポイント）
+const WEB_TOOLBAR_HEIGHT: f32 = 66.0;
+const WEB_STATUS_HEIGHT: f32 = 48.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusState {
+    Rendering,
+    Paused,
+    Done,
+}
+
+/// ステータスバーの文字（訳したもの）
+struct StatusTexts {
+    state: StatusState,
+    state_text: String,
+    samples: u32,
+    max_spp: u32,
+    elapsed: String,
+    elapsed_tip: String,
+    average: Option<String>,
+    average_tip: String,
+    remaining: Option<String>,
+    /// 2 行目：描画の条件（文字と、マウスを載せたときの説明）
+    chips: Vec<(String, Option<String>)>,
+    /// 2 行目の終わり：読み直しなどの知らせ（作業中なら true）
+    notes: Vec<(String, bool)>,
+}
+
+impl StatusTexts {
+    /// WebView へ送る JSON（status.html の krbr.status）
+    fn json(&self) -> String {
+        let mut chips: Vec<serde_json::Value> = self.chips.iter().map(|(t, tip)| serde_json::json!({ "text": t, "tip": tip })).collect();
+        chips.extend(self.notes.iter().map(|(t, busy)| serde_json::json!({ "text": t, "note": true, "busy": busy })));
+        serde_json::json!({
+            "state": match self.state { StatusState::Rendering => "rendering", StatusState::Paused => "paused", StatusState::Done => "done" },
+            "stateText": self.state_text,
+            "samples": self.samples, "maxSpp": self.max_spp,
+            "elapsed": self.elapsed, "elapsedTip": self.elapsed_tip,
+            "average": self.average, "averageTip": self.average_tip,
+            "remaining": self.remaining,
+            "chips": chips,
+        })
+        .to_string()
+    }
+}
+
+/// WebView のキー（KeyboardEvent.code）を、ビューアのキーの割り当てに使う KeyCode にする（割り当てのあるキーだけ）
+fn key_code_of_js(code: &str) -> Option<KeyCode> {
+    let k = match code {
+        "F1" => KeyCode::F1,
+        "Tab" => KeyCode::Tab,
+        "KeyR" => KeyCode::KeyR,
+        "KeyF" => KeyCode::KeyF,
+        "KeyS" => KeyCode::KeyS,
+        "KeyP" => KeyCode::KeyP,
+        "KeyD" => KeyCode::KeyD,
+        "KeyM" => KeyCode::KeyM,
+        "KeyO" => KeyCode::KeyO,
+        "Equal" => KeyCode::Equal,
+        "Minus" => KeyCode::Minus,
+        "NumpadAdd" => KeyCode::NumpadAdd,
+        "NumpadSubtract" => KeyCode::NumpadSubtract,
+        "BracketLeft" => KeyCode::BracketLeft,
+        "BracketRight" => KeyCode::BracketRight,
+        "Digit1" => KeyCode::Digit1,
+        "Digit2" => KeyCode::Digit2,
+        "Digit3" => KeyCode::Digit3,
+        "Escape" => KeyCode::Escape,
+        _ => return None,
+    };
+    Some(k)
+}
+
 /// 長さ（mm）を、大きさに合った単位と桁数の文字にする（単位も付ける）：1 mm 未満は µm、1 m 以上は m、1 km 以上は km。
 /// 有効数字はおよそ 3 桁（カメラの距離のように、1 mm 未満から数 km まで変わる値を読めるように）
 fn format_length(mm: f64) -> String {
@@ -846,6 +921,10 @@ struct App {
     st: ViewState,
     scene_as_configured: SceneOptions,
     window: Option<Window>,
+    /// --web-ui：ボタン列とステータスバーの WebView、イベントループを起こすための口、置き場所（egui のポイント）
+    web: Option<crate::web_ui::WebUi>,
+    proxy: Option<EventLoopProxy<crate::web_ui::Wake>>,
+    web_rects: [egui::Rect; 2],
     egui_ctx: egui::Context,
     egui_state: Option<EguiState>,
     gpu: Option<Gpu>,
@@ -1436,6 +1515,16 @@ impl App {
         install_fonts(&self.egui_ctx, &self.language);
         self.egui_state = Some(EguiState::new(self.egui_ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, None));
         self.gpu = Some(Gpu { ctx, gpu, swap, prog, tone, denoiser: None, tone_denoised: None, egui_renderer, cmd, acquired, fence, timestamps, ts_period_ms });
+        if let (true, Some(proxy)) = (self.vo.web_ui, self.proxy.clone()) {
+            let t0 = Instant::now();
+            match crate::web_ui::WebUi::new(&window, proxy) {
+                Ok(w) => {
+                    info!("web UI: WebView2 ready in {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0);
+                    self.web = Some(w);
+                }
+                Err(e) => warn!("web UI: {e}; using the built-in UI"),
+            }
+        }
         self.window = Some(window);
         Ok(())
     }
@@ -2416,6 +2505,9 @@ impl App {
         };
         let mut fresh = new_app(vo, prep);
         fresh.window = self.window.take();
+        fresh.web = self.web.take();
+        fresh.proxy = self.proxy.clone();
+        fresh.web_rects = self.web_rects;
         fresh.egui_ctx = self.egui_ctx.clone();
         fresh.egui_state = self.egui_state.take();
         fresh.gpu = self.gpu.take();
@@ -2495,6 +2587,10 @@ impl App {
     /// メニューの下のボタン列：一時停止、真上から・真裏から、表面実装・スルーホールの部品の表示、ノイズ除去
     fn tool_bar(&mut self, root: &mut egui::Ui) {
         use crate::toolbar::{button, Icon};
+        if self.web.is_some() {
+            self.web_rects[0] = egui::Panel::top("toolbar").exact_size(WEB_TOOLBAR_HEIGHT).frame(egui::Frame::NONE).show(root, |ui| ui.allocate_space(ui.available_size())).response.rect;
+            return;
+        }
         // 最大 spp に達したら、止めるものが無いので「完了」にして押せなくする（視点などを変えて累積をやり直すと元に戻る）
         let done = self.gpu.as_ref().is_some_and(|g| g.prog.samples() >= self.st.max_spp);
         let board = self.has_board();
@@ -2540,15 +2636,73 @@ impl App {
     /// 画面の下端のステータスバー：状態、spp と進み具合、経過時間、1 サンプルあたりの平均、残りの予想、描画の条件。
     /// 読み直しなどの知らせがあれば 2 行目に出す
     fn status_bar(&mut self, root: &mut egui::Ui) {
-        let Some(g) = self.gpu.as_ref() else { return };
+        if self.web.is_some() {
+            self.web_rects[1] = egui::Panel::bottom("status").exact_size(WEB_STATUS_HEIGHT).frame(egui::Frame::NONE).show(root, |ui| ui.allocate_space(ui.available_size())).response.rect;
+            return;
+        }
+        let Some(t) = self.status_texts() else { return };
+        let yellow = egui::Color32::from_rgb(255, 204, 77);
+        // 2 行とも折り返さない（高さを中身で変えない）。折り返すと、表示の倍率などの文字の長さでバーの高さが変わり、
+        // 3D 表示の大きさが変わって倍率の文字がまた変わる、を毎フレーム繰り返して画面が揺れる。入らない分は切る
+        egui::Panel::bottom("status").show(root, |ui| {
+            ui.horizontal(|ui| {
+                match t.state {
+                    StatusState::Paused => ui.colored_label(yellow, &t.state_text),
+                    StatusState::Done => ui.colored_label(egui::Color32::from_rgb(120, 200, 120), &t.state_text),
+                    StatusState::Rendering => ui.label(&t.state_text),
+                };
+                ui.add(egui::ProgressBar::new((t.samples as f32 / t.max_spp.max(1) as f32).min(1.0)).desired_width(140.0).text(format!("{} / {} spp", t.samples, t.max_spp)));
+                ui.separator();
+                ui.label(&t.elapsed).on_hover_text(&t.elapsed_tip);
+                if let Some(a) = &t.average {
+                    ui.label(a).on_hover_text(&t.average_tip);
+                }
+                if let Some(r) = &t.remaining {
+                    ui.label(r);
+                }
+            });
+            // 2 行目：描画の条件と、読み直しなどの知らせ（入らなければ「…」で切り、マウスを載せると全文）
+            ui.horizontal(|ui| {
+                for (i, (text, tip)) in t.chips.iter().enumerate() {
+                    if i > 0 {
+                        ui.separator();
+                    }
+                    let r = ui.weak(text);
+                    if let Some(tip) = tip {
+                        r.on_hover_text(tip);
+                    }
+                }
+                for (text, busy) in &t.notes {
+                    ui.separator();
+                    let rich = if *busy { egui::RichText::new(text).color(yellow) } else { egui::RichText::new(text).weak() };
+                    ui.add(egui::Label::new(rich).truncate()).on_hover_text(text);
+                }
+            });
+        });
+    }
+
+    /// ステータスバーに出す文字（egui と WebView で共通）。GPU の準備の前は None
+    fn status_texts(&self) -> Option<StatusTexts> {
+        let g = self.gpu.as_ref()?;
         let st = &self.st;
         let (samples, max_spp) = (g.prog.samples(), st.max_spp);
         let done = samples >= max_spp;
-        let yellow = egui::Color32::from_rgb(255, 204, 77);
         let measured = self.accum_measured.max(1) as f64;
         let wall_per = self.accum_wall.as_secs_f64() / measured;
         let info = &g.ctx.info;
-        let method = trace_method_name(g.ctx);
+        let state = if st.paused {
+            StatusState::Paused
+        } else if done {
+            StatusState::Done
+        } else {
+            StatusState::Rendering
+        };
+        let state_text = match state {
+            StatusState::Paused => fl!("status-paused"),
+            StatusState::Done => fl!("status-done"),
+            StatusState::Rendering => fl!("status-rendering"),
+        };
+        let (rw, rh) = (g.prog.targets().width, g.prog.targets().height);
         let mut notes: Vec<(String, bool)> = Vec::new();
         if self.reload_job.is_some() {
             notes.push((fl!("status-reloading"), true));
@@ -2562,49 +2716,28 @@ impl App {
         if !self.last_update.is_empty() {
             notes.push((self.last_update.clone(), false));
         }
-        // 2 行とも折り返さない（高さを中身で変えない）。折り返すと、表示の倍率などの文字の長さでバーの高さが変わり、
-        // 3D 表示の大きさが変わって倍率の文字がまた変わる、を毎フレーム繰り返して画面が揺れる。入らない分は切る
-        egui::Panel::bottom("status").show(root, |ui| {
-            ui.horizontal(|ui| {
-                if st.paused {
-                    ui.colored_label(yellow, fl!("status-paused"));
-                } else if done {
-                    ui.colored_label(egui::Color32::from_rgb(120, 200, 120), fl!("status-done"));
-                } else {
-                    ui.label(fl!("status-rendering"));
-                }
-                ui.add(egui::ProgressBar::new((samples as f32 / max_spp.max(1) as f32).min(1.0)).desired_width(140.0).text(format!("{samples} / {max_spp} spp")));
-                ui.separator();
-                ui.label(fl!("status-elapsed", time = format_duration(self.accum_wall.as_secs_f64())))
-                    .on_hover_text(fl!("status-elapsed-tip"));
-                if self.accum_measured > 0 {
-                    ui.label(fl!("status-average", wall = format!("{:.1}", wall_per * 1000.0), gpu = format!("{:.1}", self.accum_gpu_ms / measured)))
-                        .on_hover_text(fl!("status-average-tip"));
-                    if !done && !st.paused {
-                        ui.label(fl!("status-remaining", time = format_duration(wall_per * (max_spp - samples) as f64)));
-                    }
-                }
-            });
-            // 2 行目：描画の条件と、読み直しなどの知らせ（入らなければ「…」で切り、マウスを載せると全文）
-            ui.horizontal(|ui| {
-                ui.weak(fl!("status-integrator", integrator = g.prog.integrator_kind().as_str().to_uppercase(), color = if st.spectral { fl!("status-spectral") } else { "RGB".into() }));
-                ui.separator();
-                let (rw, rh) = (g.prog.targets().width, g.prog.targets().height);
-                ui.weak(fl!("status-render-size", width = rw.to_string(), height = rh.to_string(), percent = format!("{:.0}", 100.0 * st.display.w as f64 / rw.max(1) as f64)))
-                    .on_hover_text(if st.size_mode.is_some() { fl!("status-size-fixed-tip") } else { fl!("status-size-fit-tip") });
-                ui.separator();
-                ui.weak(format!("EV {:+.2}", st.exposure));
-                ui.separator();
-                ui.weak(fl!("status-camera", distance = format_length(st.distance as f64))).on_hover_text(fl!("status-camera-tip"));
-                ui.separator();
-                ui.weak(fl!("status-gpu", name = info.name.as_str(), method = method));
-                for (text, busy) in &notes {
-                    ui.separator();
-                    let rich = if *busy { egui::RichText::new(text).color(yellow) } else { egui::RichText::new(text).weak() };
-                    ui.add(egui::Label::new(rich).truncate()).on_hover_text(text);
-                }
-            });
-        });
+        Some(StatusTexts {
+            state,
+            state_text,
+            samples,
+            max_spp,
+            elapsed: fl!("status-elapsed", time = format_duration(self.accum_wall.as_secs_f64())),
+            elapsed_tip: fl!("status-elapsed-tip"),
+            average: (self.accum_measured > 0).then(|| fl!("status-average", wall = format!("{:.1}", wall_per * 1000.0), gpu = format!("{:.1}", self.accum_gpu_ms / measured))),
+            average_tip: fl!("status-average-tip"),
+            remaining: (self.accum_measured > 0 && !done && !st.paused).then(|| fl!("status-remaining", time = format_duration(wall_per * (max_spp - samples) as f64))),
+            chips: vec![
+                (fl!("status-integrator", integrator = g.prog.integrator_kind().as_str().to_uppercase(), color = if st.spectral { fl!("status-spectral") } else { "RGB".into() }), None),
+                (
+                    fl!("status-render-size", width = rw.to_string(), height = rh.to_string(), percent = format!("{:.0}", 100.0 * st.display.w as f64 / rw.max(1) as f64)),
+                    Some(if st.size_mode.is_some() { fl!("status-size-fixed-tip") } else { fl!("status-size-fit-tip") }),
+                ),
+                (format!("EV {:+.2}", st.exposure), None),
+                (fl!("status-camera", distance = format_length(st.distance as f64)), Some(fl!("status-camera-tip"))),
+                (fl!("status-gpu", name = info.name.as_str(), method = trace_method_name(g.ctx)), None),
+            ],
+            notes,
+        })
     }
 
     fn menu_bar(&mut self, root: &mut egui::Ui) {
@@ -2811,7 +2944,9 @@ impl App {
             return Ok(()); // 最小化中
         }
         self.test.inject(self.frames, &mut self.st, &mut self.save_as_target);
+        self.apply_web_messages();
         let ui = self.run_ui();
+        self.update_web(ui.pixels_per_point);
         if self.st.req.quit {
             self.done = true;
             return Ok(());
@@ -2826,6 +2961,76 @@ impl App {
             self.gpu.as_ref().unwrap().ctx.destroy_buffer(&mut b);
         }
         Ok(())
+    }
+
+    /// WebView のボタン・キーの操作を、egui のボタン・キーと同じ要求にする
+    fn apply_web_messages(&mut self) {
+        let Some(web) = self.web.as_mut() else { return };
+        let done = self.gpu.as_ref().is_some_and(|g| g.prog.samples() >= self.st.max_spp);
+        for m in web.messages() {
+            let st = &mut self.st;
+            match m {
+                crate::web_ui::Msg::Click(id) => match id.as_str() {
+                    "pause" if !done => st.paused = !st.paused,
+                    "top" => st.req.view_preset = Some(TOP_VIEW),
+                    "bottom" => st.req.view_preset = Some(BOTTOM_VIEW),
+                    "fit" => st.req.fit_view = true,
+                    "smd" => {
+                        st.show_smd = !st.show_smd;
+                        st.changed.visibility = true;
+                    }
+                    "tht" => {
+                        st.show_tht = !st.show_tht;
+                        st.changed.visibility = true;
+                    }
+                    "denoise" => st.denoise = !st.denoise,
+                    _ => {}
+                },
+                crate::web_ui::Msg::Key(code) => {
+                    if let Some(action) = key_code_of_js(&code).and_then(key_action) {
+                        if self.apply_key_action(action) {
+                            self.st.req.quit = true;
+                        }
+                    }
+                }
+                crate::web_ui::Msg::Ready => {}
+            }
+        }
+    }
+
+    /// WebView を egui が空けた場所へ置き、ボタン列とステータスバーの状態を送る
+    fn update_web(&mut self, ppp: f32) {
+        if self.web.is_none() {
+            return;
+        }
+        let px = |r: egui::Rect| -> crate::web_ui::PxRect { ((r.min.x * ppp).round() as i32, (r.min.y * ppp).round() as i32, (r.width() * ppp).round() as u32, (r.height() * ppp).round() as u32) };
+        let (tb, sb) = (px(self.web_rects[0]), px(self.web_rects[1]));
+        let toolbar = self.toolbar_json();
+        let status = self.status_texts().map(|t| t.json()).unwrap_or_default();
+        let web = self.web.as_mut().unwrap();
+        web.layout(tb, sb);
+        web.send(&toolbar, &status);
+    }
+
+    /// ボタン列の状態（WebView へ送る JSON。文字は訳したもの）
+    fn toolbar_json(&self) -> String {
+        let st = &self.st;
+        let done = self.gpu.as_ref().is_some_and(|g| g.prog.samples() >= st.max_spp);
+        serde_json::json!({
+            "paused": st.paused, "done": done, "board": self.has_board(),
+            "smd": st.show_smd, "tht": st.show_tht, "denoise": st.denoise,
+            "text": {
+                "pause": fl!("toolbar-pause"), "resume": fl!("toolbar-resume"), "done": fl!("toolbar-done"),
+                "top": fl!("toolbar-top"), "bottom": fl!("toolbar-bottom"), "fit": fl!("toolbar-fit"),
+                "smd": fl!("toolbar-smd"), "tht": fl!("toolbar-tht"), "denoise": fl!("toolbar-denoise"),
+            },
+            "tips": {
+                "pause": fl!("toolbar-pause-tip"), "done": fl!("toolbar-done-tip"),
+                "top": fl!("toolbar-top-tip"), "bottom": fl!("toolbar-bottom-tip"), "fit": fl!("toolbar-fit-tip"),
+                "smd": fl!("toolbar-smd-tip"), "tht": fl!("toolbar-tht-tip"), "denoise": fl!("toolbar-denoise-tip"),
+            },
+        })
+        .to_string()
     }
 
     /// 裏の処理（環境マップの読み込み・基板の読み直し・書き換えた材質の反映）が残っているか
@@ -3469,7 +3674,7 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<crate::web_ui::Wake> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -3555,9 +3760,32 @@ impl ApplicationHandler for App {
                 }
                 let PhysicalKey::Code(code) = event.physical_key else { return };
                 let Some(action) = key_action(code) else { return };
-                let st = &mut self.st;
+                if self.apply_key_action(action) {
+                    el.exit();
+                }
+            }
+            WindowEvent::RedrawRequested => {} // 描画は about_to_wait で行う
+            _ => {}
+        }
+    }
+
+    fn user_event(&mut self, _el: &ActiveEventLoop, _wake: crate::web_ui::Wake) {
+        // WebView の操作で起きた。描画は about_to_wait で行う（そこで操作を受け取る）
+    }
+
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        self.about_to_wait_impl(el);
+    }
+}
+
+impl App {
+    /// キーの操作をする。終了なら true
+    fn apply_key_action(&mut self, action: KeyAction) -> bool {
+        let st = &mut self.st;
+        {
+            {
                 match action {
-                    KeyAction::Quit => el.exit(),
+                    KeyAction::Quit => return true,
                     KeyAction::TogglePanel => st.show_panel = !st.show_panel,
                     KeyAction::ResetView => st.req.reset_view = true,
                     KeyAction::FitView => st.req.fit_view = true,
@@ -3574,12 +3802,11 @@ impl ApplicationHandler for App {
                     KeyAction::OpenBoard => st.req.open_board = true,
                 }
             }
-            WindowEvent::RedrawRequested => {} // 描画は about_to_wait で行う
-            _ => {}
         }
+        false
     }
 
-    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+    fn about_to_wait_impl(&mut self, el: &ActiveEventLoop) {
         if self.window.is_none() || self.gpu.is_none() || self.done {
             return;
         }
@@ -3671,6 +3898,9 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         prep,
         st,
         window: None,
+        web: None,
+        proxy: None,
+        web_rects: [egui::Rect::NOTHING; 2],
         egui_ctx: egui::Context::default(),
         egui_state: None,
         gpu: None,
@@ -3766,7 +3996,10 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
     if background {
         app.start_board_load(pcb, true);
     }
-    let event_loop = EventLoop::new().map_err(|e| anyhow::anyhow!("event loop: {e}"))?;
+    let event_loop = EventLoop::<crate::web_ui::Wake>::with_user_event().build().map_err(|e| anyhow::anyhow!("event loop: {e}"))?;
+    if app.vo.web_ui {
+        app.proxy = Some(event_loop.create_proxy());
+    }
     event_loop.run_app(&mut app).map_err(|e| anyhow::anyhow!("event loop: {e}"))?;
     // GPU の資源はコンテキストより先に捨てる
     if let Some(g) = app.gpu.take() {

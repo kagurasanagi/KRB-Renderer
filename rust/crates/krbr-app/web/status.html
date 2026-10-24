@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>/*STYLE*/</style>
+</head>
+<body class="status">
+  <div class="row">
+    <span class="state" id="state"><span class="dot"></span><span id="state-text"></span></span>
+    <div class="progress"><div id="bar" style="width: 0%"></div></div>
+    <span class="mono spp" id="spp"></span>
+    <span id="elapsed"></span>
+    <span class="muted" id="average"></span>
+    <span class="muted" id="remaining"></span>
+  </div>
+  <div class="row chips" id="chips"></div>
+<script>
+const post = (m) => window.ipc.postMessage(JSON.stringify(m));
+document.addEventListener("keydown", (e) => {
+  if (e.repeat) return;
+  post({ type: "key", code: e.code });
+  e.preventDefault();
+});
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+
+function text(id, t, tip) {
+  const el = document.getElementById(id);
+  el.textContent = t || "";
+  el.title = tip || "";
+}
+
+// Rust から呼ぶ：今の状態（文字は Rust 側で訳したもの）
+window.krbr = {
+  status(s) {
+    const st = document.getElementById("state");
+    st.className = "state " + s.state;
+    text("state-text", s.stateText);
+    document.getElementById("bar").style.width = (100 * Math.min(1, s.samples / Math.max(1, s.maxSpp))).toFixed(2) + "%";
+    text("spp", `${s.samples} / ${s.maxSpp} spp`);
+    text("elapsed", s.elapsed, s.elapsedTip);
+    text("average", s.average, s.averageTip);
+    text("remaining", s.remaining);
+    const chips = document.getElementById("chips");
+    chips.replaceChildren(
+      ...s.chips.map((c) => {
+        const el = document.createElement("span");
+        el.textContent = c.text;
+        if (c.tip) el.title = c.tip;
+        if (c.note) {
+          el.className = "note" + (c.busy ? " busy" : "");
+          el.title = c.text;
+        }
+        return el;
+      }),
+    );
+  },
+};
+post({ type: "ready" });
+</script>
+</body>
+</html>

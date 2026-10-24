@@ -31,3 +31,5 @@ sys-locale = "0.3"
 unic-langid = "0.9"
 serde_json.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
+# ビューアのボタン列・ステータスバーを WebView（WebView2）で描く試作（--web-ui）。Tauri の中の WebView の部品だけを使う
+wry = { version = "0.57", default-features = false, features = ["os-webview"] }
