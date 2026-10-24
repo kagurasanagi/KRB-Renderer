@@ -87,6 +87,9 @@ key-display-mode = image / albedo / normal
 key-quit = quit
 
 ## Toolbar
+toolbar-group-camera = Camera
+toolbar-group-visibility = Show
+toolbar-group-effects = Effects
 toolbar-done = Done
 toolbar-done-tip = The maximum spp is reached, so rendering has finished and stopped. To keep going, raise the maximum spp in the settings panel
 toolbar-resume = Resume

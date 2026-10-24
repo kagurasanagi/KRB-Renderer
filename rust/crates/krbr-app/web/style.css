@@ -75,6 +75,23 @@ body.toolbar {
   border-bottom: 1px solid var(--line);
 }
 
+/* 見出し付きのボタンのグループ */
+.cluster {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.cluster > .title {
+  height: 14px;
+  padding-left: 6px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
 .group {
   display: flex;
   gap: 2px;
@@ -82,7 +99,7 @@ body.toolbar {
 
 .sep {
   width: 1px;
-  height: 34px;
+  height: 52px;
   margin: 0 8px;
   background: var(--line-2);
 }

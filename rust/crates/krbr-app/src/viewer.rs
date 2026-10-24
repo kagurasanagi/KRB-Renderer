@@ -481,7 +481,7 @@ struct ViewerSettings {
 const DEFAULT_MAX_SPP: u32 = 4096;
 
 /// --web-ui のボタン列とステータスバーの高さ（egui のポイント）
-const WEB_TOOLBAR_HEIGHT: f32 = 66.0;
+const WEB_TOOLBAR_HEIGHT: f32 = 78.0;
 const WEB_STATUS_HEIGHT: f32 = 48.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2595,40 +2595,56 @@ impl App {
         let done = self.gpu.as_ref().is_some_and(|g| g.prog.samples() >= self.st.max_spp);
         let board = self.has_board();
         let st = &mut self.st;
+        // グループの見出し（空なら高さだけ取る）と、その下のボタン
+        let group = |ui: &mut egui::Ui, title: String, add: &mut dyn FnMut(&mut egui::Ui)| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.add(egui::Label::new(egui::RichText::new(if title.is_empty() { " ".into() } else { title }).size(11.0).weak()).selectable(false));
+                ui.horizontal(|ui| add(ui));
+            });
+        };
         egui::Panel::top("toolbar").show(root, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if done {
-                    button(ui, Icon::Done, &fl!("toolbar-done"), false, false, false).on_hover_text(fl!("toolbar-done-tip"));
-                } else {
-                    let (icon, label) = if st.paused { (Icon::Resume, fl!("toolbar-resume")) } else { (Icon::Pause, fl!("toolbar-pause")) };
-                    if button(ui, icon, &label, st.paused, false, true).on_hover_text(fl!("toolbar-pause-tip")).clicked() {
-                        st.paused = !st.paused;
+                group(ui, String::new(), &mut |ui| {
+                    if done {
+                        button(ui, Icon::Done, &fl!("toolbar-done"), false, false, false).on_hover_text(fl!("toolbar-done-tip"));
+                    } else {
+                        let (icon, label) = if st.paused { (Icon::Resume, fl!("toolbar-resume")) } else { (Icon::Pause, fl!("toolbar-pause")) };
+                        if button(ui, icon, &label, st.paused, false, true).on_hover_text(fl!("toolbar-pause-tip")).clicked() {
+                            st.paused = !st.paused;
+                        }
                     }
-                }
+                });
                 ui.separator();
-                if button(ui, Icon::TopView, &fl!("toolbar-top"), false, false, board).on_hover_text(fl!("toolbar-top-tip")).clicked() {
-                    st.req.view_preset = Some(TOP_VIEW);
-                }
-                if button(ui, Icon::BottomView, &fl!("toolbar-bottom"), false, false, board).on_hover_text(fl!("toolbar-bottom-tip")).clicked() {
-                    st.req.view_preset = Some(BOTTOM_VIEW);
-                }
-                if button(ui, Icon::Fit, &fl!("toolbar-fit"), false, false, board).on_hover_text(fl!("toolbar-fit-tip")).clicked() {
-                    st.req.fit_view = true;
-                }
+                group(ui, fl!("toolbar-group-camera"), &mut |ui| {
+                    if button(ui, Icon::TopView, &fl!("toolbar-top"), false, false, board).on_hover_text(fl!("toolbar-top-tip")).clicked() {
+                        st.req.view_preset = Some(TOP_VIEW);
+                    }
+                    if button(ui, Icon::BottomView, &fl!("toolbar-bottom"), false, false, board).on_hover_text(fl!("toolbar-bottom-tip")).clicked() {
+                        st.req.view_preset = Some(BOTTOM_VIEW);
+                    }
+                    if button(ui, Icon::Fit, &fl!("toolbar-fit"), false, false, board).on_hover_text(fl!("toolbar-fit-tip")).clicked() {
+                        st.req.fit_view = true;
+                    }
+                });
                 ui.separator();
-                if button(ui, Icon::Smd, &fl!("toolbar-smd"), st.show_smd, !st.show_smd, board).on_hover_text(fl!("toolbar-smd-tip")).clicked() {
-                    st.show_smd = !st.show_smd;
-                    st.changed.visibility = true;
-                }
-                if button(ui, Icon::ThroughHole, &fl!("toolbar-tht"), st.show_tht, !st.show_tht, board).on_hover_text(fl!("toolbar-tht-tip")).clicked() {
-                    st.show_tht = !st.show_tht;
-                    st.changed.visibility = true;
-                }
+                group(ui, fl!("toolbar-group-visibility"), &mut |ui| {
+                    if button(ui, Icon::Smd, &fl!("toolbar-smd"), st.show_smd, !st.show_smd, board).on_hover_text(fl!("toolbar-smd-tip")).clicked() {
+                        st.show_smd = !st.show_smd;
+                        st.changed.visibility = true;
+                    }
+                    if button(ui, Icon::ThroughHole, &fl!("toolbar-tht"), st.show_tht, !st.show_tht, board).on_hover_text(fl!("toolbar-tht-tip")).clicked() {
+                        st.show_tht = !st.show_tht;
+                        st.changed.visibility = true;
+                    }
+                });
                 ui.separator();
-                if button(ui, Icon::Denoise, &fl!("toolbar-denoise"), st.denoise, false, true).on_hover_text(fl!("toolbar-denoise-tip")).clicked() {
-                    st.denoise = !st.denoise;
-                }
+                group(ui, fl!("toolbar-group-effects"), &mut |ui| {
+                    if button(ui, Icon::Denoise, &fl!("toolbar-denoise"), st.denoise, false, true).on_hover_text(fl!("toolbar-denoise-tip")).clicked() {
+                        st.denoise = !st.denoise;
+                    }
+                });
             });
         });
     }
@@ -3029,6 +3045,7 @@ impl App {
                 "top": fl!("toolbar-top-tip"), "bottom": fl!("toolbar-bottom-tip"), "fit": fl!("toolbar-fit-tip"),
                 "smd": fl!("toolbar-smd-tip"), "tht": fl!("toolbar-tht-tip"), "denoise": fl!("toolbar-denoise-tip"),
             },
+            "groups": { "camera": fl!("toolbar-group-camera"), "visibility": fl!("toolbar-group-visibility"), "effects": fl!("toolbar-group-effects") },
         })
         .to_string()
     }

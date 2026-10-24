@@ -87,6 +87,9 @@ key-display-mode = 画像 / アルベド / 法線
 key-quit = 終了
 
 ## ツールバー
+toolbar-group-camera = カメラ位置
+toolbar-group-visibility = 表示切替
+toolbar-group-effects = エフェクト
 toolbar-done = 完了
 toolbar-done-tip = 最大 spp に達したので、描き終えて止まっている。続けて描くなら、設定パネルで最大 spp を上げる
 toolbar-resume = 再開
