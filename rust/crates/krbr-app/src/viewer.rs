@@ -974,6 +974,10 @@ struct App {
     /// 動画の書き出し（している間）
     video: Option<video_job::VideoJob>,
     video_dialog: video_job::VideoDialog,
+    /// --test-video：書き出しを終えたら閉じる
+    video_test_exit: bool,
+    /// 乱数の種を一時的に変える（動画のサブフレームごとに違う種で積む）
+    seed_override: Option<u32>,
     proxy: Option<EventLoopProxy<crate::web_ui::Wake>>,
     /// ボタン列・ステータスバー・設定パネル・警告の帯の置き場所（egui のポイント。NOTHING なら出さない）
     web_rects: [egui::Rect; 7],
@@ -1502,7 +1506,7 @@ impl App {
         let focus = self.st.focus_point.map(|p| focus_distance_to(p, &cam)).unwrap_or(0.0);
         self.prep.cfg.lens.focus_distance_mm = focus;
         c.lens.focus_distance_mm = focus;
-        frame_params(&c, cam, self.vo.common.seed)
+        frame_params(&c, cam, self.seed_override.unwrap_or(self.vo.common.seed))
     }
 
     /// 環境マップを裏のスレッドで読み込む。remember：読み終えたら、この基板で使ったものとして覚える
@@ -4469,6 +4473,8 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         recent_boards: Vec::new(),
         video: None,
         video_dialog: video_job::VideoDialog::default(),
+        video_test_exit: false,
+        seed_override: None,
         proxy: None,
         web_rects: [egui::Rect::NOTHING; 7],
         about_open: false,
