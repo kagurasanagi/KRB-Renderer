@@ -137,6 +137,7 @@ impl TestHooks {
             match self.o.view.as_str() {
                 "top" => st.req.view_preset = Some(TOP_VIEW),
                 "bottom" => st.req.view_preset = Some(BOTTOM_VIEW),
+                "fit" => st.req.fit_view = true,
                 _ => {}
             }
             for kind in self.o.hide.split(',').map(str::trim) {
@@ -339,6 +340,8 @@ struct Requests {
     reset_view: bool,
     /// ボタン列・メニュー：この仰角・方位（度）にして、基板全体が入る構図にする（真上から・真裏から）
     view_preset: Option<(f64, f64)>,
+    /// ボタン列・メニュー・F：今の向きのまま、基板全体が入る構図にする（全体を表示）
+    fit_view: bool,
     /// 「すべて既定に戻す」の後：視点を戻した後で、覚える値の基準を今の値に取り直す（戻した値は覚えない）
     rebase_view: bool,
     auto_exposure: bool,
@@ -411,6 +414,8 @@ struct ViewState {
     mask_choice: Option<usize>,
     /// レンダリングを一時停止する（サンプルを積み足さない。GPU の弱い PC で操作を軽くする）
     paused: bool,
+    /// ピントを合わせる点（ワールド座標）。None なら注視点（自動）。カメラを動かしても、この点までの距離にピントを合わせ続ける
+    focus_point: Option<Vec3>,
     /// 表面実装の部品・スルーホールの部品を表示する（どちらでもない部品と基板はいつも表示）
     show_smd: bool,
     show_tht: bool,
@@ -460,6 +465,7 @@ impl ViewState {
 /// 起動時は覚えた値で、「すべて既定に戻す」では空の値で作る（どちらも同じ決め方になる）
 struct ViewerSettings {
     max_spp: u32,
+    focus_point: Option<Vec3>,
     show_smd: bool,
     show_tht: bool,
     denoise: bool,
@@ -471,6 +477,31 @@ struct ViewerSettings {
 
 /// 最大のサンプル数の既定値
 const DEFAULT_MAX_SPP: u32 = 4096;
+
+/// ピントの距離：カメラの前方向に測った、点までの距離（mm）。点がカメラの後ろや真横なら 1 mm（レンズの計算が壊れないように）
+fn focus_distance_to(point: Vec3, cam: &Camera) -> f32 {
+    (point - cam.position).dot(cam.forward).max(1.0)
+}
+
+/// 点がすべて画面の外か：すべてカメラの後ろ、またはすべて画面の同じ辺の外側（一部でも写っていれば false）
+fn points_out_of_view(cam: &Camera, pts: &[Vec3]) -> bool {
+    let (mut left, mut right, mut above, mut below, mut behind) = (true, true, true, true, true);
+    let tx = cam.tan_half_fov_y * cam.aspect;
+    for p in pts {
+        let v = *p - cam.position;
+        let z = v.dot(cam.forward);
+        if z <= 1e-3 {
+            continue;
+        }
+        behind = false;
+        let (x, y) = (v.dot(cam.right) / (z * tx), v.dot(cam.up) / (z * cam.tan_half_fov_y));
+        left &= x < -1.0;
+        right &= x > 1.0;
+        below &= y < -1.0;
+        above &= y > 1.0;
+    }
+    behind || left || right || above || below
+}
 
 /// 「真上から」「真裏から」の仰角・方位（度）。真上・方位 0° は KiCad の画面と同じ向き、真下・方位 180° は左右が反転した、
 /// KiCad で裏から見た向き（krbr-scene の camera.rs の basis）。その後ドラッグしても向きが跳ばない
@@ -487,6 +518,7 @@ impl ViewerSettings {
         };
         Self {
             max_spp: pow2_spp(vo.common.spp.or(r.max_spp).unwrap_or(DEFAULT_MAX_SPP)),
+            focus_point: r.focus_point.map(|p| Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32)),
             show_smd: r.show_smd.unwrap_or(true),
             show_tht: r.show_tht.unwrap_or(true),
             denoise: vo.common.denoise.or(r.denoise).unwrap_or(false),
@@ -499,6 +531,7 @@ impl ViewerSettings {
 
     fn apply(&self, st: &mut ViewState) {
         st.max_spp = self.max_spp;
+        st.focus_point = self.focus_point;
         st.show_smd = self.show_smd;
         st.show_tht = self.show_tht;
         st.changed.visibility = true;
@@ -546,6 +579,7 @@ enum KeyAction {
     Quit,
     TogglePanel,
     ResetView,
+    FitView,
     Save,
     Pause,
     DenoiseNow,
@@ -575,7 +609,8 @@ const ENV_ROTATION_STEP_DEG: f32 = 15.0;
 /// キーの割り当て。キー処理・ヘルプのメニュー・起動時のログは、どれもこの表から作る
 const KEY_BINDINGS: &[KeyBinding] = &[
     KeyBinding { label: "F1 / Tab", keys: &[(KeyCode::F1, KeyAction::TogglePanel), (KeyCode::Tab, KeyAction::TogglePanel)], help: "key-panel", log: "panel" },
-    KeyBinding { label: "R / F", keys: &[(KeyCode::KeyR, KeyAction::ResetView), (KeyCode::KeyF, KeyAction::ResetView)], help: "key-reset-view", log: "reset view" },
+    KeyBinding { label: "R", keys: &[(KeyCode::KeyR, KeyAction::ResetView)], help: "key-reset-view", log: "reset view" },
+    KeyBinding { label: "F", keys: &[(KeyCode::KeyF, KeyAction::FitView)], help: "key-fit-view", log: "fit the board in the view" },
     KeyBinding { label: "S", keys: &[(KeyCode::KeyS, KeyAction::Save)], help: "key-save", log: "save" },
     KeyBinding { label: "P", keys: &[(KeyCode::KeyP, KeyAction::Pause)], help: "key-pause", log: "pause" },
     KeyBinding { label: "D", keys: &[(KeyCode::KeyD, KeyAction::DenoiseNow)], help: "key-denoise", log: "denoise now (CPU)" },
@@ -1027,6 +1062,7 @@ impl App {
             render_ratio: Some(st.render_ratio),
             show_smd: Some(st.show_smd),
             show_tht: Some(st.show_tht),
+            focus_point: st.focus_point.map(|p| [p.x as f64, p.y as f64, p.z as f64]),
         }
         .write(&mut v);
         v
@@ -1197,6 +1233,15 @@ impl App {
         self.st.changed.materials = true;
     }
 
+    /// 設定ファイル・コマンドラインのピントの距離（mm）を、今の視線の上の点にする（覚えたピントの点が無いとき）
+    fn adopt_configured_focus(&mut self) {
+        let d = self.prep.cfg.lens.focus_distance_mm;
+        if self.st.focus_point.is_none() && d > 0.0 {
+            let c = self.view_camera();
+            self.st.focus_point = Some(c.position + c.forward * d);
+        }
+    }
+
     /// 最初の視点：この基板で覚えた視点、無ければ自動の構図
     fn start_camera(&mut self, w: u32, h: u32) {
         let c = initial_camera(&self.prep, &self.vo.common, w, h);
@@ -1208,6 +1253,7 @@ impl App {
         self.st.fov = cfg.fov_deg;
         self.st.tan_half_fov_y = c.tan_half_fov_y;
         self.st.changed.frame = true;
+        self.adopt_configured_focus();
     }
 
     /// 視点を戻す（R）：設定ファイルとコマンドラインの仰角・方位・画角での自動の構図
@@ -1222,6 +1268,10 @@ impl App {
         self.st.fov = cfg.fov_deg;
         self.st.tan_half_fov_y = c.tan_half_fov_y;
         self.st.changed.frame = true;
+        // ピントも設定ファイル・コマンドラインのもの（無ければ注視点）に戻す
+        self.st.focus_point = None;
+        self.prep.cfg.lens.focus_distance_mm = self.prep.configured.lens.focus_distance_mm;
+        self.adopt_configured_focus();
     }
 
     /// 仰角・方位を決めて、基板全体が入る構図にする（ボタン列の「真上から」「真裏から」。画角は今のまま）
@@ -1238,6 +1288,8 @@ impl App {
         self.st.azimuth = azimuth;
         self.st.tan_half_fov_y = c.tan_half_fov_y;
         self.st.changed.frame = true;
+        // 収め直した基板にピントが合うように、ピントは注視点（自動）に戻す
+        self.st.focus_point = None;
     }
 
     fn current_frame(&mut self, w: u32, h: u32) -> krbr_render::FrameParams {
@@ -1247,6 +1299,10 @@ impl App {
         c.spectral = self.st.spectral;
         let cam = orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, w as f32 / h.max(1) as f32);
         self.st.tan_half_fov_y = cam.tan_half_fov_y;
+        // ピント：決めた点があれば、今のカメラからその点までの距離（カメラを動かしても合わせ続ける）。無ければ注視点（0 = 自動）
+        let focus = self.st.focus_point.map(|p| focus_distance_to(p, &cam)).unwrap_or(0.0);
+        self.prep.cfg.lens.focus_distance_mm = focus;
+        c.lens.focus_distance_mm = focus;
         frame_params(&c, cam, self.vo.common.seed)
     }
 
@@ -1330,6 +1386,10 @@ impl App {
     fn panel(&mut self, ui: &mut egui::Ui) {
         self.selection_panel(ui);
 
+        let cam = self.view_camera();
+        let board_center = self.prep.scene.board.center;
+        let board_half_thickness = 0.5 * self.prep.scene.board.thickness;
+        let has_board = self.has_board();
         let st = &mut self.st;
         ui.separator();
         ui.strong(fl!("panel-environment"));
@@ -1439,12 +1499,19 @@ impl App {
             });
             if l.model != LensModel::Pinhole {
                 ch |= ui.add(egui::Slider::new(&mut l.f_number, 0.7..=22.0).logarithmic(true).text(fl!("lens-f-number"))).changed();
-                let mut focus = if l.focus_distance_mm > 0.0 { l.focus_distance_mm } else { st.distance };
-                if ui.add(egui::Slider::new(&mut focus, 5.0..=5000.0).logarithmic(true).text(fl!("lens-focus"))).changed() {
-                    l.focus_distance_mm = focus;
-                    ch = true;
-                }
-                ui.weak(fl!("lens-focus-hint"));
+                // ピントの距離は、決めた点までの今の距離（無ければ注視点までの距離）。スライダーで変えたら、視線の上のその距離の点にする
+                let mut focus = st.focus_point.map(|p| focus_distance_to(p, &cam)).unwrap_or(st.distance);
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Slider::new(&mut focus, 5.0..=5000.0).logarithmic(true).text(fl!("lens-focus"))).changed() {
+                        st.focus_point = Some(cam.position + cam.forward * focus);
+                        ch = true;
+                    }
+                    if ui.add_enabled(st.focus_point.is_some(), egui::Button::new(fl!("lens-focus-auto"))).on_hover_text(fl!("lens-focus-auto-tip")).clicked() {
+                        st.focus_point = None;
+                        ch = true;
+                    }
+                });
+                ui.weak(if st.focus_point.is_some() { fl!("lens-focus-point-hint") } else { fl!("lens-focus-hint") });
             }
             if l.model == LensModel::Thin {
                 ch |= ui.add(egui::Slider::new(&mut l.focal_length_mm, 10.0..=300.0).logarithmic(true).text(fl!("lens-focal-length"))).changed();
@@ -1564,7 +1631,18 @@ impl App {
             st.changed.frame = true;
         }
         ui.label(fl!("camera-angles", elevation = format!("{:.0}", st.elevation), azimuth = format!("{:.0}", st.azimuth.rem_euclid(360.0))));
+        if has_board {
+            // KiCad の座標（mm）と、基板の上面からの高さ
+            let (cx, cy) = (board_center.x, board_center.y);
+            let t = st.target;
+            ui.label(fl!("camera-target", x = format!("{:.1}", t.x as f64 + cx), y = format!("{:.1}", t.z as f64 + cy), distance = format!("{:.0}", st.distance)));
+            let p = cam.position;
+            ui.label(fl!("camera-position", x = format!("{:.1}", p.x as f64 + cx), y = format!("{:.1}", p.z as f64 + cy), height = format!("{:.0}", p.y as f64 - board_half_thickness)));
+        }
         ui.horizontal(|ui| {
+            if ui.add_enabled(has_board, egui::Button::new(fl!("camera-fit"))).on_hover_text(fl!("toolbar-fit-tip")).clicked() {
+                st.req.fit_view = true;
+            }
             if ui.button(fl!("camera-reset")).clicked() {
                 st.req.reset_view = true;
             }
@@ -1646,6 +1724,12 @@ impl App {
         orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, vp.w as f32 / vp.h.max(1) as f32)
     }
 
+    /// 基板が画面に写っていない（基板の範囲の点がすべてカメラの後ろか、すべて画面の同じ側の外）
+    fn board_out_of_view(&self) -> bool {
+        let pts = &self.prep.scene.framing_points;
+        !pts.is_empty() && points_out_of_view(&self.view_camera(), pts)
+    }
+
     /// 画面の点（物理ピクセル）を通る視線：カメラと方向
     fn view_ray(&self, p: (f64, f64)) -> (Camera, Vec3) {
         let vp = self.st.display;
@@ -1673,11 +1757,12 @@ impl App {
     fn focus_at(&mut self, p: (f64, f64)) {
         let (c, dir) = self.view_ray(p);
         if let Some(t) = raycast_pick_visible(&self.prep.scene, c.position, dir, self.st.visible_mask()).map(|h| h.t) {
-            self.prep.cfg.lens.focus_distance_mm = t * dir.dot(c.forward);
+            let point = c.position + dir * t;
+            self.st.focus_point = Some(point);
             if self.prep.cfg.lens.model == LensModel::Pinhole {
                 self.prep.cfg.lens.model = LensModel::Thin;
             }
-            self.last_update = fl!("focus-set", mm = format!("{:.1}", self.prep.cfg.lens.focus_distance_mm));
+            self.last_update = fl!("focus-set", mm = format!("{:.1}", focus_distance_to(point, &c)));
             self.st.changed.frame = true;
         }
     }
@@ -2365,6 +2450,9 @@ impl App {
                 if button(ui, Icon::BottomView, &fl!("toolbar-bottom"), false, false, board).on_hover_text(fl!("toolbar-bottom-tip")).clicked() {
                     st.req.view_preset = Some(BOTTOM_VIEW);
                 }
+                if button(ui, Icon::Fit, &fl!("toolbar-fit"), false, false, board).on_hover_text(fl!("toolbar-fit-tip")).clicked() {
+                    st.req.fit_view = true;
+                }
                 ui.separator();
                 if button(ui, Icon::Smd, &fl!("toolbar-smd"), st.show_smd, !st.show_smd, board).on_hover_text(fl!("toolbar-smd-tip")).clicked() {
                     st.show_smd = !st.show_smd;
@@ -2439,6 +2527,8 @@ impl App {
                     .on_hover_text(if st.size_mode.is_some() { fl!("status-size-fixed-tip") } else { fl!("status-size-fit-tip") });
                 ui.separator();
                 ui.weak(format!("EV {:+.2}", st.exposure));
+                ui.separator();
+                ui.weak(fl!("status-camera", distance = format!("{:.0}", st.distance))).on_hover_text(fl!("status-camera-tip"));
                 ui.separator();
                 ui.weak(fl!("status-gpu", name = info.name.as_str(), method = method));
                 for (text, busy) in &notes {
@@ -2525,6 +2615,10 @@ impl App {
                     }
                     if ui.add_enabled(board, egui::Button::new(fl!("menu-bottom-view"))).clicked() {
                         st.req.view_preset = Some(BOTTOM_VIEW);
+                        ui.close();
+                    }
+                    if ui.add_enabled(board, egui::Button::new(fl!("menu-fit-view")).shortcut_text("F")).clicked() {
+                        st.req.fit_view = true;
                         ui.close();
                     }
                     if ui.add_enabled(board, egui::Button::new(fl!("menu-show-smd")).selected(st.show_smd)).clicked() {
@@ -2686,6 +2780,13 @@ impl App {
             }
             central = root.available_rect_before_wrap();
             self.draw_outline(root, central);
+            if self.has_board() && self.board_out_of_view() {
+                let galley = root.painter().layout(fl!("board-out-of-view"), egui::FontId::proportional(16.0), egui::Color32::from_rgb(255, 204, 77), (central.width() - 40.0).max(100.0));
+                let pos = egui::pos2(central.center().x - galley.size().x / 2.0, central.top() + 16.0);
+                let bg = egui::Rect::from_min_size(pos, galley.size()).expand(6.0);
+                root.painter().with_clip_rect(central).rect_filled(bg, 4.0, egui::Color32::from_black_alpha(180));
+                root.painter().with_clip_rect(central).galley(pos, galley, egui::Color32::from_rgb(255, 204, 77));
+            }
             if !self.has_board() {
                 let text = match &self.board_job {
                     Some((p, _, _)) => fl!("board-loading", name = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()),
@@ -2937,6 +3038,10 @@ impl App {
             self.reset_camera(self.st.display.w, self.st.display.h);
         }
         if let Some((el, az)) = self.st.req.view_preset.take() {
+            self.preset_camera(el, az, self.st.display.w, self.st.display.h);
+        }
+        if std::mem::take(&mut self.st.req.fit_view) {
+            let (el, az) = (self.st.elevation, self.st.azimuth);
             self.preset_camera(el, az, self.st.display.w, self.st.display.h);
         }
         if std::mem::take(&mut self.st.req.rebase_view) {
@@ -3386,6 +3491,7 @@ impl ApplicationHandler for App {
                     KeyAction::Quit => el.exit(),
                     KeyAction::TogglePanel => st.show_panel = !st.show_panel,
                     KeyAction::ResetView => st.req.reset_view = true,
+                    KeyAction::FitView => st.req.fit_view = true,
                     KeyAction::Save => st.req.save = true,
                     KeyAction::Pause => st.paused = !st.paused,
                     KeyAction::DenoiseNow => st.req.denoise_now = true,
@@ -3452,6 +3558,7 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         show_panel: win.panel_shown,
         mask_choice: mask_choice_of(&cfg.scene),
         paused: vo.paused,
+        focus_point: None,
         show_smd: true,
         show_tht: true,
         spectral: cfg.spectral,
@@ -3643,9 +3750,28 @@ mod tests {
         for b in KEY_BINDINGS {
             assert!(i18n::english_has(b.help), "{} is not in the English .ftl", b.help);
         }
-        assert_eq!(key_action(KeyCode::KeyF), Some(KeyAction::ResetView));
+        assert_eq!(key_action(KeyCode::KeyF), Some(KeyAction::FitView));
+        assert_eq!(key_action(KeyCode::KeyR), Some(KeyAction::ResetView));
         assert_eq!(key_action(KeyCode::NumpadSubtract), Some(KeyAction::Exposure(-EXPOSURE_STEP_EV)));
         assert_eq!(key_action(KeyCode::KeyZ), None);
+    }
+
+    /// ピントの点はカメラを動かしても同じ点：距離はカメラの前方向に測る。基板が画面の外かの判定
+    #[test]
+    fn focus_point_distance_and_out_of_view() {
+        let cam = orbit_camera(Vec3::ZERO, 100.0, 90.0, 0.0, 30.0, 1.5);
+        assert!((focus_distance_to(Vec3::ZERO, &cam) - 100.0).abs() < 1e-3);
+        assert!((focus_distance_to(Vec3::new(0.0, 20.0, 0.0), &cam) - 80.0).abs() < 1e-3);
+        assert_eq!(focus_distance_to(Vec3::new(0.0, 500.0, 0.0), &cam), 1.0); // カメラの後ろ
+        let near = [Vec3::new(-10.0, 0.0, -10.0), Vec3::new(10.0, 0.0, 10.0)];
+        assert!(!points_out_of_view(&cam, &near));
+        let aside = [Vec3::new(500.0, 0.0, 0.0), Vec3::new(520.0, 0.0, 10.0)];
+        assert!(points_out_of_view(&cam, &aside));
+        // 画面より大きく、両側にはみ出す（真ん中は写っている）なら外ではない
+        let around = [Vec3::new(-500.0, 0.0, 0.0), Vec3::new(500.0, 0.0, 0.0)];
+        assert!(!points_out_of_view(&cam, &around));
+        let behind = orbit_camera(Vec3::new(0.0, 0.0, 0.0), 100.0, -90.0, 180.0, 30.0, 1.5);
+        assert!(points_out_of_view(&behind, &[Vec3::new(0.0, -200.0, 0.0)]));
     }
 
     /// 内蔵の環境マップの表示名とヒントが英語の .ftl にある

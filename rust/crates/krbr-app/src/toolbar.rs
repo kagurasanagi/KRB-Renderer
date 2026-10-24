@@ -15,6 +15,7 @@ pub enum Icon {
     Done,
     TopView,
     BottomView,
+    Fit,
     Smd,
     ThroughHole,
     Denoise,
@@ -83,6 +84,15 @@ fn draw(p: &egui::Painter, icon: Icon, r: Rect, c: Color32) {
             p.line_segment([at(x, y0), at(x, y1 - if top { 0.08 } else { -0.08 })], Stroke::new(2.4, c));
             let dir = if top { 1.0 } else { -1.0 };
             p.add(Shape::convex_polygon(vec![at(x - 0.14, y1 - 0.12 * dir), at(x + 0.14, y1 - 0.12 * dir), at(x, y1 + 0.06 * dir)], c, Stroke::NONE));
+        }
+        // 全体を表示：四隅の枠の中に基板
+        Icon::Fit => {
+            let k = 0.22;
+            for (x, y, dx, dy) in [(0.08, 0.12, 1.0, 1.0), (0.92, 0.12, -1.0, 1.0), (0.08, 0.88, 1.0, -1.0), (0.92, 0.88, -1.0, -1.0)] {
+                p.add(Shape::line(vec![at(x + k * dx, y), at(x, y), at(x, y + k * dy)], Stroke::new(2.2, c)));
+            }
+            p.rect_filled(rect(0.26, 0.34, 0.74, 0.66), 2.0, dim);
+            p.rect_filled(rect(0.34, 0.42, 0.5, 0.56), 1.0, c);
         }
         // 表面実装：板の上に載ったチップ（両端が電極）
         Icon::Smd => {
