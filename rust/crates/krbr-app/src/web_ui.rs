@@ -155,6 +155,8 @@ pub struct WebUi {
     views: Vec<View>,
     rx: mpsc::Receiver<Msg>,
     images: Images,
+    /// 最後に WebView を動かした・消した時刻（その下の 3D 表示を描き直してもらう）
+    moved: Instant,
     /// WebView で共有する WebView2 の環境（裏のプロセスを 1 組にする）。データは全体用キャッシュの webview2\
     /// （何も指定しないと exe の横に krbr.exe.WebView2 を作る）。WebView より後に捨てる（フィールドの順）
     _context: WebContext,
@@ -200,7 +202,7 @@ impl WebUi {
                 .map_err(|e| format!("WebView: {e}"))?;
             views.push(View { view, bounds: None, sent: String::new(), shown: false, size: (1, 1), pending: None });
         }
-        Ok(Self { views, rx, images, _context: context })
+        Ok(Self { views, rx, images, moved: Instant::now(), _context: context })
     }
 
     fn view(&mut self, pane: Pane) -> &mut View {
@@ -209,6 +211,22 @@ impl WebUi {
 
     /// 置き場所（ウィンドウの中の物理ピクセル）。None なら隠す。変わったときだけ動かす
     pub fn layout(&mut self, pane: Pane, r: Option<PxRect>) {
+        let v = self.view(pane);
+        let before = (v.bounds, v.pending.map(|p| p.0), v.size);
+        self.place(pane, r);
+        let v = self.view(pane);
+        if before != (v.bounds, v.pending.map(|p| p.0), v.size) {
+            self.moved = Instant::now();
+        }
+    }
+
+    /// 最後に WebView を動かした・消した時刻。WebView の位置の変化は少し遅れて反映されるので、その直後に 3D 表示を
+    /// 描いても、WebView がいた場所は描かれない（白く残る）。この時刻から少しの間は、休まずに描き直すこと
+    pub fn moved(&self) -> Instant {
+        self.moved
+    }
+
+    fn place(&mut self, pane: Pane, r: Option<PxRect>) {
         if pane.overlay() {
             return self.layout_overlay(pane, r);
         }
@@ -281,6 +299,7 @@ impl WebUi {
         if let Some((r, _)) = v.pending.take() {
             let _ = v.view.set_bounds(rect(r));
             v.bounds = Some(r);
+            self.moved = Instant::now();
         }
     }
 

@@ -4059,7 +4059,8 @@ impl App {
             el.exit();
             return;
         }
-        let idle = self.gpu.as_ref().map(|g| g.prog.samples() >= self.st.max_spp || (self.st.paused && g.prog.samples() > 0)).unwrap_or(false) && !self.st.changed.frame && self.env_job.is_none() && self.reload_job.is_none() && !self.silk_job.busy() && !self.silk_dirty && !self.test.active() && !self.editor.busy();
+        let idle = self.gpu.as_ref().map(|g| g.prog.samples() >= self.st.max_spp || (self.st.paused && g.prog.samples() > 0)).unwrap_or(false) && !self.st.changed.frame && self.env_job.is_none() && self.reload_job.is_none() && !self.silk_job.busy() && !self.silk_dirty && !self.test.active() && !self.editor.busy()
+            && self.web.as_ref().is_none_or(|w| w.moved().elapsed() > Duration::from_millis(300));
         if idle {
             // 収束したら GPU を休ませ、入力と保存を待つ
             let wait = if self.watcher.is_some() || self.prep.scene.pending_models > 0 { 100 } else { 250 };
