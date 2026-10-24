@@ -1505,6 +1505,13 @@ impl App {
         // ウィンドウのアイコン（exe に埋め込んだものと同じ絵。scripts/make_icon.py で作る 64x64 の RGBA）
         let icon = winit::window::Icon::from_rgba(include_bytes!("../../../krbr/assets/krbr_64.rgba").to_vec(), 64, 64).ok();
         let attrs = Window::default_attributes().with_window_icon(icon).with_title(self.base_title.clone()).with_inner_size(winit::dpi::PhysicalSize::new(w, h)).with_visible(!hidden).with_active(!hidden).with_maximized(saved.maximized);
+        // 子ウィンドウ（WebView）の下にも 3D 表示を描く（WS_CLIPCHILDREN を外す）。外さないと WebView の下は描かれず、
+        // メニュー・説明の吹き出しが消えた瞬間、次のフレームが出るまでそこが白く光る
+        #[cfg(windows)]
+        let attrs = {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs.with_clip_children(false)
+        };
         // 前回の位置：今つながっている画面のどれかに、タイトルバーの左寄りの点が入っているときだけ
         let attrs = match saved.position {
             Some((x, y)) if el.available_monitors().any(|m| {
