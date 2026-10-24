@@ -3043,6 +3043,8 @@ impl App {
                     } else {
                         let focused = self.web_menu.as_ref().is_some_and(|m| m.focused);
                         self.web_menu = Some(WebMenu { id, at: egui::pos2(x, y), size: None, focused });
+                        // 前と同じメニューでも描き直して、大きさを知らせてもらう（中身が同じだと送らないので、大きさが来ず開かない）
+                        self.web.as_mut().unwrap().resend(crate::web_ui::Pane::Menu);
                     }
                 }
                 crate::web_ui::Msg::Tip { pane, text, rect } => {
