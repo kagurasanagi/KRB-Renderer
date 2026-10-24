@@ -8,6 +8,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use winit::event_loop::EventLoopProxy;
 use winit::window::Window;
@@ -55,6 +56,8 @@ pub enum Msg {
     Tip { pane: Pane, text: String, rect: [f32; 4] },
     /// 吹き出しの大きさ（CSS の px）
     TipSize(f32, f32),
+    /// 新しい大きさで描き終えた（重ねる WebView を、画面の外で描いてから置くため。pane は受け取ったところで入れる）
+    Painted(Pane),
     /// ページを読み終えた（状態を送り直す）
     Ready,
 }
@@ -72,6 +75,7 @@ fn parse(body: &str) -> Option<Msg> {
         "size" => Some(Msg::MenuSize(f("width")?, f("height")?)),
         "tip" => Some(Msg::Tip { pane: Pane::Toolbar, text: s("text")?, rect: [f("left").unwrap_or(0.0), f("top").unwrap_or(0.0), f("right").unwrap_or(0.0), f("bottom").unwrap_or(0.0)] }),
         "tipsize" => Some(Msg::TipSize(f("width")?, f("height")?)),
+        "painted" => Some(Msg::Painted(Pane::Toolbar)),
         "ready" => Some(Msg::Ready),
         _ => None,
     }
@@ -116,6 +120,12 @@ impl Pane {
         }
     }
 
+    /// ほかの上に重ねて、出したり消したりするもの（説明の吹き出し・メニューのプルダウン）。WebView2 は隠した WebView を
+    /// 出すときや大きさを変えたときに一瞬白く描くので、隠さずに画面の外へ動かし、新しい大きさで描き終えてから置く
+    fn overlay(self) -> bool {
+        matches!(self, Pane::Tooltip | Pane::Menu)
+    }
+
     fn html(self) -> &'static str {
         match self {
             Pane::Toolbar => TOOLBAR_HTML,
@@ -135,6 +145,10 @@ struct View {
     bounds: Option<PxRect>,
     /// 最後に送った状態（同じなら送らない）
     sent: String,
+    /// 重ねるもの：WebView を見せる状態にしたか、今の大きさ、画面の外で描き終わるのを待っている置き場所と待ち始めた時刻
+    shown: bool,
+    size: (u32, u32),
+    pending: Option<(PxRect, Instant)>,
 }
 
 pub struct WebUi {
@@ -175,7 +189,7 @@ impl WebUi {
                 })
                 .with_ipc_handler(move |req| {
                     if let Some(mut m) = parse(req.body()) {
-                        if let Msg::Tip { pane: p, .. } = &mut m {
+                        if let Msg::Tip { pane: p, .. } | Msg::Painted(p) = &mut m {
                             *p = pane;
                         }
                         let _ = tx.send(m);
@@ -184,7 +198,7 @@ impl WebUi {
                 })
                 .build_as_child(window)
                 .map_err(|e| format!("WebView: {e}"))?;
-            views.push(View { view, bounds: None, sent: String::new() });
+            views.push(View { view, bounds: None, sent: String::new(), shown: false, size: (1, 1), pending: None });
         }
         Ok(Self { views, rx, images, _context: context })
     }
@@ -195,6 +209,9 @@ impl WebUi {
 
     /// 置き場所（ウィンドウの中の物理ピクセル）。None なら隠す。変わったときだけ動かす
     pub fn layout(&mut self, pane: Pane, r: Option<PxRect>) {
+        if pane.overlay() {
+            return self.layout_overlay(pane, r);
+        }
         let v = self.view(pane);
         if v.bounds == r {
             return;
@@ -213,6 +230,58 @@ impl WebUi {
             }
         }
         v.bounds = r;
+    }
+
+    /// 重ねるものの置き場所：隠すときは画面の外へ動かすだけ。大きさが変わるときは、画面の外で新しい大きさにして、
+    /// ページが描き終えた知らせ（painted）で置く（知らせが来なくても少し待ったら置く）
+    fn layout_overlay(&mut self, pane: Pane, r: Option<PxRect>) {
+        const AWAY: i32 = -30000;
+        let v = self.view(pane);
+        let Some(r) = r else {
+            v.pending = None;
+            if v.bounds.take().is_some() {
+                let _ = v.view.set_bounds(rect((AWAY, AWAY, v.size.0, v.size.1)));
+            }
+            return;
+        };
+        if v.bounds == Some(r) {
+            return;
+        }
+        if let Some((p, t)) = v.pending {
+            if p == r {
+                if t.elapsed() > Duration::from_millis(150) {
+                    v.pending = None;
+                    let _ = v.view.set_bounds(rect(r));
+                    v.bounds = Some(r);
+                }
+                return;
+            }
+        }
+        if v.shown && v.size == (r.2, r.3) {
+            // 大きさが同じ：そのまま動かす
+            v.pending = None;
+            let _ = v.view.set_bounds(rect(r));
+            v.bounds = Some(r);
+            return;
+        }
+        let _ = v.view.set_bounds(rect((AWAY, AWAY, r.2, r.3)));
+        if !v.shown {
+            let _ = v.view.set_visible(true);
+            v.shown = true;
+        }
+        v.size = (r.2, r.3);
+        v.bounds = None;
+        v.pending = Some((r, Instant::now()));
+        let _ = v.view.evaluate_script("requestAnimationFrame(() => requestAnimationFrame(() => window.ipc.postMessage('{\"type\":\"painted\"}')))");
+    }
+
+    /// 画面の外で描き終えた：待っていた場所に置く
+    fn painted(&mut self, pane: Pane) {
+        let v = self.view(pane);
+        if let Some((r, _)) = v.pending.take() {
+            let _ = v.view.set_bounds(rect(r));
+            v.bounds = Some(r);
+        }
     }
 
     /// キーボードの入力をこのページへ（プルダウンを開いたとき。外をクリックしたら閉じるのは、ページがフォーカスを失った知らせで）
@@ -237,7 +306,13 @@ impl WebUi {
 
     /// 届いた操作。ページを読み終えた知らせがあれば、次の送信で状態を送り直す
     pub fn messages(&mut self) -> Vec<Msg> {
-        let msgs: Vec<Msg> = self.rx.try_iter().collect();
+        let mut msgs: Vec<Msg> = self.rx.try_iter().collect();
+        for m in &msgs {
+            if let Msg::Painted(p) = m {
+                self.painted(*p);
+            }
+        }
+        msgs.retain(|m| !matches!(m, Msg::Painted(_)));
         if msgs.contains(&Msg::Ready) {
             for v in &mut self.views {
                 v.sent.clear();

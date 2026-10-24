@@ -3115,7 +3115,7 @@ impl App {
                         }
                     }
                 }
-                crate::web_ui::Msg::Ready => {}
+                crate::web_ui::Msg::Ready | crate::web_ui::Msg::Painted(_) => {}
             }
         }
     }
