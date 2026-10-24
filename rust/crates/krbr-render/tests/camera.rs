@@ -307,6 +307,60 @@ fn thin_lens_integrators_agree_and_realistic_lens() {
     }
 }
 
+/// 画像の R, G, B それぞれの平均
+fn mean_channels(img: &ImageF) -> [f64; 3] {
+    let n = (img.rgba.len() / 4) as f64;
+    let mut m = [0.0f64; 3];
+    for p in img.rgba.chunks_exact(4) {
+        for k in 0..3 {
+            m[k] += p[k] as f64 / n;
+        }
+    }
+    m
+}
+
+/// 分光モード・薄レンズの色収差（倍率・軸上）でも、PT・BDPT・VCM が同じ色に収束する。
+/// 色収差では代表波長以外を打ち切るので、VCM（繰り返しごとに全画素で同じ波長）では 1 回ごとの画像が単色になるが、
+/// 積めば同じ色になること
+#[test]
+#[ignore = "needs a Vulkan GPU with ray tracing"]
+fn chromatic_thin_lens_integrators_agree_in_color() {
+    let _g = gpu_lock();
+    let ctx = context();
+    let floor = Material { base_color: Vec3::new(0.2, 0.6, 0.3), specular_weight: 0.0, ..Default::default() };
+    let red = Material { base_color: Vec3::new(0.8, 0.15, 0.1), specular_weight: 0.0, ..Default::default() };
+    let light = Material { base_color: Vec3::ZERO, emission_luminance: 20000.0, specular_weight: 0.0, ..Default::default() };
+    let mut m = Mesh::default();
+    add_quad(&mut m, Vec3::new(-200.0, -60.0, -600.0), Vec3::new(200.0, -60.0, -600.0), Vec3::new(200.0, -60.0, 0.0), Vec3::new(-200.0, -60.0, 0.0), Vec3::Y, 0);
+    add_box(&mut m, Vec3::new(-40.0, -60.0, -320.0), Vec3::new(0.0, -20.0, -280.0), 1);
+    add_quad(&mut m, Vec3::new(-15.0, 40.0, -330.0), Vec3::new(15.0, 40.0, -330.0), Vec3::new(15.0, 40.0, -300.0), Vec3::new(-15.0, 40.0, -300.0), Vec3::NEG_Y, 2);
+    let s = scene_of(vec![floor, red, light], m);
+    let gpu = gpu_scene(&ctx, &s, &uniform_env(0.02, 16, 8));
+    for (name, lens) in [
+        ("no CA", thin_lens(4.0, 260.0)),
+        ("lateral CA", LensParams { lateral_ca: 0.03, ..thin_lens(4.0, 260.0) }),
+        ("axial CA", LensParams { abbe_number: 20.0, ..thin_lens(4.0, 260.0) }),
+    ] {
+        let means: Vec<[f64; 3]> = [(IntegratorKind::Pt, 4096), (IntegratorKind::Bdpt, 2048), (IntegratorKind::Vcm, 2048)]
+            .iter()
+            .map(|&(integ, spp)| {
+                let mut f = frame(test_camera(), 8);
+                f.lens = lens.clone();
+                f.spectral = true;
+                let out = render(&ctx, &gpu, 160, 100, spp, integ, f);
+                save_png(&format!("p7_ca_agree_{}_{integ:?}.png", name.replace(' ', "_")), &out.color, 0.0);
+                mean_channels(&out.color)
+            })
+            .collect();
+        println!("{name}: pt {:.5?}, bdpt {:.5?}, vcm {:.5?}", means[0], means[1], means[2]);
+        for k in 0..3 {
+            // VCM の波長は繰り返しごとに全画素で共通なので、独立な乱数だと色収差では全体の色が数 % ずれた（列にして 1 % 未満）
+            assert!((means[1][k] / means[0][k] - 1.0).abs() < 0.015, "{name} bdpt channel {k}: {means:?}");
+            assert!((means[2][k] / means[0][k] - 1.0).abs() < 0.015, "{name} vcm channel {k}: {means:?}");
+        }
+    }
+}
+
 /// 確認用の画像：多角形のボケ、画面の端のキャッツアイ、縁の色のにじみ（分光モード）。ボケは光が広がって暗いので +4 EV で保存。
 /// 32768 spp で時間がかかるので分けてある
 #[test]

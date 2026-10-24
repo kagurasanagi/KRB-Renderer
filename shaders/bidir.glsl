@@ -77,11 +77,14 @@ VcmConst vcmConst() {
     return c;
 }
 
-// 波長：BDPT は経路ごと（光源側とカメラ側で同じ番号の経路は同じ波長）。VCM は別の経路の頂点とまとめるので、繰り返しごとに全画素で共通
+// 波長：BDPT は経路ごと（光源側とカメラ側で同じ番号の経路は同じ波長）。VCM は別の経路の頂点とまとめるので、繰り返しごとに全画素で共通。
+// VCM の波長は繰り返しの番号の加法的な再帰列（黄金比 × 2^32 を足していく。整数なので何回目でも正確）にする：
+// 独立な乱数だと、画面全体の色が繰り返しの回数 N に対して 1/√N でしか合わず、色収差（代表波長だけを追うので 1 回ごとの画像が単色）
+// では、数千回積んでも全体の色が数 % ずれ、積む途中で画面全体の色が揺れる。この列なら連続する数回で可視域を偏りなく覆う
 void bidirWavelengths(uint pathIdx) {
     if (!spectralMode()) return;
     uint stream = pcgHash(pc.seed + RNG_STREAM_WAVELENGTH);
-    uint h = useMerging() ? pcgHash(pc.sampleIndex * RNG_SAMPLE_SCATTER + stream)
+    uint h = useMerging() ? stream + pc.sampleIndex * 2654435769u
                           : pcgHash(pathIdx + pcgHash(pc.sampleIndex + stream));
     sampleWavelengths(float(h >> 8) * (1.0 / 16777216.0));
 }
