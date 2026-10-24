@@ -1,0 +1,506 @@
+/* ---------------------------------------------------------------- 材質エディタ（3D 表示の上の、動かせる窓） */
+body.editor {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  box-shadow: inset 0 0 0 1px var(--line-3);
+  border-radius: 10px;
+}
+
+body.editor header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 40px;
+  padding: 0 10px 0 16px;
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  flex: none;
+  cursor: move;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border-radius: 10px 10px 0 0;
+}
+
+.cols {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(320px, 1.15fr);
+}
+
+.scroll {
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.scroll::-webkit-scrollbar {
+  width: 10px;
+}
+
+.scroll::-webkit-scrollbar-thumb {
+  background: var(--panel-3);
+  border: 3px solid var(--panel);
+  border-radius: 999px;
+}
+
+/* ---- 左：一覧 */
+.browser {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--line);
+}
+
+.search-row {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+input.search {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+input.search:focus {
+  outline: none;
+  border-color: var(--accent-a30);
+  box-shadow: 0 0 0 3px var(--accent-a08);
+}
+
+#list {
+  padding: 4px 8px 16px 12px;
+}
+
+.fold-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 2px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-align: left;
+}
+
+.fold-head:hover {
+  color: var(--text);
+}
+
+.fold-head .chev {
+  display: inline-block;
+  width: 10px;
+  color: var(--text-3);
+  transition: transform 0.15s var(--ease);
+}
+
+.fold.open > .fold-head .chev {
+  transform: rotate(90deg);
+}
+
+.fold > .fold-body {
+  display: none;
+}
+
+.fold.open > .fold-body {
+  display: block;
+}
+
+.fold-head .count {
+  margin-left: 2px;
+  color: var(--text-4);
+  font-weight: 500;
+}
+
+.fold-head .muted {
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+.tiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 4px;
+}
+
+.tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 84px;
+  padding: 4px 4px 5px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.12s var(--ease);
+}
+
+.tile:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.tile.selected {
+  background: var(--accent-a15);
+  box-shadow: inset 0 0 0 1px var(--accent-a30);
+}
+
+.tile .name {
+  width: 100%;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 11px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tile.current .name,
+.mrow.current .name {
+  color: var(--accent-hi);
+  font-weight: 600;
+}
+
+.swatch {
+  flex: none;
+  width: 76px;
+  height: 76px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--panel-3);
+}
+
+.swatch img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.swatch.small {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+}
+
+.swatch.big {
+  width: 96px;
+  height: 96px;
+  border-radius: 8px;
+}
+
+.mlist {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 8px 0 2px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.mrow:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.mrow.selected {
+  background: var(--accent-a15);
+}
+
+.mrow .swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+}
+
+.mrow .name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mrow .brief {
+  color: var(--text-3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* ---- 右 */
+#right {
+  padding: 0 14px 20px;
+}
+
+#right section {
+  gap: 10px;
+}
+
+.part-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.part-head .ref {
+  color: var(--accent-hi);
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.preview {
+  width: 100%;
+  max-width: 400px;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--panel-3);
+  cursor: grab;
+}
+
+.preview:active {
+  cursor: grabbing;
+}
+
+.preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.drop {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.sub-title {
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.targets {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.target {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  text-align: left;
+}
+
+.target:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+}
+
+.target.on {
+  background: var(--accent-a08);
+  color: var(--text);
+}
+
+.target .rdot {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px var(--text-3);
+}
+
+.target.on .rdot {
+  box-shadow: inset 0 0 0 1.5px var(--accent), inset 0 0 0 4px var(--panel), inset 0 0 0 8px var(--accent);
+}
+
+.target .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.adj {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 28px;
+}
+
+.adj .slider.bare {
+  flex: 1;
+}
+
+.slider.bare {
+  grid-template-columns: 1fr 74px;
+}
+
+.mat-head {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.mat-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mat-name {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.edit-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 6px;
+}
+
+.btn.small {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 11.5px;
+}
+
+.btn.danger {
+  background: rgba(255, 93, 93, 0.15);
+  color: #ffb3b3;
+  box-shadow: inset 0 0 0 1px rgba(255, 93, 93, 0.35);
+}
+
+.confirm {
+  align-items: center;
+}
+
+.naming {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.params {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.params .fold-body {
+  padding: 2px 0 6px 2px;
+}
+
+.prow {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+}
+
+.plabel {
+  overflow: hidden;
+  color: var(--text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plabel.modified {
+  color: var(--accent-hi);
+}
+
+.pval {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.pval > .slider.bare {
+  flex: 1;
+}
+
+.pval > select {
+  flex: 1;
+  min-width: 0;
+}
+
+.pval > .value {
+  width: 110px;
+}
+
+/* ---- 右クリックのメニュー */
+.ctx {
+  position: fixed;
+  z-index: 50;
+  min-width: 180px;
+  padding: 5px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  box-shadow: inset 0 0 0 1px var(--line-3), 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+
+.ctx .item {
+  display: block;
+  width: 100%;
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+}
+
+.ctx .item:hover:not(:disabled) {
+  background: var(--accent-a15);
+  color: var(--accent-hi);
+}
+
+.ctx .item:disabled {
+  color: var(--text-4);
+}
+
+/* ---- 大きさを変える角 */
+.grip {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  background: linear-gradient(135deg, transparent 50%, var(--line-3) 50%, var(--line-3) 60%, transparent 60%, transparent 70%, var(--line-3) 70%, var(--line-3) 80%, transparent 80%);
+  border-radius: 0 0 10px 0;
+}

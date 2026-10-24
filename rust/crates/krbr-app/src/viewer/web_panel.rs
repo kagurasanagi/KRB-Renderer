@@ -159,11 +159,7 @@ impl App {
         let model_file = fp.and_then(|f| f.models.get(mi)).map(|m| Path::new(&m.path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()).unwrap_or_default();
         items.push(tip(note(model_file.clone(), "muted"), model_file));
         let scope = self.assign_scope;
-        items.push(json!({ "t": "radio", "id": "sel.scope", "value": scope_name(scope), "options": [
-            { "v": "part", "label": fl!("scope-part"), "tip": fl!("scope-part-tip") },
-            { "v": "model", "label": fl!("scope-model"), "tip": fl!("scope-model-tip") },
-            { "v": "global", "label": fl!("scope-all-boards"), "tip": fl!("scope-all-boards-tip") },
-        ] }));
+        items.push(self.scope_json());
         let rows = self.selection_rows(&sel);
         let decided_by = |stage: MaterialStage| rows.iter().any(|r| r.stage() == Some(stage));
         if scope != AssignScope::Part && decided_by(MaterialStage::ProjectRef) {
@@ -213,6 +209,15 @@ impl App {
     }
 
     /// 設定パネルの JSON（egui の App::panel と同じ項目）
+    /// 材質を書き込む先の選択肢（設定パネルと材質エディタで共通）
+    pub(super) fn scope_json(&self) -> Value {
+        json!({ "t": "radio", "id": "sel.scope", "value": scope_name(self.assign_scope), "options": [
+            { "v": "part", "label": fl!("scope-part"), "tip": fl!("scope-part-tip") },
+            { "v": "model", "label": fl!("scope-model"), "tip": fl!("scope-model-tip") },
+            { "v": "global", "label": fl!("scope-all-boards"), "tip": fl!("scope-all-boards-tip") },
+        ] })
+    }
+
     pub(super) fn panel_json(&self) -> String {
         let st = &self.st;
         let cfg = &self.prep.cfg;

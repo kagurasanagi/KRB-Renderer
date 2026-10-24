@@ -1,0 +1,629 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>/*STYLE*/</style>
+</head>
+<body class="editor">
+  <header id="head">
+    <span id="title"></span>
+    <button class="icon-btn" id="close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </header>
+  <div class="cols">
+    <aside class="browser">
+      <div class="search-row">
+        <input class="search" id="search" data-key="search" type="text" spellcheck="false">
+        <div class="segmented" id="view"></div>
+      </div>
+      <div class="scroll" id="list"></div>
+    </aside>
+    <main class="scroll" id="right"></main>
+  </div>
+  <div class="grip" id="grip"></div>
+  <div class="ctx" id="ctx" hidden></div>
+<script>
+// 材質エディタ：Rust が組み立てた状態（JSON）を描き、操作を id と値で返す（"mated.<id>"）。
+// 動かしている途中（スライダー・ドラッグ・選択肢・右クリックのメニュー）は描き直さず、終わってから最新の内容で描く。
+// 文字の入力欄は、描き直してもフォーカスと打った文字を残す
+const post = (m) => window.ipc.postMessage(JSON.stringify(m));
+const set = (id, value) => post({ type: "set", id: "mated." + id, value });
+const click = (id) => post({ type: "click", id: "mated." + id });
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+};
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+const typing = (t) => t && ((t.tagName === "INPUT" && (t.type === "text" || t.type === "number")) || t.tagName === "SELECT");
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") return hideMenu();
+  if (typing(e.target)) return;
+  if (e.ctrlKey && (e.code === "KeyY" || (e.code === "KeyZ" && e.shiftKey))) {
+    click("redo");
+  } else if (e.ctrlKey && e.code === "KeyZ") {
+    click("undo");
+  } else if (!e.repeat && !e.ctrlKey) {
+    post({ type: "key", code: e.code });
+  }
+  e.preventDefault();
+});
+$("close").addEventListener("click", () => click("close"));
+
+// 窓を動かす（見出しをドラッグ）・大きさを変える（右下の角）
+function dragger(handle, id, skip) {
+  let last = null;
+  handle.addEventListener("pointerdown", (e) => {
+    if (skip && e.target.closest(skip)) return;
+    last = { x: e.screenX, y: e.screenY };
+    handle.setPointerCapture(e.pointerId);
+  });
+  handle.addEventListener("pointermove", (e) => {
+    if (!last) return;
+    const d = { dx: e.screenX - last.x, dy: e.screenY - last.y };
+    last = { x: e.screenX, y: e.screenY };
+    if (d.dx || d.dy) post({ type: "set", id: id, value: d });
+  });
+  handle.addEventListener("pointerup", () => (last = null));
+}
+dragger($("head"), "editor.move", "button");
+dragger($("grip"), "editor.grow");
+
+// 検索（打つたびに送る）
+$("search").addEventListener("input", (e) => set("search", e.target.value));
+
+// ---------------------------------------------------------------- 描き直しを待つとき
+let state = null;
+let pending = null;
+let busy = 0;
+let dragging = false;
+window.addEventListener("pointerdown", () => busy++);
+window.addEventListener("pointerup", () => {
+  busy = Math.max(0, busy - 1);
+  flush();
+});
+// ドラッグ＆ドロップが始まると pointerup は来ない（pointercancel になる）
+window.addEventListener("pointercancel", () => {
+  busy = 0;
+  flush();
+});
+document.addEventListener("focusout", () => setTimeout(flush, 0));
+function interacting() {
+  const a = document.activeElement;
+  return busy > 0 || dragging || !$("ctx").hidden || (a && (a.tagName === "SELECT" || (a.tagName === "INPUT" && (a.type === "number" || a.type === "color"))));
+}
+function flush() {
+  if (pending && !interacting()) {
+    const m = pending;
+    pending = null;
+    render(m);
+  }
+}
+
+// 開け閉めの状態（節・分類）。無ければ Rust の既定
+const opened = new Map();
+const isOpen = (key, def) => (opened.has(key) ? opened.get(key) : def);
+function foldable(key, def, head, body) {
+  const wrap = el("div", "fold" + (isOpen(key, def) ? " open" : ""));
+  const h = el("button", "fold-head");
+  h.append(el("span", "chev", "›"), ...head);
+  h.addEventListener("click", () => {
+    opened.set(key, !wrap.classList.contains("open"));
+    wrap.classList.toggle("open");
+  });
+  wrap.append(h, body);
+  return wrap;
+}
+
+// ---------------------------------------------------------------- 右クリックのメニュー
+function hideMenu() {
+  $("ctx").hidden = true;
+  flush();
+}
+window.addEventListener("pointerdown", (e) => {
+  if (!$("ctx").hidden && !e.target.closest("#ctx")) hideMenu();
+}, true);
+window.addEventListener("blur", hideMenu);
+function showMenu(x, y, items) {
+  const c = $("ctx");
+  c.replaceChildren(...items.map((it) => {
+    const b = el("button", "item", it.label);
+    b.disabled = it.enabled === false;
+    b.addEventListener("click", () => {
+      hideMenu();
+      it.run();
+    });
+    return b;
+  }));
+  c.hidden = false;
+  const r = c.getBoundingClientRect();
+  c.style.left = Math.min(x, window.innerWidth - r.width - 4) + "px";
+  c.style.top = Math.min(y, window.innerHeight - r.height - 4) + "px";
+}
+
+// ---------------------------------------------------------------- 見本を落とす場所
+function dropTarget(e, target) {
+  e.addEventListener("dragover", (ev) => {
+    if (!dragging) return;
+    ev.preventDefault();
+    e.classList.add("drop");
+  });
+  e.addEventListener("dragleave", () => e.classList.remove("drop"));
+  e.addEventListener("drop", (ev) => {
+    ev.preventDefault();
+    e.classList.remove("drop");
+    const name = ev.dataTransfer.getData("text/plain");
+    if (name) set("drop", target === undefined ? { name } : { name, target });
+  });
+}
+
+function swatch(url, cls) {
+  const s = el("div", "swatch" + (cls ? " " + cls : ""));
+  if (url) {
+    const img = el("img");
+    img.src = url;
+    img.draggable = false;
+    s.append(img);
+  }
+  return s;
+}
+
+// ---------------------------------------------------------------- 左：材質の一覧
+function item(m, it) {
+  const e = el("div", (m.listView ? "mrow" : "tile") + (it.selected ? " selected" : "") + (it.current ? " current" : ""));
+  e.title = it.tip;
+  e.draggable = true;
+  e.append(swatch(it.thumb));
+  const name = el("span", "name", (it.user ? "★ " : "") + it.label);
+  e.append(name);
+  if (m.listView) e.append(el("span", "brief mono", it.brief));
+  e.addEventListener("click", () => set("select", it.name));
+  e.addEventListener("dblclick", () => set("dblclick", it.name));
+  e.addEventListener("dragstart", (ev) => {
+    dragging = true;
+    ev.dataTransfer.setData("text/plain", it.name);
+    ev.dataTransfer.effectAllowed = "copy";
+    set("select", it.name);
+  });
+  e.addEventListener("dragend", () => {
+    dragging = false;
+    busy = 0;
+    flush();
+  });
+  e.addEventListener("contextmenu", (ev) => {
+    set("select", it.name);
+    const items = [
+      { label: m.menu.assign, enabled: m.menu.canAssign, run: () => set("assign_menu", it.name) },
+      { label: m.menu.duplicate, run: () => set("duplicate", it.name) },
+    ];
+    if (it.user) items.push({ label: m.menu.delete, run: () => set("delete.ask", it.name) });
+    showMenu(ev.clientX, ev.clientY, items);
+  });
+  return e;
+}
+
+function items(m, list) {
+  const box = el("div", m.listView ? "mlist" : "tiles");
+  for (const it of list) box.append(item(m, it));
+  return box;
+}
+
+function browser(m) {
+  const s = $("search");
+  s.placeholder = m.searchLabel;
+  if (document.activeElement !== s) s.value = m.search;
+  const view = $("view");
+  view.replaceChildren();
+  for (const [v, label, tip] of [["grid", m.viewGrid, ""], ["list", m.viewList, m.viewListTip]]) {
+    const b = el("button", (v === "list") === m.listView ? "on" : "", label);
+    if (tip) b.title = tip;
+    b.addEventListener("click", () => set("view", v));
+    view.append(b);
+  }
+  const frag = document.createDocumentFragment();
+  for (const c of m.categories) {
+    const body = el("div", "fold-body");
+    body.append(items(m, c.items));
+    if (c.more.length) {
+      const more = el("div", "fold-body");
+      more.append(items(m, c.more));
+      body.append(foldable("more:" + c.id, c.moreOpen, [el("span", "muted", c.moreLabel)], more));
+    }
+    frag.append(foldable("cat:" + c.id, true, [el("span", null, c.label), el("span", "count", String(c.count))], body));
+  }
+  $("list").replaceChildren(frag);
+}
+
+// ---------------------------------------------------------------- 右上：部品
+let orbit = null;
+function partView(m) {
+  const sec = el("section", "part-sec");
+  const p = m.part;
+  if (!p) {
+    sec.append(el("div", "note-text muted", m.noPart));
+    return sec;
+  }
+  const head = el("div", "part-head");
+  head.append(el("span", "ref", p.reference), el("span", "note-text muted", p.hint));
+  sec.append(head);
+  const pv = el("div", "preview");
+  const img = el("img");
+  img.id = "preview";
+  img.draggable = false;
+  if (p.preview) img.src = p.preview;
+  else img.style.visibility = "hidden";
+  pv.append(img);
+  pv.addEventListener("pointerdown", (e) => {
+    orbit = { x: e.clientX, y: e.clientY };
+    pv.setPointerCapture(e.pointerId);
+  });
+  pv.addEventListener("pointermove", (e) => {
+    if (!orbit) return;
+    const d = { dx: e.clientX - orbit.x, dy: e.clientY - orbit.y };
+    orbit = { x: e.clientX, y: e.clientY };
+    if (d.dx || d.dy) set("orbit", d);
+  });
+  pv.addEventListener("pointerup", () => (orbit = null));
+  pv.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    set("zoom", e.deltaY);
+  }, { passive: false });
+  pv.addEventListener("dblclick", () => click("view_reset"));
+  if (!p.placeholder) dropTarget(pv);
+  sec.append(pv);
+  if (p.error) sec.append(el("div", "note-text error", p.error));
+  if (p.placeholder) {
+    sec.append(el("div", "note-text muted", p.placeholder));
+    return sec;
+  }
+  // 書き込む先（設定パネルと同じ選択肢）
+  if (p.scope) {
+    const seg = el("div", "segmented");
+    for (const o of p.scope.options) {
+      const b = el("button", o.v === p.scope.value ? "on" : "", o.label);
+      if (o.tip) b.title = o.tip;
+      b.addEventListener("click", () => post({ type: "set", id: p.scope.id, value: o.v }));
+      seg.append(b);
+    }
+    sec.append(seg);
+  }
+  // 割り当て先の部位
+  sec.append(el("div", "sub-title", p.targetLabel));
+  const rows = el("div", "targets");
+  if (p.multi) {
+    const w = el("button", "target" + (p.whole.on ? " on" : ""));
+    w.append(el("span", "rdot"), el("span", "label", p.whole.label));
+    w.addEventListener("click", () => click("whole"));
+    dropTarget(w, null);
+    rows.append(w);
+  }
+  for (const r of p.rows) {
+    const b = el("button", "target" + (r.on ? " on" : ""));
+    b.title = r.material;
+    b.append(el("span", "rdot"), swatch(r.thumb, "small"), el("span", "label", r.shown + ": " + r.label));
+    b.addEventListener("click", () => set("row", r.key));
+    dropTarget(b, r.key);
+    rows.append(b);
+  }
+  sec.append(rows);
+  // 1 つの部位の調整（色・粗さ）
+  const a = p.adjust;
+  if (a) {
+    sec.append(el("div", "sub-title", a.title));
+    if (a.unknown) {
+      sec.append(el("div", "note-text muted", a.unknown));
+    } else {
+      const c = el("div", "adj");
+      const cc = checkbox(a.color.on, a.color.label, a.color.tip, (on) => set("adj.color.on", on));
+      c.append(cc);
+      if (a.color.on) {
+        c.append(colorInput(a.color.value, (v) => set("adj.color", v)));
+        if (a.color.measured) c.append(el("span", "note-text warn", a.color.measured));
+      }
+      sec.append(c);
+      const r = el("div", "adj");
+      r.append(checkbox(a.rough.on, a.rough.label, a.rough.tip, (on) => set("adj.rough.on", on)));
+      if (a.rough.on) r.append(sliderInput({ id: "adj.rough", value: a.rough.value, min: 0, max: 1, digits: 2 }, (v) => set("adj.rough", v)));
+      else r.append(el("span", "note-text muted mono", Number(a.rough.value).toFixed(2)));
+      sec.append(r);
+      if (a.save) {
+        const b = el("button", "btn", a.save.label);
+        b.title = a.save.tip;
+        b.addEventListener("click", () => click("adj.save"));
+        const row = el("div", "buttons");
+        row.append(b);
+        sec.append(row);
+      }
+    }
+  }
+  return sec;
+}
+
+// ---------------------------------------------------------------- 部品（パラメータ）
+function checkbox(on, label, tip, change) {
+  const row = el("label", "check");
+  if (tip) row.title = tip;
+  const box = el("input");
+  box.type = "checkbox";
+  box.checked = on;
+  box.addEventListener("change", () => change(box.checked));
+  row.append(box, el("span", "mark"));
+  if (label) row.append(el("span", null, label));
+  return row;
+}
+
+function colorInput(value, change) {
+  const c = el("input");
+  c.type = "color";
+  c.value = value;
+  c.addEventListener("input", () => change(c.value));
+  return c;
+}
+
+function fmt(v, it) {
+  return Number(v).toFixed(it.digits ?? 3);
+}
+
+function sliderInput(it, change) {
+  const wrap = el("div", "slider bare");
+  const range = el("input");
+  range.type = "range";
+  const lo = it.log ? Math.log(it.min) : it.min, hi = it.log ? Math.log(it.max) : it.max;
+  const steps = 1000;
+  range.min = 0;
+  range.max = steps;
+  range.step = 1;
+  const toPos = (v) => Math.round(((it.log ? Math.log(Math.max(v, it.min)) : Math.min(Math.max(v, it.min), it.max)) - lo) / (hi - lo) * steps);
+  const toVal = (p) => {
+    const x = lo + (p / steps) * (hi - lo);
+    return it.log ? Math.exp(x) : x;
+  };
+  range.value = toPos(it.value);
+  const num = el("input", "num mono");
+  num.type = "number";
+  num.value = fmt(it.value, it);
+  const fill = () => range.style.setProperty("--p", (range.value / steps) * 100 + "%");
+  fill();
+  range.addEventListener("input", () => {
+    const v = toVal(Number(range.value));
+    num.value = fmt(v, it);
+    fill();
+    change(v);
+  });
+  num.addEventListener("change", () => {
+    const v = Number(num.value);
+    if (Number.isFinite(v)) change(Math.min(it.max, Math.max(it.min, v)));
+  });
+  const value = el("div", "value");
+  value.append(num);
+  if (it.suffix) value.append(el("span", "unit", it.suffix.trim()));
+  wrap.append(range, value);
+  return wrap;
+}
+
+function control(c) {
+  const id = "param." + c.id;
+  switch (c.t) {
+    case "slider":
+      return sliderInput(c, (v) => set(id, v));
+    case "number": {
+      const w = el("div", "value");
+      const n = el("input", "num mono");
+      n.type = "number";
+      n.step = c.step;
+      n.min = c.min;
+      n.max = c.max;
+      n.value = Number(c.value).toFixed(c.digits);
+      n.addEventListener("change", () => {
+        const v = Number(n.value);
+        if (Number.isFinite(v)) set(id, v);
+      });
+      w.append(n);
+      if (c.suffix) w.append(el("span", "unit", c.suffix.trim()));
+      return w;
+    }
+    case "color":
+      return colorInput(c.value, (v) => set(id, v));
+    case "check":
+      return checkbox(c.value, c.label, c.tip, (on) => set(id, on));
+    case "select": {
+      const s = el("select");
+      for (const o of c.options) {
+        const opt = el("option", null, o.label);
+        opt.value = o.v;
+        if (o.tip) opt.title = o.tip;
+        if (o.v === c.value) opt.selected = true;
+        s.append(opt);
+      }
+      s.addEventListener("change", () => {
+        set(id, s.value);
+        s.blur();
+      });
+      return s;
+    }
+    case "note": {
+      const n = el("span", "note-text " + (c.tone || "muted"), c.text);
+      if (c.tip) n.title = c.tip;
+      return n;
+    }
+  }
+  return el("span");
+}
+
+function paramRow(params, r) {
+  const row = el("div", "prow");
+  const label = el("span", "plabel" + (r.modified ? " modified" : ""), r.label + (r.modified ? " •" : ""));
+  label.title = [r.tip, r.modified ? params.modifiedTip : ""].filter(Boolean).join("\n");
+  label.addEventListener("contextmenu", (ev) => {
+    showMenu(ev.clientX, ev.clientY, [{ label: params.reset, enabled: r.modified, run: () => set("reset", r.id) }]);
+  });
+  const val = el("div", "pval");
+  for (const c of r.controls) val.append(control(c));
+  row.append(label, val);
+  return row;
+}
+
+function paramsView(params) {
+  const box = el("div", "params");
+  const kind = el("div", "prow");
+  kind.append(el("span", "plabel", params.kind.label));
+  const seg = el("div", "segmented");
+  for (const o of params.kind.options) {
+    const b = el("button", o.v === params.kind.value ? "on" : "", o.label);
+    b.title = o.tip;
+    b.addEventListener("click", () => set("param.kind", o.v));
+    seg.append(b);
+  }
+  kind.append(seg);
+  box.append(kind);
+  for (const s of params.sections) {
+    const body = el("div", "fold-body");
+    for (const r of s.rows) body.append(paramRow(params, r));
+    box.append(foldable("sec:" + s.id, s.open, [el("span", null, s.title)], body));
+  }
+  for (const r of params.general) box.append(paramRow(params, r));
+  return box;
+}
+
+// ---------------------------------------------------------------- 右下：選んだ材質
+function details(m) {
+  const sec = el("section", "details");
+  const d = m.details;
+  if (d.hint) {
+    sec.append(el("div", "note-text muted", d.hint));
+    return sec;
+  }
+  if (d.naming) {
+    const n = d.naming;
+    sec.append(el("div", "sub-title", n.title));
+    const row = el("div", "naming");
+    row.append(el("span", null, n.nameLabel));
+    const input = el("input", "search");
+    input.type = "text";
+    input.spellcheck = false;
+    input.dataset.key = "naming";
+    input.value = n.name;
+    input.addEventListener("input", () => set("naming.name", input.value));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !n.error) click("naming.create");
+    });
+    row.append(input);
+    sec.append(row);
+    if (n.error) sec.append(el("div", "note-text error", n.error));
+    const b = el("div", "buttons");
+    const create = el("button", "btn primary", n.create);
+    create.disabled = !!n.error;
+    create.addEventListener("click", () => click("naming.create"));
+    const cancel = el("button", "btn", n.cancel);
+    cancel.addEventListener("click", () => click("naming.cancel"));
+    b.append(create, cancel);
+    sec.append(b);
+    return sec;
+  }
+  const top = el("div", "mat-head");
+  top.append(swatch(d.thumb, "big"));
+  const info = el("div", "mat-info");
+  info.append(el("div", "mat-name", d.label), el("div", "note-text muted", d.sub), el("div", "note-text", d.desc));
+  if (d.user) info.append(el("div", "note-text muted", d.userNote));
+  top.append(info);
+  sec.append(top);
+  const b = el("div", "buttons");
+  const assign = el("button", "btn primary", d.assign.label);
+  assign.disabled = !d.assign.enabled;
+  assign.title = d.assign.tip;
+  assign.addEventListener("click", () => click("assign"));
+  const dup = el("button", "btn", d.duplicate.label);
+  dup.title = d.duplicate.tip;
+  dup.addEventListener("click", () => set("duplicate", d.name));
+  b.append(assign, dup);
+  if (d.delete) {
+    const del = el("button", "btn", d.delete);
+    del.addEventListener("click", () => set("delete.ask", ""));
+    b.append(del);
+  }
+  sec.append(b);
+  if (d.confirm) {
+    const c = el("div", "buttons confirm");
+    c.append(el("span", "note-text warn", d.confirm.text));
+    const yes = el("button", "btn danger", d.confirm.delete);
+    yes.addEventListener("click", () => click("delete.yes"));
+    const no = el("button", "btn", d.confirm.cancel);
+    no.addEventListener("click", () => click("delete.no"));
+    c.append(yes, no);
+    sec.append(c);
+  }
+  if (d.notice) sec.append(el("div", "note-text accent", d.notice));
+  if (d.error) sec.append(el("div", "note-text error", d.error));
+  if (d.edit) {
+    const head = el("div", "edit-head");
+    head.append(el("span", "sub-title", d.edit.title));
+    if (d.edit.undo) {
+      const tools = el("div", "buttons");
+      for (const [k, v] of [["undo", d.edit.undo], ["redo", d.edit.redo]]) {
+        const btn = el("button", "btn small", v.label);
+        btn.disabled = !v.enabled;
+        btn.title = v.tip;
+        btn.addEventListener("click", () => click(k));
+        tools.append(btn);
+      }
+      head.append(tools);
+    }
+    sec.append(head);
+    if (d.edit.note) sec.append(el("div", "note-text muted", d.edit.note));
+    sec.append(paramsView(d.edit.params));
+  }
+  return sec;
+}
+
+// ---------------------------------------------------------------- 描く
+let lastKey = "";
+const keyOf = (m) => JSON.stringify({ ...m, part: m.part && { ...m.part, preview: null } });
+function showPreview(m) {
+  const img = $("preview");
+  if (img && m.part && m.part.preview && img.getAttribute("src") !== m.part.preview) {
+    img.src = m.part.preview;
+    img.style.visibility = "";
+  }
+}
+function render(m) {
+  const key = keyOf(m);
+  if (key === lastKey) return showPreview(m);
+  lastKey = key;
+  state = m;
+  $("title").textContent = m.title;
+  $("close").title = m.closeTip;
+  // 入力中の欄のフォーカスと文字、スクロールの位置を残す
+  const a = document.activeElement;
+  const focusKey = a && a.dataset && a.dataset.key;
+  const typed = focusKey ? { value: a.value, start: a.selectionStart, end: a.selectionEnd } : null;
+  const scroll = { list: $("list").scrollTop, right: $("right").scrollTop };
+  browser(m);
+  $("right").replaceChildren(partView(m), details(m));
+  $("list").scrollTop = scroll.list;
+  $("right").scrollTop = scroll.right;
+  if (focusKey && focusKey !== "search") {
+    const e = document.querySelector(`[data-key="${focusKey}"]`);
+    if (e) {
+      e.value = typed.value;
+      e.focus();
+      e.setSelectionRange(typed.start, typed.end);
+    }
+  }
+}
+
+window.krbr = {
+  editor(m) {
+    // プレビューの画像だけが変わったときは、画像だけ差し替える（回している最中も。積むたびに全部を描き直さない）
+    if (keyOf(m) === lastKey) {
+      pending = null;
+      return showPreview(m);
+    }
+    pending = m;
+    flush();
+  },
+};
+post({ type: "ready" });
+</script>
+</body>
+</html>

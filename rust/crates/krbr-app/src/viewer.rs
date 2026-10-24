@@ -953,7 +953,9 @@ struct App {
     web: Option<crate::web_ui::WebUi>,
     proxy: Option<EventLoopProxy<crate::web_ui::Wake>>,
     /// ボタン列・ステータスバー・設定パネル・警告の帯の置き場所（egui のポイント。NOTHING なら出さない）
-    web_rects: [egui::Rect; 4],
+    web_rects: [egui::Rect; 5],
+    /// --web-ui：材質エディタの窓の場所（egui のポイント。動かす・大きさを変えると変わる。None なら初めの場所）
+    editor_rect: Option<egui::Rect>,
     /// --web-ui：開いているメニューのプルダウン
     web_menu: Option<WebMenu>,
     /// 最後にプルダウンを閉じたメニューと時刻（外をクリックして閉じたのが、同じ見出しのクリックだったら開き直さない）
@@ -3057,6 +3059,27 @@ impl App {
                     }
                 }
                 crate::web_ui::Msg::Click(id) if id == "menu.close" => self.close_web_menu(),
+                // 材質エディタ
+                crate::web_ui::Msg::Set(id, v) if id.starts_with("mated.") => {
+                    let info = self.part_info();
+                    let actions = self.editor.web_apply(&self.library, info.as_ref(), &id["mated.".len()..], &v);
+                    self.editor_actions.extend(actions);
+                }
+                crate::web_ui::Msg::Click(id) if id.starts_with("mated.") => {
+                    let info = self.part_info();
+                    let actions = self.editor.web_apply(&self.library, info.as_ref(), &id["mated.".len()..], &serde_json::Value::Null);
+                    self.editor_actions.extend(actions);
+                }
+                crate::web_ui::Msg::Set(id, v) if id == "editor.move" || id == "editor.grow" => {
+                    let d = egui::vec2(v.get("dx").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32, v.get("dy").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32);
+                    if let Some(r) = &mut self.editor_rect {
+                        if id == "editor.move" {
+                            *r = r.translate(d);
+                        } else {
+                            r.max += d;
+                        }
+                    }
+                }
                 crate::web_ui::Msg::Click(id) if id.starts_with("menu:") => {
                     self.close_web_menu();
                     self.apply_menu_click(&id["menu:".len()..]);
@@ -3134,6 +3157,7 @@ impl App {
                 Pane::Status => self.web_rects[1],
                 Pane::Panel => self.web_rects[2],
                 Pane::Banner => self.web_rects[3],
+                Pane::Editor => self.web_rects[4],
                 Pane::Menu => menu_rect?,
                 Pane::Tooltip => return None,
             };
@@ -3149,6 +3173,11 @@ impl App {
         rects.push(tip_rect.and_then(px));
         let tip = self.web_tip.as_ref().map(|t| serde_json::json!({ "text": t.text }).to_string());
         let menu = self.web_menu.as_ref().map(|m| self.menu_json(&m.id));
+        let editor = rects[4].is_some().then(|| {
+            let info = self.part_info();
+            let scope = self.scope_json();
+            self.editor.web_json(&self.library, info.as_ref(), scope)
+        });
         let toolbar = self.toolbar_json();
         let status = self.status_texts().map(|t| t.json()).unwrap_or_default();
         let panel = rects[2].is_some().then(|| self.panel_json());
@@ -3170,6 +3199,9 @@ impl App {
         }
         if let Some(j) = menu {
             web.send(Pane::Menu, &j);
+        }
+        if let Some(j) = editor {
+            web.send(Pane::Editor, &j);
         }
         if let Some(j) = tip {
             web.send(Pane::Tooltip, &j);
@@ -3247,9 +3279,30 @@ impl App {
                 root.painter().with_clip_rect(central).galley(pos, galley, egui::Color32::from_gray(220));
             }
             let info = self.part_info();
-            let scope = &mut self.assign_scope;
-            let actions = self.editor.ui(root.ctx(), &self.library, info.as_ref(), &mut |ui| scope_radios(ui, scope));
-            self.editor_actions.extend(actions);
+            if let Some(web) = &self.web {
+                // 材質エディタは 3D 表示の上の WebView（初めは左上。ウィンドウの中に収める）
+                self.editor.attach_web(root.ctx(), web.images());
+                let actions = self.editor.web_update(&self.library, info.as_ref());
+                self.editor_actions.extend(actions);
+                // 上下はボタン列とステータスバーの間（左右は設定パネルの上にも動かせる）
+                let screen = root.ctx().content_rect();
+                let top = self.web_rects[0].bottom().max(screen.top());
+                let bottom = if self.web_rects[1].is_positive() { self.web_rects[1].top() } else { screen.bottom() };
+                self.web_rects[4] = if self.editor.open {
+                    let r = *self.editor_rect.get_or_insert_with(|| egui::Rect::from_min_size(central.min + egui::vec2(16.0, 16.0), egui::vec2(900.0f32.min(central.width() - 32.0), 780.0f32.min(central.height() - 32.0))));
+                    let size = r.size().max(egui::vec2(560.0, 360.0)).min(egui::vec2(screen.width(), bottom - top));
+                    let min = egui::pos2(r.min.x.clamp(screen.left(), (screen.right() - size.x).max(screen.left())), r.min.y.clamp(top, (bottom - size.y).max(top)));
+                    let r = egui::Rect::from_min_size(min, size);
+                    self.editor_rect = Some(r);
+                    r
+                } else {
+                    egui::Rect::NOTHING
+                };
+            } else {
+                let scope = &mut self.assign_scope;
+                let actions = self.editor.ui(root.ctx(), &self.library, info.as_ref(), &mut |ui| scope_radios(ui, scope));
+                self.editor_actions.extend(actions);
+            }
             self.plugin_window.ui(root.ctx());
         });
         self.egui_state.as_mut().unwrap().handle_platform_output(self.window.as_ref().unwrap(), full.platform_output);
@@ -4081,7 +4134,8 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         window: None,
         web: None,
         proxy: None,
-        web_rects: [egui::Rect::NOTHING; 4],
+        web_rects: [egui::Rect::NOTHING; 5],
+        editor_rect: None,
         web_menu: None,
         web_menu_closed: None,
         web_tip: None,

@@ -20,6 +20,8 @@ use crate::i18n;
 use crate::preview::{part_camera, part_scene, swatch_camera, swatch_scene, Preview, PreviewLight, SWATCH_PX};
 use crate::swatch_cache;
 
+mod web;
+
 /// 編集が止まってから書き込むまでの時間
 const EDIT_DELAY: Duration = Duration::from_millis(400);
 /// 部品のプレビューの大きさ（画素）と、積む最大のサンプル数
@@ -224,6 +226,8 @@ struct PartView {
     /// 組み立てたときのプレビューのシーンの材質（調整の無いもの）
     base: Vec<Material>,
     tex: Option<egui::TextureHandle>,
+    /// --web-ui：ページから読むプレビューの画像の URL
+    url: Option<String>,
     shown_samples: u32,
     azimuth: f64,
     elevation: f64,
@@ -259,6 +263,10 @@ pub struct MaterialEditor {
     browsed_for: Option<String>,
     /// 左を一覧（小さな見本・名前・屈折率と粗さ）で見せる
     list_view: bool,
+    /// --web-ui：見本とプレビューの画像（PNG）を置く場所、見本の URL、URL に付ける通し番号
+    web: Option<crate::web_ui::Images>,
+    thumb_urls: HashMap<String, String>,
+    img_seq: u64,
 }
 
 
@@ -759,27 +767,36 @@ impl MaterialEditor {
             }
         });
         if v != before {
-            let name = v.name(base);
-            match &mut self.adjust {
-                Some(a) if a.reference == p.reference && a.part == row.key => {
-                    a.material = name;
-                    a.changed_at = Instant::now();
-                    a.written = false;
-                }
-                _ => {
-                    self.flush(part, actions, true);
-                    self.adjust = Some(Adjust { reference: p.reference.clone(), part: row.key.clone(), material: name, changed_at: Instant::now(), written: false });
-                }
-            }
+            self.adjust_to(part, &p.reference, &row.key, v.name(base), actions);
         }
         // 調整したものを自分の材質にする
         if (v.color.is_some() || v.roughness.is_some()) && ui.button(fl!("mated-save-adjusted")).on_hover_text(fl!("mated-save-adjusted-tip")).clicked() {
-            if let Some(mut m) = self.material_for(lib, &Variant { emission: None, smooth: false, ..v }.name(base)) {
-                m.category = Some(base_m.category());
-                let keep = Variant { smooth: v.smooth, emission: v.emission, ..Default::default() };
-                self.naming = Some(Naming { name: unique_name(lib, &format!("{} {}", material_label(base), p.reference)), material: m, assign_to: Some((row.key.clone(), keep)) });
-                self.browsing = None;
+            self.start_save_adjusted(lib, &p.reference, &row.key, base, v, &base_m);
+        }
+    }
+
+    /// 部位の調整（色・粗さを変えた材質名）を、止まってから書き込むように覚える
+    fn adjust_to(&mut self, part: Option<&PartInfo>, reference: &str, key: &str, name: String, actions: &mut Vec<Action>) {
+        match &mut self.adjust {
+            Some(a) if a.reference == reference && a.part == key => {
+                a.material = name;
+                a.changed_at = Instant::now();
+                a.written = false;
             }
+            _ => {
+                self.flush(part, actions, true);
+                self.adjust = Some(Adjust { reference: reference.to_string(), part: key.to_string(), material: name, changed_at: Instant::now(), written: false });
+            }
+        }
+    }
+
+    /// 調整した部位の材質を、自分の材質にする（名前を決めてもらう）
+    fn start_save_adjusted(&mut self, lib: &MaterialLibrary, reference: &str, key: &str, base: &str, v: Variant, base_m: &Material) {
+        if let Some(mut m) = self.material_for(lib, &Variant { emission: None, smooth: false, ..v }.name(base)) {
+            m.category = Some(base_m.category());
+            let keep = Variant { smooth: v.smooth, emission: v.emission, ..Default::default() };
+            self.naming = Some(Naming { name: unique_name(lib, &format!("{} {}", material_label(base), reference)), material: m, assign_to: Some((key.to_string(), keep)) });
+            self.browsing = None;
         }
     }
 
@@ -825,11 +842,7 @@ impl MaterialEditor {
             ui.horizontal(|ui| {
                 ui.colored_label(egui::Color32::from_rgb(255, 204, 77), fl!("mated-delete-confirm"));
                 if ui.button(fl!("mated-delete")).clicked() {
-                    actions.push(Action::DeleteUser(name.clone()));
-                    self.user_edit = None;
-                    self.browsing = None;
-                    self.confirm_delete = false;
-                    self.thumbs.retain(|k, _| Variant::parse(k).0 != name);
+                    self.delete_user(&name, actions);
                 }
                 if ui.button(fl!("mated-cancel")).clicked() {
                     self.confirm_delete = false;
@@ -851,6 +864,15 @@ impl MaterialEditor {
         } else {
             self.builtin_editor_ui(ui, lib, &name, &m, part, actions);
         }
+    }
+
+    /// 自分の材質を消す
+    fn delete_user(&mut self, name: &str, actions: &mut Vec<Action>) {
+        actions.push(Action::DeleteUser(name.to_string()));
+        self.user_edit = None;
+        self.browsing = None;
+        self.confirm_delete = false;
+        self.thumbs.retain(|k, _| Variant::parse(k).0 != name);
     }
 
     /// 新しい自分の材質の名前を決める
@@ -878,24 +900,27 @@ impl MaterialEditor {
             }
         });
         match done {
-            Some(true) => {
-                let n = self.naming.take().unwrap();
-                let name = n.name.trim().to_string();
-                let mut m = n.material;
-                m.name = name.clone();
-                self.flush_user(actions);
-                actions.push(Action::SaveUser { name: name.clone(), material: Box::new(m.clone()) });
-                if let (Some((part_key, keep)), Some(p)) = (n.assign_to, part) {
-                    actions.push(Action::Assign { part: part_key.clone(), material: keep.name(&name) });
-                    self.adjust = Some(Adjust { reference: p.reference.clone(), part: part_key, material: keep.name(&name), changed_at: Instant::now(), written: true });
-                }
-                self.browsing = Some(name.clone());
-                self.notice.clear();
-                self.user_edit = Some(UserEdit::new(&name, m.clone(), m));
-            }
+            Some(true) => self.finish_naming(part, actions),
             Some(false) => self.naming = None,
             None => {}
         }
+    }
+
+    /// 決めた名前で自分の材質を作る（部位の調整から作ったときは、その部位に割り当てる）
+    fn finish_naming(&mut self, part: Option<&PartInfo>, actions: &mut Vec<Action>) {
+        let Some(n) = self.naming.take() else { return };
+        let name = n.name.trim().to_string();
+        let mut m = n.material;
+        m.name = name.clone();
+        self.flush_user(actions);
+        actions.push(Action::SaveUser { name: name.clone(), material: Box::new(m.clone()) });
+        if let (Some((part_key, keep)), Some(p)) = (n.assign_to, part) {
+            actions.push(Action::Assign { part: part_key.clone(), material: keep.name(&name) });
+            self.adjust = Some(Adjust { reference: p.reference.clone(), part: part_key, material: keep.name(&name), changed_at: Instant::now(), written: true });
+        }
+        self.browsing = Some(name.clone());
+        self.notice.clear();
+        self.user_edit = Some(UserEdit::new(&name, m.clone(), m));
     }
 
     /// 組み込みの材質のパラメータ。組み込みの材質は書き換えず、値を変えると自分の材質のコピーを作ってそれを編集する。
@@ -905,9 +930,13 @@ impl MaterialEditor {
         ui.weak(fl!("mated-builtin-autocopy"));
         let mut edited = m.clone();
         param_editor(ui, lib, &mut edited, m);
-        if edited == *m {
-            return;
+        if edited != *m {
+            self.copy_builtin(lib, name, m, edited, part, actions);
         }
+    }
+
+    /// 組み込みの材質 name（値 m）の値を変えた（edited）：自分の材質のコピーを作ってそれを編集する
+    fn copy_builtin(&mut self, lib: &MaterialLibrary, name: &str, m: &Material, mut edited: Material, part: Option<&PartInfo>, actions: &mut Vec<Action>) {
         let copy = unique_name(lib, &fl!("mated-copy-of", name = material_label(name)));
         edited.name = copy.clone();
         edited.category = Some(edited.category());
@@ -957,6 +986,36 @@ impl MaterialEditor {
             changed
         };
         if changed {
+            let name = u.name.clone();
+            self.thumbs.retain(|k, _| Variant::parse(k).0 != name);
+        }
+    }
+
+    /// 材質 name の値を変える（f は値と、元に戻す先を受け取る）。自分の材質ならその編集、組み込みの材質ならコピーを作ってそれを編集する
+    fn edit_material(&mut self, lib: &MaterialLibrary, name: &str, part: Option<&PartInfo>, actions: &mut Vec<Action>, f: impl FnOnce(&mut Material, &Material)) {
+        if is_user_material(name) {
+            let Some(u) = self.user_edit.as_mut().filter(|u| u.name == name) else { return };
+            let before = u.material.clone();
+            let origin = u.origin.clone();
+            f(&mut u.material, &origin);
+            if u.material != before {
+                u.changed(before);
+                let name = u.name.clone();
+                self.thumbs.retain(|k, _| Variant::parse(k).0 != name);
+            }
+        } else if let Some(m) = self.material_for(lib, name) {
+            let mut edited = m.clone();
+            f(&mut edited, &m);
+            if edited != m {
+                self.copy_builtin(lib, name, &m, edited, part, actions);
+            }
+        }
+    }
+
+    /// 自分の材質の編集を元に戻す（redo ならやり直す）
+    fn undo_redo(&mut self, redo: bool) {
+        let Some(u) = &mut self.user_edit else { return };
+        if (redo && u.redo()) || (!redo && u.undo()) {
             let name = u.name.clone();
             self.thumbs.retain(|k, _| Variant::parse(k).0 != name);
         }
@@ -1013,6 +1072,9 @@ impl MaterialEditor {
             })();
             match r {
                 Ok(img) => {
+                    if let Some(url) = web::publish(&self.web, &mut self.img_seq, &web::swatch_path(&key), &img) {
+                        self.thumb_urls.insert(key.clone(), url);
+                    }
                     let tex = egui_ctx.load_texture(format!("swatch:{key}"), img, egui::TextureOptions::LINEAR);
                     self.thumbs.insert(key, tex);
                 }
@@ -1035,7 +1097,7 @@ impl MaterialEditor {
         };
         let same = self.part.as_ref().is_some_and(|v| v.reference == p.reference && v.model == p.model);
         if !same {
-            self.part = Some(PartView { reference: p.reference.clone(), model: p.model, epoch: u64::MAX, preview: None, map: Vec::new(), base: Vec::new(), tex: None, shown_samples: 0, azimuth: 45.0, elevation: 30.0, zoom: 1.0, error: String::new() });
+            self.part = Some(PartView { reference: p.reference.clone(), model: p.model, epoch: u64::MAX, preview: None, map: Vec::new(), base: Vec::new(), tex: None, url: None, shown_samples: 0, azimuth: 45.0, elevation: 30.0, zoom: 1.0, error: String::new() });
         }
         // 調整中の材質（書き込み前の色・粗さ、編集中の自分の材質）をすぐ見せる
         let mut overrides: Vec<(u32, String)> = Vec::new();
@@ -1092,6 +1154,9 @@ impl MaterialEditor {
                 let n = pv.samples();
                 if n.is_power_of_two() || n.is_multiple_of(16) || n >= PART_MAX_SPP {
                     let img = pv.image_denoised(ctx, 0.0)?;
+                    if let Some(url) = web::publish(&self.web, &mut self.img_seq, "part", &img) {
+                        v.url = Some(url);
+                    }
                     match &mut v.tex {
                         Some(t) => t.set(img, egui::TextureOptions::LINEAR),
                         None => v.tex = Some(egui_ctx.load_texture("part_preview", img, egui::TextureOptions::LINEAR)),

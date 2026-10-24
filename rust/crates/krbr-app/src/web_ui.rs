@@ -5,7 +5,9 @@
 //! 状態は evaluate_script で `krbr.<名前>(...)` を呼んで渡す（変わったときだけ）。
 //! Tauri 全体は使わず、その中の WebView の部品（wry）だけを使う
 
-use std::sync::mpsc;
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::{mpsc, Arc, Mutex};
 
 use winit::event_loop::EventLoopProxy;
 use winit::window::Window;
@@ -13,14 +15,21 @@ use wry::{dpi, Rect, WebContext, WebView, WebViewBuilder};
 
 const STYLE: &str = include_str!("../web/style.css");
 const PANEL_STYLE: &str = include_str!("../web/panel.css");
+const EDITOR_STYLE: &str = include_str!("../web/editor.css");
 const TOOLBAR_HTML: &str = include_str!("../web/toolbar.html");
 const STATUS_HTML: &str = include_str!("../web/status.html");
 const PANEL_HTML: &str = include_str!("../web/panel.html");
 const BANNER_HTML: &str = include_str!("../web/banner.html");
 const MENU_HTML: &str = include_str!("../web/menu.html");
 const TOOLTIP_HTML: &str = include_str!("../web/tooltip.html");
+const EDITOR_HTML: &str = include_str!("../web/editor.html");
 /// どのページにも入れる、説明の吹き出しの仕掛け
 const TIP_JS: &str = include_str!("../web/tip.js");
+
+/// ページに渡す画像（材質の見本・部品のプレビュー。PNG）。名前は URL のパス。ページからは IMAGE_URL + 名前 で読む
+pub type Images = Arc<Mutex<HashMap<String, Vec<u8>>>>;
+/// 画像の置き場の URL（WebView2 では、独自のスキーム krbr を http://krbr.localhost/ で読む）
+pub const IMAGE_URL: &str = "http://krbr.localhost/";
 
 /// WebView からの知らせでイベントループを起こす（待機中のビューアにも、押したボタンをすぐ反映する）
 #[derive(Debug, Clone, Copy)]
@@ -82,6 +91,8 @@ pub enum Pane {
     Status,
     Panel,
     Banner,
+    /// 材質エディタ（3D 表示の上に重ねる、動かせる窓）
+    Editor,
     /// メニューのプルダウン（3D 表示などの上に重ねる）
     Menu,
     /// 説明の吹き出し（いちばん上に重ねる）
@@ -89,7 +100,8 @@ pub enum Pane {
 }
 
 impl Pane {
-    pub const ALL: [Pane; 6] = [Pane::Toolbar, Pane::Status, Pane::Panel, Pane::Banner, Pane::Menu, Pane::Tooltip];
+    /// 作る順（後のものほど上に重なる）
+    pub const ALL: [Pane; 7] = [Pane::Toolbar, Pane::Status, Pane::Panel, Pane::Banner, Pane::Editor, Pane::Menu, Pane::Tooltip];
 
     /// ページの window.krbr の関数の名前
     fn func(self) -> &'static str {
@@ -98,6 +110,7 @@ impl Pane {
             Pane::Status => "status",
             Pane::Panel => "panel",
             Pane::Banner => "banner",
+            Pane::Editor => "editor",
             Pane::Menu => "menu",
             Pane::Tooltip => "tooltip",
         }
@@ -109,6 +122,7 @@ impl Pane {
             Pane::Status => STATUS_HTML,
             Pane::Panel => PANEL_HTML,
             Pane::Banner => BANNER_HTML,
+            Pane::Editor => EDITOR_HTML,
             Pane::Menu => MENU_HTML,
             Pane::Tooltip => TOOLTIP_HTML,
         }
@@ -126,6 +140,7 @@ struct View {
 pub struct WebUi {
     views: Vec<View>,
     rx: mpsc::Receiver<Msg>,
+    images: Images,
     /// WebView で共有する WebView2 の環境（裏のプロセスを 1 組にする）。データは全体用キャッシュの webview2\
     /// （何も指定しないと exe の横に krbr.exe.WebView2 を作る）。WebView より後に捨てる（フィールドの順）
     _context: WebContext,
@@ -135,10 +150,11 @@ impl WebUi {
     pub fn new(window: &Window, proxy: EventLoopProxy<Wake>) -> Result<Self, String> {
         let (tx, rx) = mpsc::channel();
         let mut context = WebContext::new(Some(krbr_core::platform::cache_dir().join("webview2")));
-        let style = format!("{STYLE}\n{PANEL_STYLE}");
+        let style = format!("{STYLE}\n{PANEL_STYLE}\n{EDITOR_STYLE}");
+        let images: Images = Images::default();
         let mut views = Vec::new();
         for pane in Pane::ALL {
-            let (tx, proxy) = (tx.clone(), proxy.clone());
+            let (tx, proxy, store) = (tx.clone(), proxy.clone(), images.clone());
             let view = WebViewBuilder::new_with_web_context(&mut context)
                 .with_html(pane.html().replace("/*STYLE*/", &style).replace("</body>", &format!("<script>{TIP_JS}</script>
 </body>")))
@@ -146,6 +162,17 @@ impl WebUi {
                 .with_background_color((17, 19, 22, 255))
                 .with_bounds(rect((0, 0, 1, 1)))
                 .with_visible(false)
+                .with_custom_protocol("krbr".into(), move |_id, req| {
+                    let name = req.uri().path().trim_start_matches('/');
+                    let body = store.lock().ok().and_then(|m| m.get(name).cloned());
+                    // URL は描き直すたびに変わるので、同じ URL は覚えておいてよい
+                    let r = wry::http::Response::builder().header("Cache-Control", "max-age=3600").header("Access-Control-Allow-Origin", "*");
+                    match body {
+                        Some(b) => r.header("Content-Type", "image/png").body(Cow::Owned(b)),
+                        None => r.status(404).body(Cow::Borrowed(&[][..])),
+                    }
+                    .unwrap()
+                })
                 .with_ipc_handler(move |req| {
                     if let Some(mut m) = parse(req.body()) {
                         if let Msg::Tip { pane: p, .. } = &mut m {
@@ -159,7 +186,7 @@ impl WebUi {
                 .map_err(|e| format!("WebView: {e}"))?;
             views.push(View { view, bounds: None, sent: String::new() });
         }
-        Ok(Self { views, rx, _context: context })
+        Ok(Self { views, rx, images, _context: context })
     }
 
     fn view(&mut self, pane: Pane) -> &mut View {
@@ -196,6 +223,11 @@ impl WebUi {
     /// キーボードの入力をビューアのウィンドウへ戻す
     pub fn focus_parent(&mut self, pane: Pane) {
         let _ = self.view(pane).view.focus_parent();
+    }
+
+    /// ページに渡す画像の置き場
+    pub fn images(&self) -> &Images {
+        &self.images
     }
 
     /// 次の send を、前と同じ内容でも送る（ページに描き直して、大きさを測り直してもらう）
