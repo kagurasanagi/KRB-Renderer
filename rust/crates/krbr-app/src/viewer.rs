@@ -953,6 +953,15 @@ struct App {
     window: Option<Window>,
     /// --web-ui：ボタン列とステータスバーの WebView、イベントループを起こすための口、置き場所（egui のポイント）
     web: Option<crate::web_ui::WebUi>,
+    /// --web-ui：WebView を作り始めた時刻（作っている間。フレームの合間に 1 つずつ作る）
+    web_started: Option<Instant>,
+    /// WebView を作れなかった回数と、次に試す時刻（前に開いていた krbr の WebView2 が終わりきる前だと、作れないことがある）
+    web_failures: (u32, Option<Instant>),
+    /// 起動中の画面（GPU・画面・基板の用意ができるまで、ウィンドウ全体に進み具合とログを出す）を出している
+    splash: bool,
+    splash_icon: Option<egui::TextureHandle>,
+    /// 最近使った基板（メニューを開いたときに読み直す）
+    recent_boards: Vec<PathBuf>,
     proxy: Option<EventLoopProxy<crate::web_ui::Wake>>,
     /// ボタン列・ステータスバー・設定パネル・警告の帯の置き場所（egui のポイント。NOTHING なら出さない）
     web_rects: [egui::Rect; 6],
@@ -1526,6 +1535,12 @@ impl App {
             _ => attrs,
         };
         let window = el.create_window(attrs).map_err(|e| format!("window: {e}"))?;
+        // GPU の準備ができて最初のフレームを出すまで（1 秒ほど）、白い窓を見せない
+        if !hidden {
+            if let Ok(raw_window_handle::RawWindowHandle::Win32(h)) = window.window_handle().map(|h| h.as_raw()) {
+                krbr_core::platform::paint_placeholder(h.hwnd.get(), &fl!("startup-starting"));
+            }
+        }
         let display = window.display_handle().map_err(|e| format!("{e}"))?.as_raw();
         let wh = window.window_handle().map_err(|e| format!("{e}"))?.as_raw();
         let exts = ash_window::enumerate_required_extensions(display).map_err(|e| format!("{e:?}"))?.to_vec();
@@ -1566,15 +1581,11 @@ impl App {
         self.gpu = Some(Gpu { ctx, gpu, swap, prog, tone, denoiser: None, tone_denoised: None, egui_renderer, cmd, acquired, fence, timestamps, ts_period_ms });
         let hidden = self.vo.hidden || self.test.active();
         if let (true, false, Some(proxy)) = (self.vo.web_ui, hidden, self.proxy.clone()) {
-            let t0 = Instant::now();
-            match crate::web_ui::WebUi::new(&window, proxy) {
-                Ok(w) => {
-                    info!("web UI: WebView2 ready in {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0);
-                    web_about::publish_icon(w.images());
-                    self.web = Some(w);
-                }
-                Err(e) => warn!("web UI: {e}; using the built-in UI"),
-            }
+            // WebView を作るのは最初のフレームを出してから（step_web_ui）
+            let w = crate::web_ui::WebUi::start(proxy);
+            web_about::publish_icon(w.images());
+            self.web = Some(w);
+            self.web_started = Some(Instant::now());
         }
         self.window = Some(window);
         Ok(())
@@ -2557,6 +2568,10 @@ impl App {
         let mut fresh = new_app(vo, prep);
         fresh.window = self.window.take();
         fresh.web = self.web.take();
+        fresh.web_started = self.web_started.take();
+        fresh.splash = self.splash;
+        fresh.splash_icon = self.splash_icon.take();
+        fresh.editor_rect = self.editor_rect;
         fresh.proxy = self.proxy.clone();
         fresh.web_rects = self.web_rects;
         fresh.egui_ctx = self.egui_ctx.clone();
@@ -2828,6 +2843,27 @@ impl App {
                         st.req.open_board = true;
                         ui.close();
                     }
+                    ui.menu_button(fl!("menu-recent"), |ui| {
+                        let recent = remember::recent_boards();
+                        if recent.is_empty() {
+                            ui.weak(fl!("menu-recent-empty"));
+                        }
+                        for p in &recent {
+                            let name = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                            let tip = if p.is_file() { p.display().to_string() } else { fl!("menu-recent-missing", path = p.display().to_string()) };
+                            if ui.add_enabled(p.is_file(), egui::Button::new(name)).on_hover_text(tip).clicked() {
+                                st.req.open_path = Some(p.clone());
+                                ui.close();
+                            }
+                        }
+                        if !recent.is_empty() {
+                            ui.separator();
+                            if ui.button(fl!("menu-recent-clear")).clicked() {
+                                remember::clear_recent_boards();
+                                ui.close();
+                            }
+                        }
+                    });
                     ui.separator();
                     if ui.add(egui::Button::new(fl!("menu-save-image")).shortcut_text("S")).on_hover_text(fl!("menu-save-image-tip")).clicked() {
                         st.req.save = true;
@@ -3042,6 +3078,8 @@ impl App {
         let last_test_frame = self.test.finished(self.frames, self.busy(), self.saved_reloads);
         let Some(shown) = self.record_and_present(&ui, last_test_frame, frame_t0)? else { return Ok(()) };
         self.handle_saves(shown.denoised);
+        self.step_web_ui();
+        self.update_splash();
         if last_test_frame {
             self.finish_test(shown.screenshot, shown.extent);
         } else if let Some(mut b) = shown.screenshot {
@@ -3057,6 +3095,7 @@ impl App {
         for m in web.messages() {
             match m {
                 crate::web_ui::Msg::Menu { id, x, y } => {
+                    self.recent_boards = remember::recent_boards();
                     let reopen = self.web_menu_closed.as_ref().is_some_and(|(c, t)| *c == id && t.elapsed() < Duration::from_millis(400));
                     if self.web_menu.as_ref().is_some_and(|m| m.id == id) || reopen {
                         // 開いている見出しをもう一度押した：閉じる
@@ -3086,6 +3125,7 @@ impl App {
                 crate::web_ui::Msg::Click(id) if id == "menu.close" => self.close_web_menu(),
                 crate::web_ui::Msg::Click(id) if id.starts_with("about.") => self.apply_about_click(&id),
                 crate::web_ui::Msg::Open(url) => krbr_core::platform::open_url(&url),
+                crate::web_ui::Msg::Dropped(paths) => self.open_dropped(paths),
                 // 材質エディタ
                 crate::web_ui::Msg::Set(id, v) if id.starts_with("mated.") => {
                     let info = self.part_info();
@@ -3143,6 +3183,137 @@ impl App {
                 crate::web_ui::Msg::Ready | crate::web_ui::Msg::Painted(_) => {}
             }
         }
+    }
+
+    /// 落としたファイルを開く：基板（.kicad_pcb。プロジェクトの .kicad_pro なら同じ名前の基板）か、環境マップ
+    fn open_dropped(&mut self, paths: Vec<PathBuf>) {
+        for path in paths {
+            let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            let pcb = match ext.as_str() {
+                "kicad_pcb" => Some(path.clone()),
+                "kicad_pro" => Some(path.with_extension("kicad_pcb")).filter(|p| p.is_file()),
+                _ => None,
+            };
+            if let Some(pcb) = pcb {
+                info!("dropped {}", pcb.display());
+                self.st.req.open_path = Some(pcb);
+                return;
+            }
+            if is_env_file(&path) {
+                self.start_env_load(path.to_string_lossy().into_owned(), true);
+                return;
+            }
+            self.last_update = fl!("drop-unknown", path = path.display().to_string());
+        }
+    }
+
+    /// まだ作っていない WebView を 1 つ作る（フレームを出した後）。いつも見えるものを作ったら起動中の画面を終え、
+    /// 残り（メニュー・説明・材質エディタなど）は画面を見せてから作る。いつも見えるものを作れなければ egui の画面にする
+    fn step_web_ui(&mut self) {
+        let Some(t0) = self.web_started else { return };
+        if self.web_failures.1.is_some_and(|t| Instant::now() < t) {
+            return;
+        }
+        let (Some(web), Some(window)) = (self.web.as_mut(), self.window.as_ref()) else { return };
+        let core_before = web.core_ready();
+        match web.step(window) {
+            Ok(done) => {
+                if !core_before && web.core_ready() {
+                    info!("web UI: shown in {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0);
+                }
+                if done {
+                    info!("web UI: WebView2 ready in {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0);
+                    self.web_started = None;
+                }
+            }
+            Err(e) if self.web_failures.0 < 6 => {
+                // 少し待って作り直す
+                self.web_failures = (self.web_failures.0 + 1, Some(Instant::now() + Duration::from_millis(500)));
+                warn!("web UI: {e}; trying again ({})", self.web_failures.0);
+            }
+            Err(e) => {
+                self.web_started = None;
+                if web.core_ready() {
+                    warn!("web UI: {e}; some pages are missing");
+                } else {
+                    warn!("web UI: {e} (after {:.0} ms); using the built-in UI", t0.elapsed().as_secs_f64() * 1000.0);
+                    self.web = None;
+                }
+            }
+        }
+    }
+
+    /// 起動中の画面を終えるか：画面（WebView）を作り終え、起動時の基板を読み終え、最初の画像を描いたら
+    fn update_splash(&mut self) {
+        if !self.splash {
+            return;
+        }
+        let board_loading = self.board_job.as_ref().is_some_and(|(_, _, startup)| *startup);
+        let first = !self.has_board() || self.gpu.as_ref().is_some_and(|g| g.prog.samples() > 0);
+        if self.web.as_ref().is_none_or(|w| w.core_ready()) && !board_loading && first {
+            self.splash = false;
+            self.st.changed.frame = true;
+        }
+    }
+
+    /// 起動中の画面：アイコン・名前・進み具合のバーと段階・最近のログ
+    fn draw_splash(&mut self, ctx: &egui::Context) {
+        let screen = ctx.content_rect();
+        ctx.layer_painter(egui::LayerId::background()).rect_filled(screen, 0.0, egui::Color32::from_rgb(17, 19, 22));
+        let icon = self
+            .splash_icon
+            .get_or_insert_with(|| {
+                let img = image::load_from_memory(web_about::ICON_PNG).map(|i| i.to_rgba8()).unwrap_or_else(|_| image::RgbaImage::new(1, 1));
+                ctx.load_texture("splash_icon", egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], &img), egui::TextureOptions::LINEAR)
+            })
+            .clone();
+        let (made, total) = self.web.as_ref().map(|w| w.core_progress()).unwrap_or((1, 1));
+        let board_loading = self.board_job.as_ref().filter(|(_, _, startup)| *startup).map(|(p, _, _)| p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default());
+        let board_name = board_loading.clone().or_else(|| self.has_board().then(|| self.prep.board.project_name.clone()));
+        let first = !self.has_board() || self.gpu.as_ref().is_some_and(|g| g.prog.samples() > 0);
+        let ui_done = made >= total;
+        let board_done = board_loading.is_none();
+        let frac = 0.15 + 0.45 * made as f32 / total.max(1) as f32 + if board_done { 0.25 } else { 0.0 } + if first && board_done { 0.15 } else { 0.0 };
+        let steps = [
+            (fl!("startup-step-gpu"), true),
+            (fl!("startup-step-ui", done = made.to_string(), total = total.to_string()), ui_done),
+            (match &board_name {
+                Some(n) => fl!("startup-step-board", name = n.as_str()),
+                None => fl!("startup-step-no-board"),
+            }, board_done),
+            (fl!("startup-step-first"), first && board_done),
+        ];
+        let current = steps.iter().find(|(_, done)| !done).map(|(t, _)| t.clone()).unwrap_or_default();
+        let width = 560.0f32.min(screen.width() - 40.0);
+        egui::Area::new(egui::Id::new("splash")).order(egui::Order::Foreground).fixed_pos(egui::pos2(screen.center().x - width / 2.0, screen.top() + (screen.height() * 0.18).max(20.0))).show(ctx, |ui| {
+            ui.set_width(width);
+            ui.vertical_centered(|ui| {
+                ui.add(egui::Image::new((icon.id(), egui::vec2(96.0, 96.0))));
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("KRB Renderer").size(28.0).strong().color(egui::Color32::from_rgb(235, 232, 228)));
+                ui.label(egui::RichText::new(fl!("about-version", version = env!("CARGO_PKG_VERSION"))).color(egui::Color32::from_rgb(108, 113, 122)));
+                ui.add_space(18.0);
+                ui.add(egui::ProgressBar::new(frac.min(1.0)).desired_width(width).desired_height(8.0).fill(egui::Color32::from_rgb(232, 148, 90)));
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(current).color(egui::Color32::from_rgb(164, 168, 176)));
+            });
+            ui.add_space(14.0);
+            for (text, done) in &steps {
+                ui.horizontal(|ui| {
+                    let (mark, color) = if *done { ("●", egui::Color32::from_rgb(127, 212, 154)) } else { ("○", egui::Color32::from_rgb(108, 113, 122)) };
+                    ui.label(egui::RichText::new(mark).color(color));
+                    ui.label(egui::RichText::new(text).color(if *done { egui::Color32::from_rgb(164, 168, 176) } else { egui::Color32::from_rgb(235, 232, 228) }));
+                });
+            }
+            ui.add_space(14.0);
+            ui.label(egui::RichText::new(fl!("startup-log")).small().color(egui::Color32::from_rgb(108, 113, 122)));
+            egui::Frame::new().fill(egui::Color32::from_rgb(11, 12, 14)).corner_radius(6.0).inner_margin(8.0).show(ui, |ui| {
+                ui.set_width(width - 16.0);
+                for line in krbr_core::log::recent(10) {
+                    ui.add(egui::Label::new(egui::RichText::new(line).monospace().size(11.0).color(egui::Color32::from_rgb(120, 125, 134))).truncate());
+                }
+            });
+        });
     }
 
     /// メニューのプルダウンを閉じる（キーボードの入力はビューアに戻す）
@@ -3284,6 +3455,13 @@ impl App {
         let egui_ctx = self.egui_ctx.clone();
         let mut central = egui::Rect::NOTHING;
         let full = egui_ctx.run_ui(raw, |root| {
+            if self.splash {
+                // 起動中：メニュー・パネルは出さず（WebView もまだ隠す）、進み具合とログだけ
+                central = root.available_rect_before_wrap();
+                self.web_rects = [egui::Rect::NOTHING; 6];
+                self.draw_splash(root.ctx());
+                return;
+            }
             self.menu_bar(root);
             self.tool_bar(root);
             self.status_bar(root);
@@ -3579,7 +3757,7 @@ impl App {
         if let Some(p) = self.st.req.focus_pick.take() {
             self.focus_at(p);
         }
-        if std::mem::take(&mut self.st.req.start_view) {
+        if !self.splash && std::mem::take(&mut self.st.req.start_view) {
             self.start_camera(self.st.display.w, self.st.display.h);
         }
         if std::mem::take(&mut self.st.req.reset_view) {
@@ -3969,13 +4147,7 @@ impl ApplicationHandler<crate::web_ui::Wake> for App {
         let response = self.egui_state.as_mut().map(|s| s.on_window_event(window, &event)).unwrap_or_default();
         match event {
             WindowEvent::CloseRequested => el.exit(),
-            WindowEvent::DroppedFile(path) => {
-                if is_env_file(&path) {
-                    self.start_env_load(path.to_string_lossy().into_owned(), true);
-                } else {
-                    self.last_update = fl!("env-not-an-environment", path = path.display().to_string());
-                }
-            }
+            WindowEvent::DroppedFile(path) => self.open_dropped(vec![path]),
             WindowEvent::ModifiersChanged(m) => self.st.ctrl = m.state().control_key(),
             WindowEvent::MouseInput { state, button, .. } => {
                 let down = state == ElementState::Pressed;
@@ -4119,6 +4291,7 @@ impl App {
 
 /// 基板（または基板なし）の状態からビューアを作る（ウィンドウと GPU は、まだ無い）
 fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
+    let splash = !(vo.hidden || vo.test.frames > 0);
     let cfg = &prep.cfg;
     let win = remember::window_state();
     let mut st = ViewState {
@@ -4184,6 +4357,11 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         st,
         window: None,
         web: None,
+        web_started: None,
+        web_failures: (0, None),
+        splash,
+        splash_icon: None,
+        recent_boards: Vec::new(),
         proxy: None,
         web_rects: [egui::Rect::NOTHING; 6],
         about_open: false,
@@ -4272,9 +4450,11 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
     if vo.test.frames == 0 && !vo.hidden {
         std::thread::spawn(kicad_plugin::repair_installed);
     }
-    let prep = if pcb.as_os_str().is_empty() || background {
-        // 読み込みの間に映すのは内蔵のスタジオ（--hdr は基板を読んだときに使う）
-        prepare_empty(&RenderOptions { pcb: PathBuf::new(), hdr: if background { STUDIO.into() } else { vo.common.hdr.clone() }, ..vo.common.clone() })
+    let prep = if background {
+        // 読み込みの間は仮の状態（--hdr は基板を読んだときに使う）
+        Some(crate::prepare::prepare_placeholder(&RenderOptions { pcb: PathBuf::new(), ..vo.common.clone() }))
+    } else if pcb.as_os_str().is_empty() {
+        prepare_empty(&RenderOptions { pcb: PathBuf::new(), ..vo.common.clone() })
     } else {
         prepare_scene(&vo.common)
     };

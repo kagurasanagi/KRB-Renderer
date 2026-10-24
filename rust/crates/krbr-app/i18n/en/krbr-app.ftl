@@ -590,3 +590,17 @@ about-env-driver = Driver
 about-env-vulkan = Vulkan
 about-env-trace = Ray tracing
 about-env-webview = WebView2
+
+## Startup screen, recent boards, drag and drop
+startup-starting = Starting KRB Renderer…
+startup-step-gpu = Preparing the GPU
+startup-step-ui = Preparing the user interface ({ $done } / { $total })
+startup-step-board = Loading the board: { $name }
+startup-step-no-board = No board (open one with File → Open)
+startup-step-first = First image
+startup-log = Log
+menu-recent = Recent boards
+menu-recent-empty = (none yet)
+menu-recent-clear = Clear the list
+menu-recent-missing = Not found: { $path }
+drop-unknown = Cannot open this file (drop a .kicad_pcb board or an environment map image): { $path }

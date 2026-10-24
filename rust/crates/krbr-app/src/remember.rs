@@ -571,15 +571,64 @@ pub fn last_board() -> Option<PathBuf> {
     last_board_in(&load(&state_file()))
 }
 
-/// ビューアで開いた基板を覚える（絶対パス）
+/// ビューアで開いた基板を覚える（絶対パス。最近使った基板の一覧の先頭にも入れる）
 pub fn remember_last_board(pcb: &Path) {
     let pcb = std::path::absolute(pcb).unwrap_or_else(|_| pcb.to_path_buf());
     let file = state_file();
     let mut t = load(&file);
-    if last_board_in(&t).as_deref() == Some(pcb.as_path()) {
+    if last_board_in(&t).as_deref() == Some(pcb.as_path()) && recent_boards_in(&t).first().map(PathBuf::as_path) == Some(pcb.as_path()) {
         return;
     }
     remember_last_board_in(&mut t, &pcb);
+    add_recent_board(&mut t, &pcb);
+    save(&file, &t);
+}
+
+/// 最近使った基板の一覧に入れる数
+const RECENT_BOARDS: usize = 10;
+
+fn recent_boards_in(t: &Table) -> Vec<PathBuf> {
+    match t.get("ui").and_then(|u| u.get("recent_boards")).and_then(|v| v.as_array()) {
+        Some(list) => list.iter().filter_map(|x| x.as_str()).filter(|s| !s.is_empty()).map(PathBuf::from).collect(),
+        // 一覧ができる前から使っている人は、最後に開いた基板だけでも出す
+        None => last_board_in(t).into_iter().collect(),
+    }
+}
+
+/// 同じ基板か（Windows では大文字・小文字を区別しない）
+fn same_board(a: &Path, b: &Path) -> bool {
+    if cfg!(windows) {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    } else {
+        a == b
+    }
+}
+
+fn add_recent_board(t: &mut Table, pcb: &Path) {
+    let mut v = recent_boards_in(t);
+    v.retain(|p| !same_board(p, pcb));
+    v.insert(0, pcb.to_path_buf());
+    v.truncate(RECENT_BOARDS);
+    set_recent_boards(t, &v);
+}
+
+fn set_recent_boards(t: &mut Table, v: &[PathBuf]) {
+    let ui = t.entry("ui").or_insert_with(|| Value::Table(Table::new()));
+    if let Some(ui) = ui.as_table_mut() {
+        ui.insert("recent_boards".into(), Value::Array(v.iter().map(|p| Value::String(p.to_string_lossy().into_owned())).collect()));
+    }
+}
+
+/// 最近使った基板（新しい順。「ファイル → 最近使った基板」）
+pub fn recent_boards() -> Vec<PathBuf> {
+    recent_boards_in(&load(&state_file()))
+}
+
+/// 最近使った基板の一覧を空にする（最後に開いた基板は、引数なしで起動したときのために残す）
+pub fn clear_recent_boards() {
+    let file = state_file();
+    let mut t = load(&file);
+    set_recent_boards(&mut t, &[]);
     save(&file, &t);
 }
 
@@ -594,6 +643,29 @@ pub fn remember_ui_language(lang: Option<&str>) {
     let mut t = load(&file);
     remember_ui_language_in(&mut t, lang);
     save(&file, &t);
+}
+
+#[cfg(test)]
+mod recent_tests {
+    use super::*;
+
+    #[test]
+    fn recent_boards_are_newest_first_without_duplicates() {
+        let mut t = Table::new();
+        for p in ["C:/a.kicad_pcb", "C:/b.kicad_pcb", "C:/A.kicad_pcb"] {
+            add_recent_board(&mut t, Path::new(p));
+        }
+        let v = recent_boards_in(&t);
+        assert_eq!(v.len(), if cfg!(windows) { 2 } else { 3 });
+        assert_eq!(v[0], PathBuf::from("C:/A.kicad_pcb"));
+        for i in 0..20 {
+            add_recent_board(&mut t, Path::new(&format!("C:/{i}.kicad_pcb")));
+        }
+        assert_eq!(recent_boards_in(&t).len(), RECENT_BOARDS);
+        set_recent_boards(&mut t, &[]);
+        remember_last_board_in(&mut t, Path::new("C:/x.kicad_pcb"));
+        assert!(recent_boards_in(&t).is_empty());
+    }
 }
 
 #[cfg(test)]

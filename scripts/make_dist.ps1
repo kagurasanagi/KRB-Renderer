@@ -19,6 +19,7 @@ $dst = Join-Path $OutDir $name
 $stepOut = Join-Path $repo "build\release\step"  # STEP 変換器 DLL（scripts\build.cmd、CMake）
 $oidnBin = Join-Path $repo "third_party\oidn\bin"  # scripts\get_oidn.ps1 が置く公式のバイナリ
 $rustExe = Join-Path $repo "rust\target\release\krbr.exe"
+$launcherExe = Join-Path $repo "rust\target\release\KRB-Renderer.exe"  # コンソールを出さずにビューアを開く起動役
 $rustShaders = Join-Path $repo "rust\target\release\shaders"  # cargo build（krbr-render の build.rs）が glslc で作る
 
 # Visual Studio（Visual C++ ランタイムの再頒布用ファイル）
@@ -44,6 +45,7 @@ Write-Host "== $dst にまとめる"
 if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
 New-Item -ItemType Directory -Force "$dst\shaders", "$dst\dll\step", "$dst\dll\oidn", "$dst\dll\vcruntime", "$dst\licenses" | Out-Null
 Copy-Item $rustExe $dst
+Copy-Item $launcherExe $dst
 Copy-Item "$rustShaders\*.spv" "$dst\shaders"
 Copy-Item "$stepOut\krbr_step.dll", "$stepOut\TK*.dll" "$dst\dll\step"
 # ノイズ除去（OIDN）。HIP・SYCL のデバイスは使わないので入れない
@@ -70,7 +72,9 @@ $readme = @"
 KRB-Renderer $version（Rust 版）  KiCad の基板の物理ベースのレンダラー
 
 ■ 使い方
-・krbr.exe のアイコンに .kicad_pcb をドラッグ＆ドロップすると、ビューアで開きます。
+・KRB-Renderer.exe をダブルクリックするとビューアが開きます（前に開いた基板を開く）。KRB-Renderer.exe のアイコンや
+  ビューアのウィンドウに .kicad_pcb をドラッグ＆ドロップしても開けます。最近使った基板は「ファイル → 最近使った基板」。
+  （krbr.exe に落としても開けますが、黒いコンソールの窓が一瞬出ます）
 ・コマンドラインでは  krbr.exe <基板.kicad_pcb>  （ビューア）、 krbr.exe render <基板.kicad_pcb>  （画像の書き出し）。
   krbr.exe --help で一覧を出します。
 ・ビューアは基板のファイルの保存を監視していて、KiCad で保存するたびに描き直します。
@@ -82,7 +86,8 @@ KRB-Renderer $version（Rust 版）  KiCad の基板の物理ベースのレン�
 ・このフォルダを移動したら、krbr.exe を一度起動してください（登録済みの版の krbr.exe の場所を書き直します）。
 
 ■ フォルダの中身（フォルダごと移動して使えます。中のファイルは動かさないでください）
-・krbr.exe          本体
+・KRB-Renderer.exe  ビューアを開く（コンソールを出さない起動役。中で krbr.exe を動かす）
+・krbr.exe          本体（コマンドライン）
 ・shaders\          シェーダ
 ・dll\step\         STEP 変換器（3D モデルの読み込み）と OpenCASCADE
 ・dll\oidn\         ノイズ除去（Intel Open Image Denoise）

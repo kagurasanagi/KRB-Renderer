@@ -57,6 +57,27 @@ impl App {
         }
     }
 
+    /// 「最近使った基板」の項目（名前・フォルダ。無くなったファイルは押せない）
+    fn recent_menu(&self) -> Vec<Value> {
+        if self.recent_boards.is_empty() {
+            return vec![enabled(item("recent.none", fl!("menu-recent-empty")), false)];
+        }
+        let mut v: Vec<Value> = self
+            .recent_boards
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let name = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let exists = p.is_file();
+                let it = tip(item(&format!("recent.{i}"), name), if exists { p.display().to_string() } else { fl!("menu-recent-missing", path = p.display().to_string()) });
+                enabled(it, exists)
+            })
+            .collect();
+        v.push(sep());
+        v.push(item("recent.clear", fl!("menu-recent-clear")));
+        v
+    }
+
     /// 開いたメニューの項目（web/menu.html の krbr.menu に渡す JSON）
     pub(super) fn menu_json(&self, menu: &str) -> String {
         let st = &self.st;
@@ -66,6 +87,7 @@ impl App {
                 let now = board_file::location();
                 vec![
                     tip(key(item("open", fl!("menu-open-board")), "O"), fl!("menu-open-board-tip")),
+                    sub(fl!("menu-recent"), self.recent_menu()),
                     sep(),
                     tip(key(item("save", fl!("menu-save-image")), "S"), fl!("menu-save-image-tip")),
                     tip(item("save_png", fl!("menu-save-png")), fl!("menu-save-png-tip")),
@@ -136,6 +158,10 @@ impl App {
         let st = &mut self.st;
         match id {
             "open" => st.req.open_board = true,
+            "recent.clear" => {
+                remember::clear_recent_boards();
+                self.recent_boards.clear();
+            }
             "save" => st.req.save = true,
             "save_png" => st.req.save_as = Some(SaveFormat::Png),
             "save_exr" => st.req.save_as = Some(SaveFormat::Exr),
@@ -169,7 +195,9 @@ impl App {
             "kicad_plugin" => st.req.kicad_plugin = true,
             "about" => self.open_about(),
             _ => {
-                if let Some((w, h)) = id.strip_prefix("size.").and_then(|s| s.split_once('x')).and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))) {
+                if let Some(p) = id.strip_prefix("recent.").and_then(|i| i.parse::<usize>().ok()).and_then(|i| self.recent_boards.get(i)) {
+                    st.req.open_path = Some(p.clone());
+                } else if let Some((w, h)) = id.strip_prefix("size.").and_then(|s| s.split_once('x')).and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))) {
                     st.size_mode = Some((w, h));
                     st.req.fit_window = true;
                 } else if let Some(&r) = id.strip_prefix("ratio.").and_then(|i| i.parse::<usize>().ok()).and_then(|i| RATIOS.get(i)) {

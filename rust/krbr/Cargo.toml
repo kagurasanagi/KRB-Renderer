@@ -9,6 +9,11 @@ license.workspace = true
 name = "krbr"
 path = "src/main.rs"
 
+# エクスプローラーから開く用（コンソールを出さずに krbr.exe のビューアを起動する）
+[[bin]]
+name = "KRB-Renderer"
+path = "src/launcher.rs"
+
 [dependencies]
 krbr-core = { path = "../crates/krbr-core" }
 krbr-kicad = { path = "../crates/krbr-kicad" }

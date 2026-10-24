@@ -187,6 +187,120 @@ pub fn reveal_in_file_manager(path: &Path) {
     }
 }
 
+/// コンソールの窓を隠す・出し直す（エクスプローラーから起動したビューアでは、黒いコンソールを見せない）
+pub fn show_console(show: bool) {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetConsoleWindow() -> isize;
+        }
+        #[link(name = "user32")]
+        extern "system" {
+            fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+        }
+        // 安全性：窓が無ければ 0 が返り、何もしない
+        unsafe {
+            let h = GetConsoleWindow();
+            if h != 0 {
+                ShowWindow(h, if show { 5 } else { 0 }); // SW_SHOW / SW_HIDE
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = show;
+}
+
+/// メッセージの窓（コンソールの無いビューアで、起動に失敗したことを知らせる）
+pub fn message_box(title: &str, text: &str) {
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn MessageBoxW(hwnd: isize, text: *const u16, caption: *const u16, kind: u32) -> i32;
+        }
+        let w = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+        let (t, c) = (w(text), w(title));
+        // 安全性：0 終わりの文字列を渡している
+        unsafe {
+            MessageBoxW(0, t.as_ptr(), c.as_ptr(), 0x10); // MB_ICONERROR
+        }
+    }
+    #[cfg(not(windows))]
+    eprintln!("{title}: {text}");
+}
+
+/// コンソールを持たずに（隠したコンソールで）このプログラムを起動し直す。env を付けて、起動し直したものは起動し直さない
+pub fn relaunch_without_console(args: &[String], env: (&str, &str)) -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(args).env(env.0, env.1).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000 | 0x0000_0200); // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+    }
+    cmd.spawn().map(|_| ())
+}
+
+/// 描画の用意ができるまでの間、窓（HWND）を暗い色で塗って、真ん中に文字を出す（白い窓を見せない）
+pub fn paint_placeholder(hwnd: isize, text: &str) {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        struct Rect {
+            l: i32,
+            t: i32,
+            r: i32,
+            b: i32,
+        }
+        #[link(name = "user32")]
+        extern "system" {
+            fn GetDC(hwnd: isize) -> isize;
+            fn ReleaseDC(hwnd: isize, dc: isize) -> i32;
+            fn GetClientRect(hwnd: isize, r: *mut Rect) -> i32;
+            fn FillRect(dc: isize, r: *const Rect, brush: isize) -> i32;
+            fn DrawTextW(dc: isize, text: *const u16, len: i32, r: *mut Rect, format: u32) -> i32;
+            fn GetDpiForWindow(hwnd: isize) -> u32;
+        }
+        #[link(name = "gdi32")]
+        extern "system" {
+            fn CreateSolidBrush(color: u32) -> isize;
+            fn DeleteObject(obj: isize) -> i32;
+            fn SetTextColor(dc: isize, color: u32) -> u32;
+            fn SetBkMode(dc: isize, mode: i32) -> i32;
+            fn CreateFontW(h: i32, w: i32, esc: i32, orient: i32, weight: i32, italic: u32, underline: u32, strike: u32, charset: u32, out: u32, clip: u32, quality: u32, pitch: u32, face: *const u16) -> isize;
+            fn SelectObject(dc: isize, obj: isize) -> isize;
+        }
+        let rgb = |r: u32, g: u32, b: u32| r | (g << 8) | (b << 16);
+        // 安全性：窓の DC を取って返し、作ったブラシ・フォントは消す
+        unsafe {
+            let dc = GetDC(hwnd);
+            if dc == 0 {
+                return;
+            }
+            let mut r = Rect { l: 0, t: 0, r: 0, b: 0 };
+            GetClientRect(hwnd, &mut r);
+            let brush = CreateSolidBrush(rgb(17, 19, 22));
+            FillRect(dc, &r, brush);
+            DeleteObject(brush);
+            let dpi = GetDpiForWindow(hwnd).max(96) as i32;
+            let face: Vec<u16> = "Yu Gothic UI\0".encode_utf16().collect();
+            let font = CreateFontW(-(15 * dpi / 72), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, face.as_ptr());
+            let old = SelectObject(dc, font);
+            SetBkMode(dc, 1); // TRANSPARENT
+            SetTextColor(dc, rgb(164, 168, 176));
+            let w: Vec<u16> = text.encode_utf16().collect();
+            DrawTextW(dc, w.as_ptr(), w.len() as i32, &mut r, 0x1 | 0x4 | 0x20); // DT_CENTER | DT_VCENTER | DT_SINGLELINE
+            SelectObject(dc, old);
+            DeleteObject(font);
+            ReleaseDC(hwnd, dc);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (hwnd, text);
+}
+
 /// URL を既定のブラウザで開く（http・https だけ）
 pub fn open_url(url: &str) {
     if !(url.starts_with("https://") || url.starts_with("http://")) {

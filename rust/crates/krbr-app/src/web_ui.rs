@@ -60,6 +60,8 @@ pub enum Msg {
     TipSize(f32, f32),
     /// リンクを押した（既定のブラウザで開く）
     Open(String),
+    /// ファイルを WebView の上に落とした
+    Dropped(Vec<std::path::PathBuf>),
     /// 新しい大きさで描き終えた（重ねる WebView を、画面の外で描いてから置くため。pane は受け取ったところで入れる）
     Painted(Pane),
     /// ページを読み終えた（状態を送り直す）
@@ -160,70 +162,121 @@ struct View {
     pending: Option<(PxRect, Instant)>,
 }
 
+/// ページの WebView。1 つ作るのに 0.1〜0.6 秒かかり、その間ウィンドウが止まるので、フレームの合間に 1 つずつ作る（step）。
+/// 起動中の画面は、いつも見えるもの（ボタン列・ステータスバー・設定パネル）を作ったら終え、残りは見せてから作る。
+/// まだ作っていないページへの操作（置き場所・送信など）は何もしない（作ったあとのフレームで送られる）
 pub struct WebUi {
+    /// Pane::ALL の順に、作ったところまで
     views: Vec<View>,
     rx: mpsc::Receiver<Msg>,
+    tx: mpsc::Sender<Msg>,
+    proxy: EventLoopProxy<Wake>,
     images: Images,
+    style: String,
     /// 最後に WebView を動かした・消した時刻（その下の 3D 表示を描き直してもらう）
     moved: Instant,
     /// WebView で共有する WebView2 の環境（裏のプロセスを 1 組にする）。データは全体用キャッシュの webview2\
     /// （何も指定しないと exe の横に krbr.exe.WebView2 を作る）。WebView より後に捨てる（フィールドの順）
-    _context: WebContext,
+    context: WebContext,
 }
 
+/// 起動中の画面を終えるのに要る（いつも見えている）ページの数（Pane::ALL の先頭から）
+const CORE_PANES: usize = 3;
+
 impl WebUi {
-    pub fn new(window: &Window, proxy: EventLoopProxy<Wake>) -> Result<Self, String> {
+    /// まだ WebView を 1 つも作っていない状態（step で作る）
+    pub fn start(proxy: EventLoopProxy<Wake>) -> Self {
         let (tx, rx) = mpsc::channel();
-        let mut context = WebContext::new(Some(krbr_core::platform::cache_dir().join("webview2")));
+        let context = WebContext::new(Some(krbr_core::platform::cache_dir().join("webview2")));
         let style = format!("{STYLE}\n{PANEL_STYLE}\n{EDITOR_STYLE}\n{ABOUT_STYLE}");
-        let images: Images = Images::default();
-        let mut views = Vec::new();
-        for pane in Pane::ALL {
-            let (tx, proxy, store) = (tx.clone(), proxy.clone(), images.clone());
-            let view = WebViewBuilder::new_with_web_context(&mut context)
-                .with_html(pane.html().replace("/*STYLE*/", &style).replace("</body>", &format!("<script>{TIP_JS}</script>
-</body>")))
-                // 読み込みの間も、まわりと同じ暗い色（白く光らない）
-                .with_background_color((17, 19, 22, 255))
-                .with_bounds(rect((0, 0, 1, 1)))
-                .with_visible(false)
-                .with_custom_protocol("krbr".into(), move |_id, req| {
-                    let name = req.uri().path().trim_start_matches('/');
-                    let body = store.lock().ok().and_then(|m| m.get(name).cloned());
-                    // URL は描き直すたびに変わるので、同じ URL は覚えておいてよい
-                    let r = wry::http::Response::builder().header("Cache-Control", "max-age=3600").header("Access-Control-Allow-Origin", "*");
-                    match body {
-                        Some(b) => r.header("Content-Type", "image/png").body(Cow::Owned(b)),
-                        None => r.status(404).body(Cow::Borrowed(&[][..])),
-                    }
-                    .unwrap()
-                })
-                .with_ipc_handler(move |req| {
-                    if let Some(mut m) = parse(req.body()) {
-                        if let Msg::Tip { pane: p, .. } | Msg::Painted(p) = &mut m {
-                            *p = pane;
-                        }
-                        let _ = tx.send(m);
-                        let _ = proxy.send_event(Wake);
-                    }
-                })
-                .build_as_child(window)
-                .map_err(|e| format!("WebView: {e}"))?;
-            views.push(View { view, bounds: None, sent: String::new(), shown: false, size: (1, 1), pending: None });
-        }
-        Ok(Self { views, rx, images, moved: Instant::now(), _context: context })
+        Self { views: Vec::new(), rx, tx, proxy, images: Images::default(), style, moved: Instant::now(), context }
     }
 
-    fn view(&mut self, pane: Pane) -> &mut View {
-        &mut self.views[Pane::ALL.iter().position(|p| *p == pane).unwrap()]
+    /// 全部の WebView を一度に作る
+    pub fn new(window: &Window, proxy: EventLoopProxy<Wake>) -> Result<Self, String> {
+        let mut w = Self::start(proxy);
+        while !w.step(window)? {}
+        Ok(w)
+    }
+
+    /// 作った数と、全部の数
+    pub fn progress(&self) -> (usize, usize) {
+        (self.views.len(), Pane::ALL.len())
+    }
+
+    /// いつも見えているページのうち、作った数と全部の数
+    pub fn core_progress(&self) -> (usize, usize) {
+        (self.views.len().min(CORE_PANES), CORE_PANES)
+    }
+
+    /// いつも見えているページを作り終えたか（起動中の画面を終えてよい）
+    pub fn core_ready(&self) -> bool {
+        self.views.len() >= CORE_PANES
+    }
+
+    /// 全部作り終えたか
+    pub fn complete(&self) -> bool {
+        self.views.len() == Pane::ALL.len()
+    }
+
+    /// 次の WebView を 1 つ作る。全部作り終えたら（もう作るものが無ければ）true
+    pub fn step(&mut self, window: &Window) -> Result<bool, String> {
+        let Some(&pane) = Pane::ALL.get(self.views.len()) else { return Ok(true) };
+        let t0 = Instant::now();
+        let (tx, proxy, store) = (self.tx.clone(), self.proxy.clone(), self.images.clone());
+        let (tx_drop, proxy_drop) = (self.tx.clone(), self.proxy.clone());
+        let view = WebViewBuilder::new_with_web_context(&mut self.context)
+            .with_html(pane.html().replace("/*STYLE*/", &self.style).replace("</body>", &format!("<script>{TIP_JS}</script>\n</body>")))
+            // 読み込みの間も、まわりと同じ暗い色（白く光らない）
+            .with_background_color((17, 19, 22, 255))
+            .with_bounds(rect((0, 0, 1, 1)))
+            .with_visible(false)
+            .with_custom_protocol("krbr".into(), move |_id, req| {
+                let name = req.uri().path().trim_start_matches('/');
+                let body = store.lock().ok().and_then(|m| m.get(name).cloned());
+                // URL は描き直すたびに変わるので、同じ URL は覚えておいてよい
+                let r = wry::http::Response::builder().header("Cache-Control", "max-age=3600").header("Access-Control-Allow-Origin", "*");
+                match body {
+                    Some(b) => r.header("Content-Type", "image/png").body(Cow::Owned(b)),
+                    None => r.status(404).body(Cow::Borrowed(&[][..])),
+                }
+                .unwrap()
+            })
+            // ファイルを落とした：ビューアに渡す（WebView がファイルを開いてしまわないように、いつも自分で受ける）
+            .with_drag_drop_handler(move |e| {
+                if let wry::DragDropEvent::Drop { paths, .. } = e {
+                    let _ = tx_drop.send(Msg::Dropped(paths));
+                    let _ = proxy_drop.send_event(Wake);
+                }
+                true
+            })
+            .with_ipc_handler(move |req| {
+                if let Some(mut m) = parse(req.body()) {
+                    if let Msg::Tip { pane: p, .. } | Msg::Painted(p) = &mut m {
+                        *p = pane;
+                    }
+                    let _ = tx.send(m);
+                    let _ = proxy.send_event(Wake);
+                }
+            })
+            .build_as_child(window)
+            .map_err(|e| format!("WebView: {e}"))?;
+        self.views.push(View { view, bounds: None, sent: String::new(), shown: false, size: (1, 1), pending: None });
+        krbr_core::debug!("web UI: {pane:?} in {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0);
+        Ok(self.complete())
+    }
+
+    fn view(&mut self, pane: Pane) -> Option<&mut View> {
+        let i = Pane::ALL.iter().position(|p| *p == pane)?;
+        self.views.get_mut(i)
     }
 
     /// 置き場所（ウィンドウの中の物理ピクセル）。None なら隠す。変わったときだけ動かす
     pub fn layout(&mut self, pane: Pane, r: Option<PxRect>) {
-        let v = self.view(pane);
+        let Some(v) = self.view(pane) else { return };
         let before = (v.bounds, v.pending.map(|p| p.0), v.size);
         self.place(pane, r);
-        let v = self.view(pane);
+        let Some(v) = self.view(pane) else { return };
         if before != (v.bounds, v.pending.map(|p| p.0), v.size) {
             self.moved = Instant::now();
         }
@@ -239,7 +292,7 @@ impl WebUi {
         if pane.overlay() {
             return self.layout_overlay(pane, r);
         }
-        let v = self.view(pane);
+        let Some(v) = self.view(pane) else { return };
         if v.bounds == r {
             return;
         }
@@ -263,7 +316,7 @@ impl WebUi {
     /// ページが描き終えた知らせ（painted）で置く（知らせが来なくても少し待ったら置く）
     fn layout_overlay(&mut self, pane: Pane, r: Option<PxRect>) {
         const AWAY: i32 = -30000;
-        let v = self.view(pane);
+        let Some(v) = self.view(pane) else { return };
         let Some(r) = r else {
             v.pending = None;
             if v.bounds.take().is_some() {
@@ -304,7 +357,7 @@ impl WebUi {
 
     /// 画面の外で描き終えた：待っていた場所に置く
     fn painted(&mut self, pane: Pane) {
-        let v = self.view(pane);
+        let Some(v) = self.view(pane) else { return };
         if let Some((r, _)) = v.pending.take() {
             let _ = v.view.set_bounds(rect(r));
             v.bounds = Some(r);
@@ -314,12 +367,16 @@ impl WebUi {
 
     /// キーボードの入力をこのページへ（プルダウンを開いたとき。外をクリックしたら閉じるのは、ページがフォーカスを失った知らせで）
     pub fn focus(&mut self, pane: Pane) {
-        let _ = self.view(pane).view.focus();
+        if let Some(v) = self.view(pane) {
+            let _ = v.view.focus();
+        }
     }
 
     /// キーボードの入力をビューアのウィンドウへ戻す
     pub fn focus_parent(&mut self, pane: Pane) {
-        let _ = self.view(pane).view.focus_parent();
+        if let Some(v) = self.view(pane) {
+            let _ = v.view.focus_parent();
+        }
     }
 
     /// ページに渡す画像の置き場
@@ -329,7 +386,9 @@ impl WebUi {
 
     /// 次の send を、前と同じ内容でも送る（ページに描き直して、大きさを測り直してもらう）
     pub fn resend(&mut self, pane: Pane) {
-        self.view(pane).sent.clear();
+        if let Some(v) = self.view(pane) {
+            v.sent.clear();
+        }
     }
 
     /// 届いた操作。ページを読み終えた知らせがあれば、次の送信で状態を送り直す
@@ -351,12 +410,14 @@ impl WebUi {
 
     /// ページの window.krbr の関数を呼ぶ（引数なし。読み終える前なら何もしない）
     pub fn call(&mut self, pane: Pane, func: &str) {
-        let _ = self.view(pane).view.evaluate_script(&format!("window.krbr && window.krbr.{func} && window.krbr.{func}()"));
+        if let Some(v) = self.view(pane) {
+            let _ = v.view.evaluate_script(&format!("window.krbr && window.krbr.{func} && window.krbr.{func}()"));
+        }
     }
 
     /// 状態を送る（JSON。前に送ったものと同じなら送らない）
     pub fn send(&mut self, pane: Pane, json: &str) {
-        let v = self.view(pane);
+        let Some(v) = self.view(pane) else { return };
         if v.sent != json && v.view.evaluate_script(&format!("window.krbr && window.krbr.{}({json})", pane.func())).is_ok() {
             v.sent = json.to_string();
         }

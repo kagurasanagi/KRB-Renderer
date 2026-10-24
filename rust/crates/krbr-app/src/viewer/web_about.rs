@@ -10,7 +10,7 @@ use super::*;
 pub(super) const REPO_URL: &str = "https://github.com/kagurasanagi/KRB-Renderer";
 const LICENSE: &str = include_str!("../../../../../LICENSE");
 const THIRD_PARTY: &str = include_str!("../../web/third_party.json");
-const ICON_PNG: &[u8] = include_bytes!("../../../../krbr/assets/krbr_256.png");
+pub(super) const ICON_PNG: &[u8] = include_bytes!("../../../../krbr/assets/krbr_256.png");
 /// 画像の置き場でのアイコンの名前
 pub(super) const ICON_PATH: &str = "about/icon.png";
 

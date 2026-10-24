@@ -8,7 +8,7 @@ use krbr_core::{debug, info, warn};
 use krbr_geom::tiles::ReliefTileCache;
 use krbr_kicad::{diff_boards, load_board, Board, BoardDiff, ModelResolver};
 use krbr_model::{MeshParams, ModelLibrary};
-use krbr_render::studio_env::STUDIO;
+use krbr_render::studio_env::{studio_environment, STUDIO};
 use krbr_render::{build_env_distribution, image_io, DenoiseQuality, is_builtin, load_environment_map, render_offscreen, Context, ContextOptions, FrameParams, GpuScene, Progressive, RenderSettings};
 use krbr_scene::config::{apply_mask_color_spec, load_project_config, write_default_configs, ProjectConfig};
 use krbr_scene::scene::{build_scene, load_material_setup, MaterialSetup, SceneContext};
@@ -400,6 +400,20 @@ pub fn prepare_empty(o: &RenderOptions) -> Option<PreparedScene> {
     let scene = Scene { framing_points: vec![glam::Vec3::splat(-50.0), glam::Vec3::splat(50.0)], ..Default::default() };
     info!("no board; open one from the File menu");
     Some(PreparedScene { board: Board::default(), cfg, scene, env, dist, config_hdr: String::new(), configured, config_view, remembered_view: remember::ViewValues::new(), kicad_cli: None, source: None })
+}
+
+/// 基板を裏で読んでいる間の仮の状態（起動中の画面に隠れて見えないので、環境マップは小さな内蔵のスタジオ。
+/// 2048 の本物を作ると、ウィンドウを出す前に 0.5 秒かかる）
+pub fn prepare_placeholder(o: &RenderOptions) -> PreparedScene {
+    let mut configured = ProjectConfig::default();
+    apply_command_line(&mut configured, o);
+    let mut cfg = configured.clone();
+    cfg.hdr = STUDIO.into();
+    let env = studio_environment(64);
+    let dist = build_env_distribution(&env, 64);
+    let config_view = remember::ViewSettings::of(&ProjectConfig::default()).values();
+    let scene = Scene { framing_points: vec![glam::Vec3::splat(-50.0), glam::Vec3::splat(50.0)], ..Default::default() };
+    PreparedScene { board: Board::default(), cfg, scene, env, dist, config_hdr: String::new(), configured, config_view, remembered_view: remember::ViewValues::new(), kicad_cli: None, source: None }
 }
 
 /// 組み立てで使う 3D モデルを先に読んでおく（ModelLibrary が覚えるので、組み立てのときはすぐ返る）。

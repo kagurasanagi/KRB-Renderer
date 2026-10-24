@@ -581,9 +581,23 @@ fn launched_from_explorer() -> bool {
     false
 }
 
-/// エクスプローラーから起動したときは、終わるとコンソールがすぐ閉じてエラーが読めないので、Enter を待つ
+/// コンソール無しで起動し直したことを示す環境変数（KRB-Renderer.exe も付けて起動する）
+const DETACHED_ENV: &str = "KRBR_DETACHED";
+
+fn detached() -> bool {
+    std::env::var_os(DETACHED_ENV).is_some()
+}
+
+/// エクスプローラーから起動したときは、終わるとコンソールがすぐ閉じてエラーが読めないので、Enter を待つ。
+/// コンソール無しで起動し直したビューアでは、最近のログを窓で見せる
 fn exit_with(code: i32, explorer: bool) -> ! {
+    if detached() && code != 0 {
+        let log = krbr_core::log::recent(20).join("\n");
+        krbr_core::platform::message_box("KRB Renderer", &format!("KRB Renderer could not start (exit code {code}).\n\n{log}"));
+        std::process::exit(code)
+    }
     if explorer && code != 0 {
+        krbr_core::platform::show_console(true);
         eprintln!("\nPress Enter to close");
         let _ = std::io::stdin().read_line(&mut String::new());
     }
@@ -621,6 +635,7 @@ fn main() {
             None => args.insert(1, "view".to_string()),
         }
     }
+    let cli_args = args.clone();
     let cli = match Cli::try_parse_from(args) {
         Ok(c) => c,
         Err(e) => {
@@ -676,6 +691,15 @@ fn main() {
                     hide: args.test_hide.clone(),
                 },
             };
+            // エクスプローラーから開いたビューア（exe のアイコンへのドラッグ＆ドロップなど）は、コンソールの無いプロセスで
+            // 起動し直して、すぐ終わる（黒いコンソールの窓を残さない。Windows Terminal の窓はプログラムからは隠せない）。
+            // ログはビューアの起動中の画面に出る。KRB-Renderer.exe から開けば、コンソールは一瞬も出ない
+            if explorer && !args.hidden && args.test_frames == 0 && !detached() {
+                match krbr_core::platform::relaunch_without_console(&cli_args[1..], (DETACHED_ENV, "1")) {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => krbr_core::warn!("cannot start without the console: {e}"),
+                }
+            }
             krbr_app::run_viewer(vo).map(|rc| {
                 if rc != 0 {
                     exit_with(rc, explorer);

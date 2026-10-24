@@ -2,7 +2,8 @@
 
 use std::fmt::Arguments;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::OnceLock;
+use std::collections::VecDeque;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -15,6 +16,15 @@ pub enum Level {
 
 static LEVEL: AtomicU8 = AtomicU8::new(Level::Info as u8);
 static START: OnceLock<Instant> = OnceLock::new();
+/// 最近のログ（ビューアの起動中の画面に出す）
+static RECENT: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+const RECENT_MAX: usize = 200;
+
+/// 最近のログの行（古い順、最大 n 行）
+pub fn recent(n: usize) -> Vec<String> {
+    let r = RECENT.lock().unwrap_or_else(|e| e.into_inner());
+    r.iter().skip(r.len().saturating_sub(n)).cloned().collect()
+}
 
 pub fn set_level(level: Level) {
     LEVEL.store(level as u8, Ordering::Relaxed);
@@ -35,7 +45,13 @@ pub fn log(level: Level, args: Arguments<'_>) {
         Level::Warn => "warn ",
         Level::Error => "error",
     };
-    eprintln!("[{t:8.3}] {name} {args}");
+    let line = format!("[{t:8.3}] {name} {args}");
+    eprintln!("{line}");
+    let mut r = RECENT.lock().unwrap_or_else(|e| e.into_inner());
+    if r.len() >= RECENT_MAX {
+        r.pop_front();
+    }
+    r.push_back(line);
 }
 
 #[macro_export]
