@@ -2407,8 +2407,10 @@ impl App {
         if !self.last_update.is_empty() {
             notes.push((self.last_update.clone(), false));
         }
+        // 2 行とも折り返さない（高さを中身で変えない）。折り返すと、表示の倍率などの文字の長さでバーの高さが変わり、
+        // 3D 表示の大きさが変わって倍率の文字がまた変わる、を毎フレーム繰り返して画面が揺れる。入らない分は切る
         egui::Panel::bottom("status").show(root, |ui| {
-            ui.horizontal_wrapped(|ui| {
+            ui.horizontal(|ui| {
                 if st.paused {
                     ui.colored_label(yellow, fl!("status-paused"));
                 } else if done {
@@ -2428,8 +2430,8 @@ impl App {
                     }
                 }
             });
-            // 2 行目：描画の条件と、読み直しなどの知らせ（幅が足りなければ折り返す）
-            ui.horizontal_wrapped(|ui| {
+            // 2 行目：描画の条件と、読み直しなどの知らせ（入らなければ「…」で切り、マウスを載せると全文）
+            ui.horizontal(|ui| {
                 ui.weak(fl!("status-integrator", integrator = g.prog.integrator_kind().as_str().to_uppercase(), color = if st.spectral { fl!("status-spectral") } else { "RGB".into() }));
                 ui.separator();
                 let (rw, rh) = (g.prog.targets().width, g.prog.targets().height);
@@ -2441,11 +2443,8 @@ impl App {
                 ui.weak(fl!("status-gpu", name = info.name.as_str(), method = method));
                 for (text, busy) in &notes {
                     ui.separator();
-                    if *busy {
-                        ui.colored_label(yellow, text);
-                    } else {
-                        ui.weak(text);
-                    }
+                    let rich = if *busy { egui::RichText::new(text).color(yellow) } else { egui::RichText::new(text).weak() };
+                    ui.add(egui::Label::new(rich).truncate()).on_hover_text(text);
                 }
             });
         });
