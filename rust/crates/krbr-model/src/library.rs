@@ -123,6 +123,9 @@ fn tessellate_step(p: &Path, params: MeshParams) -> Result<ModelMesh, String> {
     let step_c = CString::new(p.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
     let out_c = CString::new(tmp.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
     let mut err = vec![0u8; 512];
+    // 変換器（OpenCASCADE）はプロセスの中で 1 本ずつ呼ぶ（読み込みの先読み・組み立て・裏の分割が同時に呼びうる）
+    static CONVERTER: Mutex<()> = Mutex::new(());
+    let _one_at_a_time = CONVERTER.lock().unwrap_or_else(|e| e.into_inner());
     // 安全性：引数は NUL 終端の UTF-8 文字列と、長さを添えたバッファ
     let rc = unsafe {
         (dll.to_mesh_file)(step_c.as_ptr(), params.linear_deflection, params.angular_deflection, out_c.as_ptr(), err.as_mut_ptr() as *mut c_char, err.len())
@@ -173,6 +176,8 @@ struct State {
     memo: HashMap<PathBuf, Memo>,
     /// 裏で分割を待っているパスと、そのファイル内容のハッシュ（待っている間はハッシュを計算し直さない）
     queued: BTreeMap<PathBuf, String>,
+    /// get で読み込み中のパス（ほかのスレッドが同じパスを get したら、読み終えるまで待って同じ結果を返す）
+    loading: std::collections::BTreeSet<PathBuf>,
     queue: VecDeque<Job>,
     stop: bool,
     completed: usize,
@@ -182,6 +187,8 @@ struct State {
 struct Shared {
     state: Mutex<State>,
     cv: Condvar,
+    /// get の読み込みが終わった（loading から外した）
+    loaded: Condvar,
     params: MeshParams,
 }
 
@@ -201,7 +208,7 @@ impl ModelLibrary {
         Self {
             cache_dir,
             use_cache,
-            shared: Arc::new(Shared { state: Mutex::new(State::default()), cv: Condvar::new(), params }),
+            shared: Arc::new(Shared { state: Mutex::new(State::default()), cv: Condvar::new(), loaded: Condvar::new(), params }),
             worker: Mutex::new(None),
         }
     }
@@ -220,11 +227,23 @@ impl ModelLibrary {
             st.memo.insert(p.to_path_buf(), Memo { stamp, result: res.clone() });
             return res;
         }
-        let (hit, cache_file, file_hash, stamp) = self.lookup(p);
-        if let Some(r) = hit {
-            return r;
+        // 同じパスをほかのスレッドが読んでいれば、終わるのを待ってメモの結果を使う（同じファイルを 2 回読まず、
+        // 呼んだ側がみな同じメッシュ（Arc）を持つ）
+        {
+            let mut st = self.shared.state.lock().unwrap();
+            while st.loading.contains(p) {
+                st = self.shared.loaded.wait(st).unwrap();
+            }
+            st.loading.insert(p.to_path_buf());
         }
-        load_now(&self.shared, p, cache_file.as_deref(), &file_hash, stamp)
+        let (hit, cache_file, file_hash, stamp) = self.lookup(p);
+        let r = match hit {
+            Some(r) => r,
+            None => load_now(&self.shared, p, cache_file.as_deref(), &file_hash, stamp),
+        };
+        self.shared.state.lock().unwrap().loading.remove(p);
+        self.shared.loaded.notify_all();
+        r
     }
 
     /// キャッシュにあればすぐ返す。無ければ裏で分割を始めて pending を返す（保存の監視中に使う）
@@ -294,7 +313,7 @@ impl ModelLibrary {
                 let res = LoadResult { mesh: Some(Arc::new(m)), from_cache: true, file_hash, ..Default::default() };
                 let mut st = self.shared.state.lock().unwrap();
                 st.stats.cache_hits += 1;
-                st.memo.insert(p.to_path_buf(), Memo { stamp, result: res.clone() });
+                let res = memo_insert(&mut st, p, stamp, res);
                 (Some(res), None, String::new(), stamp)
             }
             Err(_) => (None, Some(cache_file), file_hash, stamp),
@@ -349,6 +368,16 @@ fn load_now(shared: &Shared, p: &Path, cache_file: Option<&Path>, file_hash: &st
     } else {
         st.stats.failed += 1;
     }
+    memo_insert(&mut st, p, stamp, res)
+}
+
+/// メモに入れて、使う結果を返す。同じファイルの状態の結果がもうあれば（ほかのスレッドが先に読んだ）、そちらを残して返す：
+/// 呼んだ側がみな同じメッシュ（Arc）を持つようにする（組み立てはメッシュのアドレスで同じモデルを見分けるので、
+/// 別々の Arc を返すと、片方が解放された後に同じアドレスへ別のモデルが入り、取り違える）
+fn memo_insert(st: &mut State, p: &Path, stamp: Option<FileStamp>, res: LoadResult) -> LoadResult {
+    if let Some(m) = st.memo.get(p).filter(|m| m.stamp == stamp) {
+        return m.result.clone();
+    }
     st.memo.insert(p.to_path_buf(), Memo { stamp, result: res.clone() });
     res
 }
@@ -384,6 +413,36 @@ mod tests {
         assert_eq!(key, "occt-step|0.010000|0.350000|v3");
         let ph = to_hex(xxh64(key.as_bytes()));
         assert_eq!(ph.len(), 16);
+    }
+
+    /// 同じ STEP を幾つものスレッドが同時に読んでも、読むのは 1 回で、みな同じメッシュ（同じ Arc）を受け取る
+    /// （以前は後から読んだ結果でメモを上書きし、組み立てがメッシュのアドレスで取り違えることがあった）
+    #[test]
+    fn concurrent_gets_share_one_mesh() {
+        let dir = std::env::temp_dir().join(format!("krbr_rust_library_concurrent_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 中身は何でもよい：キャッシュに分割の結果を置いておけば、変換器は呼ばれない
+        let step = dir.join("a.step");
+        std::fs::write(&step, "ISO-10303-21; not a real model").unwrap();
+        let params = MeshParams::default();
+        let file_hash = to_hex(xxh64(&std::fs::read(&step).unwrap()));
+        let ph = to_hex(xxh64(format!("occt-step|{:.6}|{:.6}|v{}", params.linear_deflection, params.angular_deflection, MESH_FILE_VERSION).as_bytes()));
+        let mut m = ModelMesh::default();
+        m.mesh.positions = vec![glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::Y];
+        m.mesh.normals = vec![glam::Vec3::Z; 3];
+        m.mesh.indices = vec![0, 1, 2];
+        m.mesh.tri_material = vec![0];
+        m.parts.push(crate::ModelPart { name: "body".into(), ..Default::default() });
+        crate::mesh_file::write_mesh_file(&dir.join("cache").join("meshes").join(format!("{file_hash}-{}.krbm", &ph[..8])), &m).unwrap();
+        let lib = ModelLibrary::new(dir.join("cache"), params, true);
+        let ptrs: Vec<usize> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..8).map(|_| sc.spawn(|| Arc::as_ptr(lib.get(&step).mesh.as_ref().expect("mesh")) as usize)).collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(ptrs.iter().all(|&p| p == ptrs[0]), "{ptrs:?}");
+        assert_eq!(lib.stats().cache_hits, 1);
     }
 
     #[test]

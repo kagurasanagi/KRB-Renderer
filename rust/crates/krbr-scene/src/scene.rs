@@ -844,7 +844,9 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
     let ph_mat = add_material(&mut s, ph);
 
     let to_world = kicad_to_world(s.board.center);
-    let mut mesh_of: HashMap<*const ModelMesh, u32> = HashMap::new();
+    // 同じモデルのメッシュは 1 つにまとめる。キーはメッシュのアドレスなので、組み立ての間は Arc も持って解放させない
+    // （解放されると、同じアドレスに別のモデルが入って取り違える）
+    let mut mesh_of: HashMap<*const ModelMesh, (u32, Arc<ModelMesh>)> = HashMap::new();
     let mut material_set_of: BTreeMap<String, u32> = BTreeMap::new();
 
     let t_models = std::time::Instant::now();
@@ -879,7 +881,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
             let model: &Arc<ModelMesh> = model;
             let key = Arc::as_ptr(model);
             let mesh_id = match mesh_of.get(&key) {
-                Some(&id) => id,
+                Some(&(id, _)) => id,
                 None => {
                     let mut sm = SceneMesh { name: res.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(), mesh: model.mesh.clone() };
                     let nparts = model.parts.len().max(1) as u32;
@@ -888,7 +890,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
                     }
                     let id = s.meshes.len() as u32;
                     s.meshes.push(sm);
-                    mesh_of.insert(key, id);
+                    mesh_of.insert(key, (id, Arc::clone(model)));
                     id
                 }
             };
