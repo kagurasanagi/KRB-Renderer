@@ -2595,12 +2595,15 @@ impl App {
         let done = self.gpu.as_ref().is_some_and(|g| g.prog.samples() >= self.st.max_spp);
         let board = self.has_board();
         let st = &mut self.st;
-        // グループの見出し（空なら高さだけ取る）と、その下のボタン
+        // グループの見出し（ボタンの並びの幅の中央。空なら高さだけ取る）と、その下のボタン
         let group = |ui: &mut egui::Ui, title: String, add: &mut dyn FnMut(&mut egui::Ui)| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                ui.add(egui::Label::new(egui::RichText::new(if title.is_empty() { " ".into() } else { title }).size(11.0).weak()).selectable(false));
-                ui.horizontal(|ui| add(ui));
+                let (head, _) = ui.allocate_exact_size(egui::vec2(1.0, 16.0), egui::Sense::hover());
+                let row = ui.horizontal(|ui| add(ui)).response.rect;
+                if !title.is_empty() {
+                    ui.painter().text(egui::pos2(row.center().x, head.center().y), egui::Align2::CENTER_CENTER, title, egui::FontId::proportional(11.0), ui.visuals().weak_text_color());
+                }
             });
         };
         egui::Panel::top("toolbar").show(root, |ui| {
