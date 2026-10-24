@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>/*STYLE*/</style>
+</head>
+<body class="banner">
+  <svg class="warn-icon" viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18.5A2 2 0 0 0 3.5 21.5h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v5"/><circle cx="12" cy="17.4" r=".6"/></svg>
+  <span class="msg" id="msg"></span>
+  <button class="btn primary" id="action"></button>
+<script>
+const post = (m) => window.ipc.postMessage(JSON.stringify(m));
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+document.addEventListener("keydown", (e) => {
+  if (e.repeat) return;
+  post({ type: "key", code: e.code });
+  e.preventDefault();
+});
+document.getElementById("action").addEventListener("click", () => post({ type: "click", id: document.getElementById("action").dataset.id }));
+window.krbr = {
+  banner(s) {
+    document.getElementById("msg").textContent = s.text;
+    const a = document.getElementById("action");
+    a.textContent = s.action || "";
+    a.dataset.id = s.actionId || "";
+    a.style.display = s.action ? "" : "none";
+  },
+};
+post({ type: "ready" });
+</script>
+</body>
+</html>

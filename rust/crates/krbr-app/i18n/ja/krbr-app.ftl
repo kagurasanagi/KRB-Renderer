@@ -135,6 +135,7 @@ duration-seconds = { $seconds } 秒
 ## 設定パネル
 panel-settings = 設定
 panel-close-tip = 閉じる（メニューの「表示」や F1 / Tab で再表示）
+panel-resize-tip = ドラッグで幅を変える
 panel-help-mouse = 左ドラッグ: 回転  右ドラッグ: 移動  ホイール: 拡大  クリック: 部品を選ぶ
 panel-help-toggle = F1 / Tab: このパネルの表示切り替え
 
@@ -231,6 +232,10 @@ camera-fov = 画角
 camera-angles = 仰角 { $elevation }°  方位 { $azimuth }°
 camera-target = 注視点 x { $x }  y { $y }（KiCad の座標）、距離 { $distance }
 camera-position = カメラ x { $x }  y { $y }、基板の上面から { $height }
+camera-web-target = 注視点（KiCad の座標）
+camera-web-distance = 注視点からの距離
+camera-web-position = カメラ（KiCad の座標）
+camera-web-height = 基板の上面からの高さ
 camera-fit = 全体を表示 (F)
 camera-reset = 視点を戻す (R)
 camera-save = 保存 (S)

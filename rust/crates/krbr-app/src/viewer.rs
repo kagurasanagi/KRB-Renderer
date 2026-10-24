@@ -28,6 +28,8 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::fl;
+
+mod web_panel;
 use crate::i18n;
 use crate::kicad_cli::SilkJob;
 use crate::kicad_plugin::{self, PluginWindow};
@@ -483,6 +485,8 @@ const DEFAULT_MAX_SPP: u32 = 4096;
 /// --web-ui のボタン列とステータスバーの高さ（egui のポイント）
 const WEB_TOOLBAR_HEIGHT: f32 = 78.0;
 const WEB_STATUS_HEIGHT: f32 = 48.0;
+/// --web-ui の警告の帯の高さ（3D 表示の上端に重ねる）
+const WEB_BANNER_HEIGHT: f32 = 40.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StatusState {
@@ -924,7 +928,8 @@ struct App {
     /// --web-ui：ボタン列とステータスバーの WebView、イベントループを起こすための口、置き場所（egui のポイント）
     web: Option<crate::web_ui::WebUi>,
     proxy: Option<EventLoopProxy<crate::web_ui::Wake>>,
-    web_rects: [egui::Rect; 2],
+    /// ボタン列・ステータスバー・設定パネル・警告の帯の置き場所（egui のポイント。NOTHING なら出さない）
+    web_rects: [egui::Rect; 4],
     egui_ctx: egui::Context,
     egui_state: Option<EguiState>,
     gpu: Option<Gpu>,
@@ -2935,6 +2940,10 @@ impl App {
 
     /// 右端に上下いっぱいで固定する設定パネル（幅は境目のドラッグで変えられる、× で閉じる）
     fn side_panel(&mut self, root: &mut egui::Ui) {
+        if self.web.is_some() {
+            self.web_rects[2] = egui::Panel::right("settings").exact_size(self.panel_width).frame(egui::Frame::NONE).show(root, |ui| ui.allocate_space(ui.available_size())).response.rect;
+            return;
+        }
         let mut close = false;
         let shown = egui::Panel::right("settings").resizable(true).default_size(self.panel_width).size_range(300.0..=640.0).show(root, |ui| {
             ui.horizontal(|ui| {
@@ -2987,24 +2996,29 @@ impl App {
         let Some(web) = self.web.as_mut() else { return };
         let done = self.gpu.as_ref().is_some_and(|g| g.prog.samples() >= self.st.max_spp);
         for m in web.messages() {
-            let st = &mut self.st;
             match m {
-                crate::web_ui::Msg::Click(id) => match id.as_str() {
-                    "pause" if !done => st.paused = !st.paused,
-                    "top" => st.req.view_preset = Some(TOP_VIEW),
-                    "bottom" => st.req.view_preset = Some(BOTTOM_VIEW),
-                    "fit" => st.req.fit_view = true,
-                    "smd" => {
-                        st.show_smd = !st.show_smd;
-                        st.changed.visibility = true;
+                crate::web_ui::Msg::Click(id) if self.apply_panel_click(&id) => {}
+                crate::web_ui::Msg::Set(id, v) => self.apply_panel_set(&id, &v),
+                crate::web_ui::Msg::Resize(w) => self.panel_width = w.clamp(300.0, 640.0),
+                crate::web_ui::Msg::Click(id) => {
+                    let st = &mut self.st;
+                    match id.as_str() {
+                        "pause" if !done => st.paused = !st.paused,
+                        "top" => st.req.view_preset = Some(TOP_VIEW),
+                        "bottom" => st.req.view_preset = Some(BOTTOM_VIEW),
+                        "fit" => st.req.fit_view = true,
+                        "smd" => {
+                            st.show_smd = !st.show_smd;
+                            st.changed.visibility = true;
+                        }
+                        "tht" => {
+                            st.show_tht = !st.show_tht;
+                            st.changed.visibility = true;
+                        }
+                        "denoise" => st.denoise = !st.denoise,
+                        _ => {}
                     }
-                    "tht" => {
-                        st.show_tht = !st.show_tht;
-                        st.changed.visibility = true;
-                    }
-                    "denoise" => st.denoise = !st.denoise,
-                    _ => {}
-                },
+                }
                 crate::web_ui::Msg::Key(code) => {
                     if let Some(action) = key_code_of_js(&code).and_then(key_action) {
                         if self.apply_key_action(action) {
@@ -3022,13 +3036,30 @@ impl App {
         if self.web.is_none() {
             return;
         }
-        let px = |r: egui::Rect| -> crate::web_ui::PxRect { ((r.min.x * ppp).round() as i32, (r.min.y * ppp).round() as i32, (r.width() * ppp).round() as u32, (r.height() * ppp).round() as u32) };
-        let (tb, sb) = (px(self.web_rects[0]), px(self.web_rects[1]));
+        use crate::web_ui::Pane;
+        let px = |r: egui::Rect| -> Option<crate::web_ui::PxRect> {
+            (r.is_positive()).then(|| ((r.min.x * ppp).round() as i32, (r.min.y * ppp).round() as i32, (r.width() * ppp).round() as u32, (r.height() * ppp).round() as u32))
+        };
+        let rects = self.web_rects.map(px);
         let toolbar = self.toolbar_json();
         let status = self.status_texts().map(|t| t.json()).unwrap_or_default();
+        let panel = rects[2].is_some().then(|| self.panel_json());
+        let banner = rects[3].is_some().then(|| {
+            let text = if self.board_visibility() == BoardInView::TooSmall { fl!("board-too-small") } else { fl!("board-out-of-view") };
+            serde_json::json!({ "text": text, "action": fl!("camera-fit"), "actionId": "fit" }).to_string()
+        });
         let web = self.web.as_mut().unwrap();
-        web.layout(tb, sb);
-        web.send(&toolbar, &status);
+        for (pane, r) in Pane::ALL.into_iter().zip(rects) {
+            web.layout(pane, r);
+        }
+        web.send(Pane::Toolbar, &toolbar);
+        web.send(Pane::Status, &status);
+        if let Some(j) = panel {
+            web.send(Pane::Panel, &j);
+        }
+        if let Some(j) = banner {
+            web.send(Pane::Banner, &j);
+        }
     }
 
     /// ボタン列の状態（WebView へ送る JSON。文字は訳したもの）
@@ -3067,13 +3098,16 @@ impl App {
             self.menu_bar(root);
             self.tool_bar(root);
             self.status_bar(root);
+            self.web_rects[2] = egui::Rect::NOTHING;
             if self.st.show_panel {
                 self.side_panel(root);
             }
             central = root.available_rect_before_wrap();
             self.draw_outline(root, central);
             let lost = if self.has_board() { self.board_visibility() } else { BoardInView::Visible };
-            if lost != BoardInView::Visible {
+            // WebView のときは、警告は 3D 表示の上端の帯（WebView）に出す
+            self.web_rects[3] = if lost != BoardInView::Visible { egui::Rect::from_min_size(central.min, egui::vec2(central.width(), WEB_BANNER_HEIGHT)) } else { egui::Rect::NOTHING };
+            if lost != BoardInView::Visible && self.web.is_none() {
                 let text = if lost == BoardInView::TooSmall { fl!("board-too-small") } else { fl!("board-out-of-view") };
                 let galley = root.painter().layout(text, egui::FontId::proportional(16.0), egui::Color32::from_rgb(255, 204, 77), (central.width() - 40.0).max(100.0));
                 let pos = egui::pos2(central.center().x - galley.size().x / 2.0, central.top() + 16.0);
@@ -3920,7 +3954,7 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         window: None,
         web: None,
         proxy: None,
-        web_rects: [egui::Rect::NOTHING; 2],
+        web_rects: [egui::Rect::NOTHING; 4],
         egui_ctx: egui::Context::default(),
         egui_state: None,
         gpu: None,

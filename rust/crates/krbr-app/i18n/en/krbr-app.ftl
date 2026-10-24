@@ -135,6 +135,7 @@ duration-seconds = { $seconds } s
 ## Settings panel
 panel-settings = Settings
 panel-close-tip = Close (show it again from View in the menu, or with F1 / Tab)
+panel-resize-tip = Drag to resize
 panel-help-mouse = Left drag: rotate  Right drag: pan  Wheel: zoom  Click: select a part
 panel-help-toggle = F1 / Tab: show or hide this panel
 
@@ -231,6 +232,10 @@ camera-fov = Field of view
 camera-angles = Elevation { $elevation }°  Azimuth { $azimuth }°
 camera-target = Orbit center x { $x }  y { $y } (KiCad coordinates), distance { $distance }
 camera-position = Camera x { $x }  y { $y }, { $height } above the board
+camera-web-target = Orbit center (KiCad)
+camera-web-distance = Distance from the center
+camera-web-position = Camera (KiCad)
+camera-web-height = Height above the board
 camera-fit = Fit (F)
 camera-reset = Reset view (R)
 camera-save = Save (S)

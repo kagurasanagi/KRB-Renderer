@@ -1,0 +1,315 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>/*STYLE*/</style>
+</head>
+<body class="panel">
+  <div class="resize" id="resize" title=""></div>
+  <header>
+    <span id="title"></span>
+    <button class="icon-btn" id="close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </header>
+  <main id="main"></main>
+<script>
+// 設定パネル：Rust が組み立てた部品の並び（JSON）を描き、操作を返す。
+// 操作中（スライダーのドラッグ・選択肢を開いている・入力中）は描き直さず、終わってから最新の内容で描く
+const post = (m) => window.ipc.postMessage(JSON.stringify(m));
+const set = (id, value) => post({ type: "set", id, value });
+const click = (id) => post({ type: "click", id });
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+document.addEventListener("keydown", (e) => {
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" && t.type !== "range" && t.type !== "checkbox" && t.type !== "radio")) return;
+  if (t && t.tagName === "SELECT") return;
+  if (e.repeat) return;
+  post({ type: "key", code: e.code });
+  e.preventDefault();
+});
+document.getElementById("close").addEventListener("click", () => click("panel.close"));
+
+// 幅を変える（左端をドラッグ）
+{
+  const h = document.getElementById("resize");
+  let start = null;
+  h.addEventListener("pointerdown", (e) => {
+    start = { x: e.screenX, w: window.innerWidth };
+    h.setPointerCapture(e.pointerId);
+  });
+  h.addEventListener("pointermove", (e) => {
+    if (!start) return;
+    post({ type: "resize", width: start.w - (e.screenX - start.x) });
+  });
+  h.addEventListener("pointerup", () => (start = null));
+}
+
+let pending = null;
+let busy = 0;
+window.addEventListener("pointerdown", () => busy++);
+window.addEventListener("pointerup", () => {
+  busy = Math.max(0, busy - 1);
+  flush();
+});
+document.addEventListener("focusout", () => setTimeout(flush, 0));
+
+function interacting() {
+  const a = document.activeElement;
+  if (busy > 0) return true;
+  return a && (a.tagName === "SELECT" || (a.tagName === "INPUT" && a.type === "number"));
+}
+
+function flush() {
+  if (pending && !interacting()) {
+    const m = pending;
+    pending = null;
+    render(m);
+  }
+}
+
+const el = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+};
+
+function fmt(v, it) {
+  if (it.format === "pow2") return `2^${v} = ${1 << v}`;
+  const d = it.digits ?? 2;
+  return Number(v).toFixed(d) + (it.suffix || "");
+}
+
+// ---------------------------------------------------------------- 部品
+function slider(it) {
+  const row = el("div", "slider");
+  const label = el("label", null, it.label);
+  if (it.tip) row.title = it.tip;
+  const range = el("input");
+  range.type = "range";
+  const lo = it.log ? Math.log(it.min) : it.min, hi = it.log ? Math.log(it.max) : it.max;
+  const steps = it.int ? it.max - it.min : 1000;
+  range.min = 0;
+  range.max = steps;
+  range.step = 1;
+  const toPos = (v) => Math.round(((it.log ? Math.log(Math.max(v, it.min)) : v) - lo) / (hi - lo) * steps);
+  const toVal = (p) => {
+    const x = lo + (p / steps) * (hi - lo);
+    const v = it.log ? Math.exp(x) : x;
+    return it.int ? Math.round(v) : v;
+  };
+  range.value = toPos(it.value);
+  const num = el("input", "num mono");
+  num.type = it.format === "pow2" ? "text" : "number";
+  num.value = fmt(it.value, it).replace(it.suffix || "\u0000", "");
+  num.readOnly = it.format === "pow2";
+  const fill = () => range.style.setProperty("--p", (range.value / steps) * 100 + "%");
+  fill();
+  range.addEventListener("input", () => {
+    const v = toVal(Number(range.value));
+    num.value = fmt(v, it).replace(it.suffix || "\u0000", "");
+    fill();
+    set(it.id, v);
+  });
+  num.addEventListener("change", () => {
+    const v = Number(num.value);
+    if (Number.isFinite(v)) set(it.id, Math.min(it.max, Math.max(it.min, v)));
+  });
+  const value = el("div", "value");
+  value.append(num);
+  if (it.suffix) value.append(el("span", "unit", it.suffix.trim()));
+  row.append(label, range, value);
+  return row;
+}
+
+function check(it) {
+  const row = el("label", "check");
+  if (it.tip) row.title = it.tip;
+  const box = el("input");
+  box.type = "checkbox";
+  box.checked = it.value;
+  box.addEventListener("change", () => set(it.id, box.checked));
+  row.append(box, el("span", "mark"), el("span", null, it.label));
+  return row;
+}
+
+function radio(it) {
+  const seg = el("div", "segmented");
+  for (const o of it.options) {
+    const b = el("button", o.v === it.value ? "on" : "", o.label);
+    if (o.tip) b.title = o.tip;
+    b.addEventListener("click", () => set(it.id, o.v));
+    seg.append(b);
+  }
+  return seg;
+}
+
+function select(it) {
+  const wrap = el("div", "select-row" + (it.label ? "" : " bare"));
+  if (it.label) wrap.append(el("label", null, it.label));
+  const s = el("select");
+  if (it.tip) s.title = it.tip;
+  for (const g of it.groups) {
+    const parent = g.label ? el("optgroup") : s;
+    if (g.label) parent.label = g.label;
+    for (const o of g.options) {
+      const opt = el("option", null, o.label);
+      opt.value = o.v;
+      if (o.tip) opt.title = o.tip;
+      if (o.v === it.value) opt.selected = true;
+      parent.append(opt);
+    }
+    if (g.label) s.append(parent);
+  }
+  s.addEventListener("change", () => {
+    set(it.id, s.value);
+    s.blur();
+  });
+  wrap.append(s);
+  return wrap;
+}
+
+function buttons(it) {
+  const row = el("div", "buttons");
+  for (const b of it.items) {
+    const e = el("button", "btn" + (b.primary ? " primary" : ""), b.label);
+    if (b.tip) e.title = b.tip;
+    e.disabled = b.enabled === false;
+    e.addEventListener("click", () => click(b.id));
+    row.append(e);
+  }
+  return row;
+}
+
+function note(it) {
+  const e = el("div", "note-text " + (it.tone || "muted") + (it.strong ? " strong" : ""), it.text);
+  if (it.tip) e.title = it.tip;
+  return e;
+}
+
+function kv(it) {
+  const e = el("div", "kv");
+  e.append(el("span", "k", it.label), el("span", "v mono", it.value));
+  return e;
+}
+
+function row(it) {
+  const e = el("div", "inline");
+  for (const c of it.items) e.append(item(c));
+  return e;
+}
+
+function materialSelect(groups, value, placeholder, onPick) {
+  const s = el("select", "material");
+  if (placeholder) {
+    const o = el("option", null, placeholder);
+    o.value = "";
+    o.disabled = true;
+    o.selected = !value;
+    s.append(o);
+  }
+  for (const g of groups) {
+    const og = el("optgroup");
+    og.label = g.label;
+    for (const o of g.options) {
+      const opt = el("option", null, o.label);
+      opt.value = o.v;
+      opt.title = o.v;
+      if (o.v === value) opt.selected = true;
+      og.append(opt);
+    }
+    s.append(og);
+  }
+  s.addEventListener("change", () => {
+    onPick(s.value);
+    s.blur();
+  });
+  return s;
+}
+
+function parts(it) {
+  const t = el("div", "parts");
+  const L = it.labels;
+  for (const r of it.rows) {
+    const line = el("div", "part");
+    const name = el("span", "part-name", r.shown);
+    name.title = r.tip;
+    const pat = el("label", "chip-check");
+    const pb = el("input");
+    pb.type = "checkbox";
+    pb.checked = r.pattern;
+    pb.addEventListener("change", () => set("part.pattern", { part: r.key, on: pb.checked }));
+    pat.title = L.patternTip;
+    pat.append(pb, el("span", null, L.pattern));
+    const em = el("label", "chip-check");
+    const eb = el("input");
+    eb.type = "checkbox";
+    eb.checked = r.emit;
+    eb.addEventListener("change", () => set("part.emit", { part: r.key, on: eb.checked }));
+    em.title = L.emitTip;
+    em.append(eb, el("span", null, L.emit));
+    line.append(name, materialSelect(it.groups, r.base, null, (m) => set("part.material", { part: r.key, material: m })), pat, em);
+    t.append(line);
+    if (r.emit) {
+      const e = el("div", "part emission");
+      e.append(el("span", "part-name"));
+      const c = el("input");
+      c.type = "color";
+      c.value = r.emitColor;
+      c.title = L.emitColorTip;
+      c.addEventListener("input", () => set("part.emit_color", { part: r.key, color: c.value }));
+      const n = el("input", "num mono");
+      n.type = "number";
+      n.min = 0;
+      n.step = 1;
+      n.value = Math.round(r.emitLum);
+      n.title = L.emitLumTip;
+      n.addEventListener("change", () => set("part.emit_lum", { part: r.key, value: Number(n.value) }));
+      e.append(c, n, el("span", "unit", "cd/m²"));
+      t.append(e);
+    }
+  }
+  const all = el("div", "part all");
+  all.append(el("span", "part-name", L.all), materialSelect(it.groups, "", L.chooseAll, (m) => set("parts.all", m)));
+  const ap = el("label", "chip-check");
+  const ab = el("input");
+  ab.type = "checkbox";
+  ab.checked = it.allPattern;
+  ab.addEventListener("change", () => set("parts.pattern_all", ab.checked));
+  ap.title = L.patternAllTip;
+  ap.append(ab, el("span", null, L.pattern));
+  all.append(ap);
+  t.append(all);
+  return t;
+}
+
+const KINDS = { slider, check, radio, select, buttons, note, kv, row, parts };
+const item = (it) => KINDS[it.t](it);
+
+function render(m) {
+  document.getElementById("title").textContent = m.title;
+  document.getElementById("close").title = m.closeTip;
+  document.getElementById("resize").title = m.resizeTip;
+  const main = document.getElementById("main");
+  const scroll = main.scrollTop;
+  const frag = document.createDocumentFragment();
+  for (const s of m.sections) {
+    const sec = el("section");
+    sec.append(el("h2", null, s.title));
+    for (const it of s.items) sec.append(item(it));
+    frag.append(sec);
+  }
+  main.replaceChildren(frag);
+  main.scrollTop = scroll;
+}
+
+// Rust から呼ぶ
+window.krbr = {
+  panel(m) {
+    pending = m;
+    flush();
+  },
+};
+post({ type: "ready" });
+</script>
+</body>
+</html>
