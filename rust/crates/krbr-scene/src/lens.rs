@@ -172,7 +172,11 @@ impl LensSystem {
 
     /// 光線の追跡（レンズの座標：x 右、y 上、z が物体側）。物体側から入れる場合は from_scene = true。通らなければ false
     pub fn trace(&self, o: &mut DVec3, d: &mut DVec3, from_scene: bool) -> bool {
-        let zs = self.vertex_z();
+        self.trace_with(&self.vertex_z(), o, d, from_scene)
+    }
+
+    /// trace と同じ（面の頂点の z を先に求めておく。たくさん追跡するとき）
+    pub fn trace_with(&self, zs: &[f32], o: &mut DVec3, d: &mut DVec3, from_scene: bool) -> bool {
         let n = self.surfaces.len();
         for k in 0..n {
             let i = if from_scene { k } else { n - 1 - k };
@@ -385,6 +389,73 @@ impl LensSystem {
         (g1.abs() < 1e-6).then_some(y1 as f32)
     }
 
+    /// 射出瞳の範囲：フィルムの点 (r, 0)（光軸から r mm）から後ろの面へ向けた光線のうち、レンズを通るものが後ろの面の
+    /// 平面で占める範囲を、少し広げて囲む矩形（x0, y0, x1, y1。mm）。通る光線が無ければ None。
+    /// 範囲は y = 0 について対称で、y = 0 の上で x の幅がいちばん広い（軸対称な光学系で、点が x 軸の上にあるので）。
+    /// 絞ると範囲は後ろの面のごく一部（F 22 で 1 % ほど）になり、後ろの面全体から選ぶと光線の大半が無駄になる
+    pub fn exit_pupil_box(&self, film_distance: f32, r: f64) -> Option<[f64; 4]> {
+        let zs = self.vertex_z();
+        let z_rear = *zs.last().unwrap() as f64;
+        let z_film = z_rear - film_distance as f64;
+        let rear = 0.5 * self.surfaces.last().unwrap().aperture as f64;
+        let passes = |x: f64, y: f64| {
+            let mut o = DVec3::new(r, 0.0, z_film);
+            let mut d = (DVec3::new(x, y, z_rear) - o).normalize();
+            self.trace_with(&zs, &mut o, &mut d, false)
+        };
+        // 通る範囲は円い開口どうしの重なり（凸）なので、y = 0 の上でも、ある x の縦の線の上でも区間になる。
+        // 粗く探して区間の中の点を見つけ、端は二分法で詰める（細かく全部調べるより 10 倍ほど速い。ピントを変えるたびに作る）
+        let bisect = |mut inside: f64, mut outside: f64, f: &dyn Fn(f64) -> bool| {
+            for _ in 0..24 {
+                let m = 0.5 * (inside + outside);
+                if f(m) {
+                    inside = m;
+                } else {
+                    outside = m;
+                }
+            }
+            outside
+        };
+        let seed = |n: usize| (0..n).map(|i| -rear + (i as f64 + 0.5) * 2.0 * rear / n as f64).filter(|&x| passes(x, 0.0)).collect::<Vec<f64>>();
+        let mut hits = seed(128);
+        if hits.is_empty() {
+            hits = seed(2048);
+        }
+        let (&first, &last) = (hits.first()?, hits.last()?);
+        let x0 = bisect(first, -rear, &|x| passes(x, 0.0));
+        let x1 = bisect(last, rear, &|x| passes(x, 0.0));
+        // y の範囲：区間の中のいくつかの x で、y = 0（中）から上の端（外）へ二分法（対称なので下は同じ）
+        let mut y1 = 0.0f64;
+        for k in 0..=8 {
+            let x = x0 + (x1 - x0) * k as f64 / 8.0;
+            if passes(x, 0.0) {
+                y1 = y1.max(bisect(0.0, rear, &|y| passes(x, y)));
+            }
+        }
+        // 格子で見落としがあっても入るように、幅の 8 % 広げる
+        let (mx, my) = (0.08 * (x1 - x0) + 1e-3, 0.08 * (2.0 * y1) + 1e-3);
+        Some([x0 - mx, -y1 - my, x1 + mx, y1 + my])
+    }
+
+    /// 射出瞳の範囲の表：フィルムの光軸からの距離 0〜r_max を bins 個に分け、それぞれの区間（両端と真ん中）の範囲を
+    /// 合わせた矩形（x0, y0, x1, y1）。光線が通らない区間は 0（そこは描かない）
+    pub fn exit_pupil_table(&self, film_distance: f32, r_max: f32, bins: usize) -> Vec<[f32; 4]> {
+        let n = 2 * bins + 1;
+        let boxes: Vec<Option<[f64; 4]>> = (0..n).map(|i| self.exit_pupil_box(film_distance, r_max as f64 * i as f64 / (n - 1) as f64)).collect();
+        (0..bins)
+            .map(|b| {
+                let mut u: Option<[f64; 4]> = None;
+                for bx in boxes[2 * b..=2 * b + 2].iter().flatten() {
+                    u = Some(match u {
+                        None => *bx,
+                        Some(a) => [a[0].min(bx[0]), a[1].min(bx[1]), a[2].max(bx[2]), a[3].max(bx[3])],
+                    });
+                }
+                u.map(|a| a.map(|v| v as f32)).unwrap_or([0.0; 4])
+            })
+            .collect()
+    }
+
     /// フィルムの中央での明るさ（cos⁴θ · A / z² の、光が通る割合を含めた平均）
     pub fn center_weight(&self, film_distance: f32) -> f32 {
         let zs = self.vertex_z();
@@ -421,6 +492,50 @@ impl LensSystem {
         let area = PI * r * r;
         let z = z_rear - z_film;
         (sum / (n * n) as f64 * area / (z * z)) as f32
+    }
+}
+
+#[cfg(test)]
+mod pupil_tests {
+    use super::*;
+
+    /// 射出瞳の矩形の外へ向けた光線は通らず、矩形は絞るほど小さい
+    #[test]
+    fn exit_pupil_box_contains_every_passing_ray() {
+        for (f_number, focus) in [(22.0, 300.0), (8.0, 1000.0), (2.0, 150.0)] {
+        let sys = LensSystem::double_gauss50().stopped_down(f_number);
+        let film = sys.film_distance_for(focus);
+        let zs = sys.vertex_z();
+        let z_rear = *zs.last().unwrap() as f64;
+        let rear = 0.5 * sys.surfaces.last().unwrap().aperture as f64;
+        for r in [0.0, 3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 21.0] {
+            let Some(b) = sys.exit_pupil_box(film, r) else { continue };
+            // 後ろの面全体を細かく調べて、通る光線がすべて矩形の中にあること
+            let n = 400;
+            let mut inside = 0;
+            for j in 0..n {
+                for i in 0..n {
+                    let (x, y) = (-rear + 2.0 * rear * (i as f64 + 0.5) / n as f64, -rear + 2.0 * rear * (j as f64 + 0.5) / n as f64);
+                    let mut o = DVec3::new(r, 0.0, z_rear - film as f64);
+                    let mut d = (DVec3::new(x, y, z_rear) - o).normalize();
+                    if sys.trace(&mut o, &mut d, false) {
+                        assert!(x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3], "r {r}: ({x}, {y}) is outside {b:?}");
+                        inside += 1;
+                    }
+                }
+            }
+            let area = (b[2] - b[0]) * (b[3] - b[1]);
+            if f_number > 20.0 {
+                assert!(area < 0.1 * PI * rear * rear, "r {r}: the box {b:?} is not much smaller than the rear element");
+            }
+            let _ = inside;
+        }
+        }
+        let sys = LensSystem::double_gauss50().stopped_down(22.0);
+        let film = sys.film_distance_for(300.0);
+        let wide = LensSystem::double_gauss50().stopped_down(2.0);
+        let (a, b) = (wide.exit_pupil_box(wide.film_distance_for(300.0), 0.0).unwrap(), sys.exit_pupil_box(film, 0.0).unwrap());
+        assert!((b[2] - b[0]) < 0.5 * (a[2] - a[0]));
     }
 }
 

@@ -307,6 +307,40 @@ fn thin_lens_integrators_agree_and_realistic_lens() {
     }
 }
 
+/// 実レンズを絞ったとき（F 22）：射出瞳から選ぶ方法と、後ろの面全体から選ぶ方法（前の方法）で、画面のどこでも同じ明るさ
+/// （射出瞳の矩形が、通る光線をすべて含んでいる）。中央はピンホールと同じ 1
+#[test]
+#[ignore = "needs a Vulkan GPU with ray tracing"]
+fn realistic_lens_exit_pupil_is_unbiased() {
+    let _g = gpu_lock();
+    let ctx = context();
+    let lens = LensParams { model: LensModel::Realistic, f_number: 22.0, focus_distance_mm: 300.0, natural_vignetting: true, ..Default::default() };
+    let pupil = render_uniform_env(&ctx, &lens, 256);
+    std::env::set_var("KRBR_LENS_FULL_DISK", "1");
+    let full = render_uniform_env(&ctx, &lens, 8192);
+    std::env::remove_var("KRBR_LENS_FULL_DISK");
+    // 画面を 4 x 4 の区画に分けて、区画の平均を比べる
+    let block = |img: &ImageF, bx: u32, by: u32| {
+        let (w, h) = (img.width / 4, img.height / 4);
+        let mut s = 0.0f64;
+        for y in by * h..(by + 1) * h {
+            for x in bx * w..(bx + 1) * w {
+                s += img.rgba[((y * img.width + x) * 4 + 1) as usize] as f64;
+            }
+        }
+        s / (w * h) as f64
+    };
+    for by in 0..4 {
+        for bx in 0..4 {
+            let (a, b) = (block(&pupil.color, bx, by), block(&full.color, bx, by));
+            println!("block {bx},{by}: exit pupil {a:.4}, full disk {b:.4}");
+            assert!((a / b - 1.0).abs() < 0.04, "block {bx},{by}: {a} vs {b}");
+        }
+    }
+    let c = value_at(&pupil.color, W as i32 / 2, H as i32 / 2, 3);
+    assert!((c - 1.0).abs() < 0.05, "center {c}");
+}
+
 /// 実レンズ：ピントを変えても画角が変わらない（画面の端の光源の像の位置が動かない）。以前はフィルムの大きさを
 /// 薄いレンズの近似で決めていたので、ピントを合わせ直すたびに基板の見かけの大きさが変わった
 #[test]

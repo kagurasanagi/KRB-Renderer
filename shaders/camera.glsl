@@ -123,14 +123,25 @@ CameraRay generateCameraRay(vec2 ndc, inout Rng rng) {
     r.imageScale = 1.0;
     uint model = lensModel();
     if (model == LENS_REALISTIC) {
-        // フィルムの点（像は上下左右が逆になる）から、後ろの面の有効径の中の点へ
+        // フィルムの点（像は上下左右が逆になる）から、射出瞳（後ろの面のうち、光がレンズを通る範囲）の中の点へ。
+        // 範囲はフィルムの光軸からの距離ごとの表（lensPupil。点が +x 軸の上のときの矩形）を、点の向きへ回して使う。
+        // 後ろの面全体から選ぶと、絞ったとき（F 22 など）光線の大半がレンズの中で止まって無駄になる
         vec3 pf = vec3(-ndc.x * F.lens4.x, ndc.y * F.lens4.y, F.lens4.z);
         int n = int(F.lens3.w + 0.5);
         float zRear = F.lensSurfaces[n - 1].y;
-        vec3 pr = vec3(concentricDisk(rnd2(rng)) * F.lens4.w, zRear);
+        float rf = length(pf.xy);
+        int bin = min(int(rf / max(F.lens5.x, 1e-6) * float(KRBR_LENS_PUPIL_BINS)), KRBR_LENS_PUPIL_BINS - 1);
+        vec4 box = F.lensPupil[bin];
+        // 開発用（lens5.y）：後ろの面全体を囲む矩形から選ぶ（前の方法と同じ分布の広さ）
+        if (F.lens5.y > 0.5) box = vec4(-F.lens4.w, -F.lens4.w, F.lens4.w, F.lens4.w);
+        float area = (box.z - box.x) * (box.w - box.y);
+        vec2 q = mix(box.xy, box.zw, rnd2(rng));
+        vec2 axis = rf > 1e-6 ? pf.xy / rf : vec2(1.0, 0.0);
+        vec3 pr = vec3(axis.x * q.x - axis.y * q.y, axis.y * q.x + axis.x * q.y, zRear);
+        if (F.lens5.y > 0.5) area = (box.z - box.x) * (box.w - box.y);
         vec3 o = pf, d = normalize(pr - pf);
         float dz = zRear - F.lens4.z;
-        r.weight = pow4(d.z) * PI * F.lens4.w * F.lens4.w / (dz * dz) * F.lens3.z;
+        r.weight = area > 0.0 ? pow4(d.z) * area / (dz * dz) * F.lens3.z : 0.0;
         if (!traceRealisticLens(o, d)) r.weight = 0.0;
         vec3 R = camRightN(), U = camUpN(), W = F.camForward.xyz;
         r.origin = F.camPos.xyz + o.x * R + o.y * U + o.z * W;

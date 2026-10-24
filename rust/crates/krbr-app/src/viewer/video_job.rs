@@ -170,7 +170,7 @@ impl App {
             self.start_camera(self.st.display.w, self.st.display.h);
         }
         let s = self.video_dialog.settings.clone();
-        let writer = VideoWriter::start(&VideoFormat { path: path.clone(), width: s.width, height: s.height, fps: s.fps, bitrate: s.bitrate() })?;
+        let writer = VideoWriter::start(&VideoFormat { path: path.clone(), width: s.width, height: s.height, fps: s.fps, bitrate: s.bitrate(), quality: None, hardware: true })?;
         let st = &mut self.st;
         let restore = Restore { target: st.target, distance: st.distance, elevation: st.elevation, azimuth: st.azimuth, size_mode: st.size_mode, max_spp: st.max_spp, denoise: st.denoise, paused: st.paused };
         let b = &self.prep.scene.board;
@@ -194,6 +194,10 @@ impl App {
             if let Some(p) = self.test.o.video.take() {
                 let s = &mut self.video_dialog.settings;
                 (s.width, s.height, s.seconds, s.fps, s.spp) = (320, 180, 1.0, 10, 16);
+                if let Some(n) = std::env::var("KRBR_TEST_VIDEO_SPP").ok().and_then(|v| v.parse().ok()) {
+                    (s.width, s.height, s.spp, s.seconds) = (1280, 720, n, 0.2);
+                    s.denoise = std::env::var_os("KRBR_TEST_VIDEO_NODENOISE").is_none();
+                }
                 if let Err(e) = self.start_video(p) {
                     error!("video (test): {e}");
                 }
@@ -217,6 +221,10 @@ impl App {
         };
         let rgba = image_io::tonemap_rgba8(&img, self.st.exposure, &self.st.glow_params());
         let job = self.video.as_mut().unwrap();
+        // 開発用：エンコードする前のコマを PNG でも書く（画質の比べ用）
+        if let Some(dir) = std::env::var_os("KRBR_VIDEO_RAW_DIR") {
+            let _ = image_io::save_png_rgba8(&PathBuf::from(dir).join(format!("raw_{:04}.png", job.frame)), job.s.width, job.s.height, &rgba);
+        }
         if let Err(e) = job.writer.as_mut().unwrap().push(rgba) {
             return self.end_video(Some(e));
         }

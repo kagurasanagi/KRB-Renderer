@@ -54,6 +54,8 @@ pub const VCM_MAX_CELL_WALK: u32 = 4096;
 
 /// 実レンズの面の数の上限（FrameUbo::lens_surfaces と GLSL の lensSurfaces の長さ）
 pub const MAX_LENS_SURFACES: usize = 16;
+/// 実レンズの射出瞳の表の区間の数（フィルムの光軸からの距離を分ける。FrameUbo::lens_pupil と GLSL の lensPupil の長さ）
+pub const LENS_PUPIL_BINS: usize = 16;
 
 /// 輝度の重み（リニア sRGB / Rec. 709 の原色での Y）。発光体の選び方（Rust の emitter_power と GLSL の emitterPdfA）は
 /// 同じ重みでないと MIS の確率密度が食い違うので、どちらもこの値を使う
@@ -94,6 +96,7 @@ pub fn glsl_defines() -> Vec<(String, String)> {
         ("VCM_COUNTER_MERGE_TRUNCATED", VCM_COUNTER_MERGE_TRUNCATED),
         ("VCM_SPLAT_FLOATS_PER_PIXEL", VCM_SPLAT_FLOATS_PER_PIXEL),
         ("MAX_LENS_SURFACES", MAX_LENS_SURFACES as u32),
+        ("LENS_PUPIL_BINS", LENS_PUPIL_BINS as u32),
     ]
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))

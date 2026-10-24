@@ -14,8 +14,12 @@ pub struct VideoFormat {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    /// ビットレート（bit/s）
+    /// ビットレート（bit/s）。quality が None のとき（平均のビットレートを決める）
     pub bitrate: u32,
+    /// 画質を決めて、ビットレートはエンコーダーに任せる（0〜100。Some のとき bitrate は上限の目安）
+    pub quality: Option<u32>,
+    /// GPU のエンコーダーを使ってよい
+    pub hardware: bool,
 }
 
 /// 書き込み中の動画。push でフレームを渡し、finish で閉じる
@@ -239,7 +243,7 @@ mod imp {
             MFCreateAttributes(&mut attrs, 2).map_err(e("attributes"))?;
             let attrs = attrs.ok_or("attributes")?;
             // GPU のエンコーダーがあれば使う。書き込みの速さで呼び出し側を待たせない（フレームは自分で順に渡す）
-            attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1).map_err(e("hardware"))?;
+            attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, f.hardware as u32).map_err(e("hardware"))?;
             attrs.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1).map_err(e("throttling"))?;
             let writer = MFCreateSinkWriterFromURL(&HSTRING::from(f.path.as_os_str()), None, &attrs).map_err(e("cannot create the video file"))?;
             let out = video_type(&MFVideoFormat_H264, f)?;
@@ -248,7 +252,20 @@ mod imp {
             let stream = writer.AddStream(&out).map_err(e("H.264 stream"))?;
             let input = video_type(&MFVideoFormat_NV12, f)?;
             input.SetUINT32(&MF_MT_DEFAULT_STRIDE, f.width).map_err(e("stride"))?;
-            writer.SetInputMediaType(stream, &input, None).map_err(e("the H.264 encoder does not accept the frames"))?;
+            // 画質を決める（品質基準の可変ビットレート）。エンコーダーが対応していなければ、平均のビットレートになる
+            let enc = match f.quality {
+                Some(q) => {
+                    let mut a: Option<IMFAttributes> = None;
+                    MFCreateAttributes(&mut a, 3).map_err(e("encoder attributes"))?;
+                    let a = a.ok_or("encoder attributes")?;
+                    a.SetUINT32(&CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_Quality.0 as u32).map_err(e("rate control"))?;
+                    a.SetUINT32(&CODECAPI_AVEncCommonQuality, q.min(100)).map_err(e("quality"))?;
+                    a.SetUINT32(&CODECAPI_AVEncCommonQualityVsSpeed, 100).map_err(e("quality vs speed"))?;
+                    Some(a)
+                }
+                None => None,
+            };
+            writer.SetInputMediaType(stream, &input, enc.as_ref()).map_err(e("the H.264 encoder does not accept the frames"))?;
             writer.BeginWriting().map_err(e("begin writing"))?;
             let _ = ready.send(Ok(()));
             let (w, h) = (f.width as usize, f.height as usize);
@@ -292,6 +309,66 @@ mod imp {
 mod tests {
     use super::*;
 
+    /// エンコーダーの設定ごとの画質（PSNR）と大きさ：KRBR_VIDEO_SOURCE=1920x1080 の PNG を少しずつずらした 60 コマ（30 fps）を書いて読み戻す
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn quality_experiment() {
+        let Some(src) = std::env::var_os("KRBR_VIDEO_SOURCE") else { return };
+        let img = image::open(PathBuf::from(src)).unwrap().to_rgba8();
+        let (w, h) = (img.width(), img.height());
+        let frames: Vec<Vec<u8>> = (0..60u32)
+            .map(|i| {
+                let mut out = vec![0u8; (w * h * 4) as usize];
+                let dx = i * 7;
+                for y in 0..h {
+                    for x in 0..w {
+                        let p = img.get_pixel((x + dx) % w, y).0;
+                        out[((y * w + x) * 4) as usize..][..4].copy_from_slice(&p);
+                    }
+                }
+                out
+            })
+            .collect();
+        let psnr = |a: &[u8], b: &[u8]| {
+            let mut se = 0f64;
+            let mut n = 0f64;
+            for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+                for c in 0..3 {
+                    let d = pa[c] as f64 - pb[c] as f64;
+                    se += d * d;
+                    n += 1.0;
+                }
+            }
+            10.0 * (255.0f64 * 255.0 / (se / n).max(1e-9)).log10()
+        };
+        let configs: Vec<(&str, u32, Option<u32>, bool)> = vec![
+            ("cbr 6M hw", 6_000_000, None, true),
+            ("cbr 6M sw", 6_000_000, None, false),
+            ("cbr 12M hw", 12_000_000, None, true),
+            ("cbr 12M sw", 12_000_000, None, false),
+            ("cbr 25M sw", 25_000_000, None, false),
+            ("q70 sw", 25_000_000, Some(70), false),
+            ("q85 sw", 25_000_000, Some(85), false),
+            ("q85 hw", 25_000_000, Some(85), true),
+        ];
+        for (name, bitrate, quality, hardware) in configs {
+            let path = std::env::temp_dir().join(format!("krbr_q_{}.mp4", name.replace(' ', "_")));
+            let f = VideoFormat { path: path.clone(), width: w, height: h, fps: 30, bitrate, quality, hardware };
+            let mut v = VideoWriter::start(&f).expect("start");
+            for fr in &frames {
+                v.push(fr.clone()).unwrap();
+            }
+            let bytes = v.finish().unwrap();
+            let dec = decode_frames(&path, 100).unwrap();
+            let p: Vec<f64> = dec.iter().zip(&frames).map(|((_, _, d), s)| psnr(d, s)).collect();
+            let mean = p.iter().sum::<f64>() / p.len() as f64;
+            let min = p.iter().cloned().fold(f64::MAX, f64::min);
+            println!("{name:12} {:6.2} MB/2s  mean PSNR {mean:5.2} dB  min {min:5.2} dB  ({} frames)", bytes as f64 / 1e6, dec.len());
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
     /// 書き出した動画のフレームを PNG にして見る（KRBR_VIDEO_DUMP=動画のパス。cargo test -- --ignored dump_video_frames）
     #[cfg(windows)]
     #[test]
@@ -326,7 +403,7 @@ mod tests {
     #[test]
     fn writes_a_small_mp4() {
         let path = std::env::temp_dir().join(format!("krbr_video_test_{}.mp4", std::process::id()));
-        let f = VideoFormat { path: path.clone(), width: 160, height: 90, fps: 30, bitrate: 500_000 };
+        let f = VideoFormat { path: path.clone(), width: 160, height: 90, fps: 30, bitrate: 500_000, quality: None, hardware: true };
         let mut v = VideoWriter::start(&f).expect("start");
         for i in 0..30u32 {
             let mut rgba = vec![0u8; 160 * 90 * 4];

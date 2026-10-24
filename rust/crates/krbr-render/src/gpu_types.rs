@@ -6,7 +6,7 @@ use glam::{UVec4, Vec3, Vec4};
 use krbr_scene::material::{Material, MaterialKind};
 use krbr_scene::spectrum::Rgb2SpecTable;
 
-use crate::shader_consts::{CONDUCTOR_LAMBDA_MIN, CONDUCTOR_LAMBDA_STEP, CONDUCTOR_SAMPLES, LUMINANCE_WEIGHTS, MAX_LENS_SURFACES};
+use crate::shader_consts::{CONDUCTOR_LAMBDA_MIN, CONDUCTOR_LAMBDA_STEP, CONDUCTOR_SAMPLES, LENS_PUPIL_BINS, LUMINANCE_WEIGHTS, MAX_LENS_SURFACES};
 use crate::vk::GpuPod;
 
 #[repr(C)]
@@ -158,6 +158,10 @@ pub struct FrameUbo {
     pub lens3: Vec4,
     pub lens4: Vec4,
     pub lens_surfaces: [Vec4; MAX_LENS_SURFACES],
+    /// 実レンズの射出瞳：x はフィルムの光軸からの距離の上限（表の範囲）
+    pub lens5: Vec4,
+    /// 射出瞳の表：区間ごとの、後ろの面の平面での矩形（x0, y0, x1, y1。フィルムの点が x 軸の上にあるときの向き）
+    pub lens_pupil: [Vec4; LENS_PUPIL_BINS],
 }
 
 #[repr(C)]
@@ -174,7 +178,7 @@ const _: () = assert!(std::mem::size_of::<GpuMaterial>() == 17 * 16);
 const _: () = assert!(std::mem::size_of::<GpuInstanceInfo>() == 64);
 const _: () = assert!(std::mem::size_of::<GpuEmitter>() == 48);
 const _: () = assert!(std::mem::size_of::<GpuLightVertex>() == 96);
-const _: () = assert!(std::mem::size_of::<FrameUbo>() == (22 + MAX_LENS_SURFACES) * 16);
+const _: () = assert!(std::mem::size_of::<FrameUbo>() == (23 + MAX_LENS_SURFACES + LENS_PUPIL_BINS) * 16);
 const _: () = assert!(std::mem::size_of::<PushConstants>() == 8);
 // 金属の表の波長の格子は krbr-scene の表と同じ
 const _: () = assert!(CONDUCTOR_SAMPLES as usize == krbr_scene::conductor::SAMPLES);

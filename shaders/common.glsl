@@ -105,6 +105,8 @@ layout(set = 0, binding = KRBR_BINDING_FRAME, std140) uniform Frame {
     vec4 lens3;
     vec4 lens4;
     vec4 lensSurfaces[KRBR_MAX_LENS_SURFACES];
+    vec4 lens5;       // x: 射出瞳の表のフィルムの距離の上限（mm）
+    vec4 lensPupil[KRBR_LENS_PUPIL_BINS];  // 射出瞳の矩形（x0, y0, x1, y1）。フィルムの点が +x 軸の上のとき
 } F;
 
 layout(set = 0, binding = KRBR_BINDING_INSTANCES, std430) readonly buffer Instances { InstanceInfo instanceInfos[]; };

@@ -130,6 +130,24 @@ fn film_constants_cached(file: &str, f_number: f32, sys: &LensSystem, film_dist:
     v
 }
 
+/// 射出瞳の表（同じレンズ・F 値・フィルムの位置・大きさなら前の結果。ピントが変わるとフィルムの位置が変わる）
+fn exit_pupil_cached(file: &str, f_number: f32, sys: &LensSystem, film_dist: f32, r_max: f32) -> Vec<[f32; 4]> {
+    type Key = (String, u32, u32, u32);
+    static LAST: Mutex<Option<(Key, Vec<[f32; 4]>)>> = Mutex::new(None);
+    let key: Key = (file.to_string(), f_number.to_bits(), film_dist.to_bits(), r_max.to_bits());
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((k, v)) = last.as_ref() {
+        if *k == key {
+            return v.clone();
+        }
+    }
+    let t0 = std::time::Instant::now();
+    let v = sys.exit_pupil_table(film_dist, r_max, crate::shader_consts::LENS_PUPIL_BINS);
+    krbr_core::debug!("lens: exit pupil table in {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
+    *last = Some((key, v.clone()));
+    v
+}
+
 /// GPU で描ける実レンズか（面の数が FrameUbo::lens_surfaces に収まる）。エラーにはファイルの名前を含めない（呼び出し側が付ける）
 fn check_lens_for_gpu(sys: LensSystem) -> Result<LensSystem, String> {
     if sys.surfaces.len() > MAX_LENS_SURFACES {
@@ -202,6 +220,15 @@ pub fn fill_lens(u: &mut FrameUbo, fp: &FrameParams) {
         u.lens3.z = 1.0 / center_weight.max(1e-12);
         u.lens3.w = n as f32;
         u.lens4 = Vec4::new(half_h * cam.aspect, half_h, zs[n - 1] - film_dist, 0.5 * sys.surfaces[n - 1].aperture);
+        // 射出瞳の表（フィルムの隅まで）
+        let r_max = half_h * (1.0 + cam.aspect * cam.aspect).sqrt();
+        let table = exit_pupil_cached(&l.lens_file, l.f_number, &sys, film_dist, r_max);
+        // 開発用：KRBR_LENS_FULL_DISK を付けると、射出瞳を使わずに後ろの面全体から選ぶ（前の方法。比べるため）
+        let full_disk = if std::env::var_os("KRBR_LENS_FULL_DISK").is_some() { 1.0 } else { 0.0 };
+        u.lens5 = Vec4::new(r_max, full_disk, 0.0, 0.0);
+        for (dst, b) in u.lens_pupil.iter_mut().zip(table.iter()) {
+            *dst = Vec4::from_array(*b);
+        }
     }
 }
 
