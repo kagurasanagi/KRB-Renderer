@@ -94,7 +94,7 @@ krbr render board.kicad_pcb --hdr studio.exr --spp 256 --width 1920 --height 108
 **表示の言語**（いまは英語と日本語）は、次の順で決めます。訳の無い言語なら英語で表示します。
 
 1. `--lang ja` か、環境変数 `KRBR_LANG`
-2. メニューの「表示」→「言語」で選んだもの（`%APPDATA%\krbr\state.toml` に覚える。「自動」で 3 以降に戻る）
+2. メニューの「設定」→「言語」で選んだもの（`%APPDATA%\krbr\state.toml` に覚える。「自動」で 3 以降に戻る）
 3. KiCad で選んだ言語（`kicad_common.json` の `system.language`。KiCad が「Default」なら次へ）
 4. OS の言語
 
@@ -192,7 +192,7 @@ STEP 変換器 DLL と OIDN が無くても krbr.exe は動きます（STEP の�
 | `krbr material show <pcb> [--ref U3]` | 部品・部位ごとの材質と、どの段階で決まったか |
 | `krbr material set <pcb> --ref U3 [--part K] --material M` | 部品番号ごとの上書き（基板の設定ファイル `<名前>.krbr` の `[ref.U3]`） |
 | `krbr material set <pcb> --model <パス/ファイル名> [--part K] --material M [--global]` | 3D モデルごとの設定（プロジェクト、または `--global` で全体設定） |
-| `krbr kicad-plugin install` / `uninstall` | KiCad の PCB エディタに「KRB Render でプレビュー」のボタンを足す・消す（下記「KiCad のプラグイン」） |
+| `krbr kicad-plugin status` / `install` / `uninstall` [`--kicad 10.0`] | KiCad の PCB エディタの「KRB Render でプレビュー」のボタン：版ごとの状態、足す・消す（ビューアの「設定 → KiCad プラグイン...」と同じ。下記「KiCad のプラグイン」） |
 | `krbr bench [<pcb>] [--spp 64] [--width 1920 --height 1080]` | 同じ条件でレンダリングの速さを測る（GPU・PC の比較用。基板を省くと同梱のベンチマークの基板。下記） |
 | `krbr geom <pcb>` / `krbr models <pcb>` | 開発用：基板の形状と凹凸タイル（GPU を使わない）／全 3D モデルの読み込みの統計 |
 | `krbr diff <a> <b>` | 開発用：2 枚の画像（PNG / EXR）の差の平均と最大 |
@@ -464,7 +464,7 @@ bump_scale = 0.1
 
 **一時停止**：ボタン列の「一時停止」（`P`、メニューの「表示」、起動時から止めるなら `--paused`）で、サンプルの積み足しを止めます。GPU の負荷がほぼ無くなるので、GPU の弱い PC でも操作できます。止めている間にカメラなどを変えたときは、表示のために 1 サンプルだけ描いて止まります。
 
-**KiCad のプラグイン**：`krbr kicad-plugin install` で、PCB エディタのツールバーに「KRB Render でプレビュー」のボタンを足します（KiCad 9 以降のユーザーフォルダ `ドキュメント\KiCad\<版>\scripting\plugins\krbr_preview` に、`kicad_plugin/krbr_preview` の中身と、この `krbr.exe` の場所を書く。`--dir` で場所を指定、`uninstall` で削除）。KiCad を開き直すか、PCB エディタの「ツール → 外部プラグイン → プラグインを再読み込み」で出ます。押すと、開いている基板のファイルをビューアで開きます（コンソールは出さず、ログは基板ごとに `%TEMP%\krbr_preview_<基板のパスのハッシュ>.log`。同じ基板のビューアが開いていれば二重には開かない。ビューアが起動の直後に終わってしまったときは、ログの場所を添えてメッセージを出す）。`uninstall` は、入っていなかったときもそう表示します。ビューアは保存を監視しているので、KiCad で保存するたびに描き直されます。旧来の Action Plugin（SWIG の `pcbnew`）を使っています。KiCad 9 で非推奨になり、KiCad 11 で無くなる予定なので、そのときは IPC API のプラグイン（`plugin.json`）に移します。
+**KiCad のプラグイン**：ビューアのメニューの「設定 → KiCad プラグイン...」で、PCB エディタのツールバーに「KRB Render でプレビュー」のボタンを足します。KiCad は版ごとに別のユーザーフォルダを使うので、見つかった版（9.0、10.0、nightly など）ごとに状態（未登録・登録済み・別の `krbr.exe` を指している・指している `krbr.exe` が無い・ファイルが古い）を出し、版ごとに登録・解除します。版は、ユーザーフォルダ（`KICAD_DOCUMENTS_HOME`、無ければ `ドキュメント\KiCad\<版>`。ドキュメントを OneDrive などへ移していればその場所）、レジストリのアンインストールの情報（`KiCad <版>` の `InstallLocation`）、`Program Files\KiCad\<版>` から探します。登録すると、その版の `scripting\plugins\krbr_preview` に、exe に埋め込んだ `kicad_plugin/krbr_preview` の中身と、この `krbr.exe` の場所を書きます。ビューアは起動のたびに、登録済みの版のうち、指している `krbr.exe` が無くなった版（フォルダを移した）と、ファイルが古い版（`krbr.exe` を更新した）を直します（未登録の版と、まだ有る別の `krbr.exe` を指している版には触らない）。コマンドラインでは `krbr kicad-plugin status`／`install`／`uninstall`（`--kicad 10.0` で版を、`--dir` で場所を指定。省くとすべての版）。登録の後は KiCad を開き直すか、PCB エディタの「ツール → 外部プラグイン → プラグインを再読み込み」で出ます。押すと、開いている基板のファイルをビューアで開きます（コンソールは出さず、ログは基板ごとに `%TEMP%\krbr_preview_<基板のパスのハッシュ>.log`。同じ基板のビューアが開いていれば二重には開かない。ビューアが起動の直後に終わってしまったときは、ログの場所を添えてメッセージを出す）。ビューアは保存を監視しているので、KiCad で保存するたびに描き直されます。旧来の Action Plugin（SWIG の `pcbnew`）を使っています。KiCad 9 で非推奨になり、KiCad 11 で無くなる予定なので、そのときは IPC API のプラグイン（`plugin.json`）に移します。
 
 **配布用の一式**：`powershell -ExecutionPolicy Bypass -File scripts\make_dist.ps1`（ビルド済みなら `-NoBuild`）で、`dist\KRB-Renderer-<版>-win64\` と、その zip を作ります（約 100 MB、zip で約 65 MB。`dist/` は git に入れない）。集めるのは `rust\target\release`（krbr.exe とシェーダ）、`build\release\step`（STEP 変換器）、`third_party\oidn\bin`（OIDN）、Visual Studio の再頒布用の Visual C++ ランタイムです。フォルダごとどこへ置いても動きます（exe と同じフォルダのものだけを使う）。中身は次のとおりです。
 
@@ -475,7 +475,6 @@ bump_scale = 0.1
 | `dll\step\` | STEP 変換器（`krbr_step.dll`）と OpenCASCADE の DLL |
 | `dll\oidn\` | ノイズ除去（`OpenImageDenoise*.dll`、`tbb12.dll`。CPU と CUDA のデバイス） |
 | `dll\vcruntime\` | Visual C++ ランタイム（`msvcp140*.dll`、`vcruntime140*.dll`、`concrt140.dll` の再頒布用ファイル。インストール不要） |
-| `install_kicad_plugin.bat`、`uninstall_kicad_plugin.bat`、`kicad_plugin\` | KiCad のプラグインと、そのインストール・削除（同じフォルダの `krbr.exe` を使う） |
 | `README.txt`、`licenses\` | 使い方と、同梱物のライセンス（OIDN・oneTBB・OpenCASCADE） |
 
 直下には DLL を置きません。`krbr.exe` は Visual C++ ランタイムを静的に組み込み（`rust\.cargo\config.toml` の `+crt-static`）、起動の直後に `dll\vcruntime` を DLL の探し先に足してから、`dll\step`・`dll\oidn` の DLL を読みます（どちらも無ければ、従来の `step\`・exe の横、開発中の `build\release\step`・`third_party\oidn\bin` を探す）。

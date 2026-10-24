@@ -30,6 +30,7 @@ use winit::window::{Window, WindowId};
 use crate::fl;
 use crate::i18n;
 use crate::kicad_cli::SilkJob;
+use crate::kicad_plugin::{self, PluginWindow};
 use crate::material_cmd::{clear_material, set_material, MaterialSetOptions};
 use crate::selection::{unproject, Outline, Selected};
 use krbr_scene::board_file;
@@ -82,6 +83,8 @@ pub struct TestOptions {
     pub reset_settings: bool,
     /// テストの初めから材質エディタを開いておく
     pub material_editor: bool,
+    /// テストの初めから「設定 → KiCad プラグイン」の窓を開いておく
+    pub kicad_plugin: bool,
     /// テスト中にこの部品番号の部品を選ぶ（クリックの代わり。pick より後）
     pub select: String,
     /// テスト中に「ファイル → 開く...」でこの基板を選んだことにする
@@ -130,6 +133,7 @@ impl TestHooks {
             }
             st.req.reset_all |= self.o.reset_settings;
             st.req.material_editor |= self.o.material_editor;
+            st.req.kicad_plugin |= self.o.kicad_plugin;
             match self.o.view.as_str() {
                 "top" => st.req.view_preset = Some(TOP_VIEW),
                 "bottom" => st.req.view_preset = Some(BOTTOM_VIEW),
@@ -359,6 +363,8 @@ struct Requests {
     assign_all: Option<String>,
     /// 材質エディタを開く（テスト）
     material_editor: bool,
+    /// メニュー「設定 → KiCad プラグイン...」：その窓を開く
+    kicad_plugin: bool,
     /// 「ファイル → 開く...」
     open_board: bool,
     /// この基板を開く（テスト。ダイアログの代わり）
@@ -790,6 +796,8 @@ struct App {
     /// 材質エディタ（別の窓）と、そこからの頼みごと（次のフレームの初めに反映する）
     editor: MaterialEditor,
     editor_actions: Vec<EditorAction>,
+    /// 「設定 → KiCad プラグイン」の窓
+    plugin_window: PluginWindow,
     /// シーンを組み直した・材質を差し替えた回数（材質エディタの部品のプレビューを作り直す目安）
     scene_epoch: u64,
     /// 選んだ部品の輪郭線を重ねるか
@@ -2574,7 +2582,8 @@ impl App {
                         st.req.reset_all = true;
                         ui.close();
                     }
-                    ui.separator();
+                });
+                ui.menu_button(fl!("menu-settings"), |ui| {
                     ui.menu_button(fl!("menu-language"), |ui| {
                         if ui.add(egui::Button::new(fl!("language-auto")).selected(language_choice.is_none())).on_hover_text(fl!("language-auto-tip")).clicked() {
                             st.req.language = Some(None);
@@ -2588,6 +2597,11 @@ impl App {
                             }
                         }
                     });
+                    ui.separator();
+                    if ui.button(fl!("menu-kicad-plugin")).on_hover_text(fl!("menu-kicad-plugin-tip")).clicked() {
+                        st.req.kicad_plugin = true;
+                        ui.close();
+                    }
                 });
                 ui.menu_button(fl!("menu-help"), |ui| {
                     ui.label(fl!("help-rotate"));
@@ -2686,6 +2700,7 @@ impl App {
             let scope = &mut self.assign_scope;
             let actions = self.editor.ui(root.ctx(), &self.library, info.as_ref(), &mut |ui| scope_radios(ui, scope));
             self.editor_actions.extend(actions);
+            self.plugin_window.ui(root.ctx());
         });
         self.egui_state.as_mut().unwrap().handle_platform_output(self.window.as_ref().unwrap(), full.platform_output);
         let primitives = egui_ctx.tessellate(full.shapes, full.pixels_per_point);
@@ -2900,6 +2915,9 @@ impl App {
         }
         if std::mem::take(&mut self.st.req.material_editor) {
             self.editor.open = true;
+        }
+        if std::mem::take(&mut self.st.req.kicad_plugin) {
+            self.plugin_window.show();
         }
         if let Some(r) = self.st.req.select_reference.take() {
             let model = self.prep.board.footprints.iter().find(|f| f.reference == r).map(|f| if f.models.is_empty() { None } else { Some(0) });
@@ -3503,6 +3521,7 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         library,
         editor: MaterialEditor::default(),
         editor_actions: Vec::new(),
+        plugin_window: PluginWindow::default(),
         scene_epoch: 0,
         show_outline: true,
         material_error: String::new(),
@@ -3553,6 +3572,10 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
     // テストモードは、決まったフレームで操作を流し込むので、これまでどおり読み終えてから始める
     let pcb = vo.common.pcb.clone();
     let background = !pcb.as_os_str().is_empty() && vo.test.frames == 0 && !vo.hidden;
+    // 登録済みの KiCad のプラグインを直す（フォルダを移した・krbr.exe を更新した）。テストでは KiCad のフォルダに触らない
+    if vo.test.frames == 0 && !vo.hidden {
+        std::thread::spawn(kicad_plugin::repair_installed);
+    }
     let prep = if pcb.as_os_str().is_empty() || background {
         // 読み込みの間に映すのは内蔵のスタジオ（--hdr は基板を読んだときに使う）
         prepare_empty(&RenderOptions { pcb: PathBuf::new(), hdr: if background { STUDIO.into() } else { vo.common.hdr.clone() }, ..vo.common.clone() })

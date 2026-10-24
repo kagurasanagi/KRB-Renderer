@@ -1,7 +1,7 @@
 # KiCad の PCB エディタのツールバーに「KRB Render でプレビュー」（英語では Preview in KRB Render）を出す Action Plugin（KiCad 9 / 10）。
 # 押すと、開いている基板のファイルを krbr（Rust 版のビューア）で開く。ビューアは保存を監視しているので、
 # KiCad で保存するたびに描き直される。
-# インストール：krbr kicad-plugin install（このフォルダと krbr.exe の場所を KiCad のユーザーフォルダへ書く）
+# インストール：ビューアの「設定 → KiCad プラグイン」か krbr kicad-plugin install（このフォルダと krbr.exe の場所を、KiCad の版ごとのユーザーフォルダへ書く）
 import hashlib
 import os
 import subprocess
@@ -30,7 +30,7 @@ _TEXTS = {
         "name": "Preview in KRB Render",
         "description": "Show the open board in KRB Render (a physically based renderer). It is redrawn every time you save.",
         "not_saved": "The board has not been saved yet. Save it once, then press the button again.",
-        "no_exe": "krbr.exe was not found. Reinstall with krbr kicad-plugin install, or set its location in the KRBR_EXE environment variable.",
+        "no_exe": "krbr.exe was not found (was it moved or deleted?). Start krbr.exe once and it records its new location (see Settings > KiCad plugin), or set its location in the KRBR_EXE environment variable.",
         "already_open": "A viewer for this board is already open. It is redrawn whenever you save in KiCad.",
         "exited": "The viewer stopped right after starting (exit code {code}).\nLog: {log}",
     },
@@ -38,7 +38,7 @@ _TEXTS = {
         "name": "KRB Render でプレビュー",
         "description": "開いている基板を KRB Render（物理ベースのレンダラー）で表示します。保存するたびに描き直します。",
         "not_saved": "基板がまだ保存されていません。いったん保存してから押してください。",
-        "no_exe": "krbr.exe が見つかりません。krbr kicad-plugin install でインストールし直すか、環境変数 KRBR_EXE に場所を設定してください。",
+        "no_exe": "krbr.exe が見つかりません（移動・削除した？）。krbr.exe を一度起動すると、新しい場所を書き直します（「設定 → KiCad プラグイン」）。または環境変数 KRBR_EXE に場所を設定してください。",
         "already_open": "この基板のビューアはもう開いています。KiCad で保存すると、そちらが描き直されます。",
         "exited": "ビューアが起動の直後に終了しました（終了コード {code}）。\nログ: {log}",
     },

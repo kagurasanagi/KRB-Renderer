@@ -32,9 +32,39 @@ menu-reset-view = 視点を戻す
 menu-auto-exposure = 露出を自動で合わせる
 menu-reset-all = 設定をすべて既定に戻す
 menu-reset-all-tip = パネルの設定（環境マップ・露出・積分器・レンズ・色の計算・表面など）を設定ファイルとコマンドラインの値に戻し、この基板について覚えたものを忘れる
+
+## メニュー：設定
+menu-settings = 設定
 menu-language = 言語
 language-auto = 自動
 language-auto-tip = KiCad で選んだ言語、無ければ OS の言語
+menu-kicad-plugin = KiCad プラグイン...
+menu-kicad-plugin-tip = KiCad の PCB エディタのツールバーの「KRB Render でプレビュー」のボタンを、KiCad の版ごとに足す・消す
+
+## KiCad プラグインの窓
+kplug-title = KiCad プラグイン
+kplug-intro = KiCad の PCB エディタのツールバーに「KRB Render でプレビュー」のボタンを足します。プラグインは KiCad の版ごとに別なので、使う版ごとに登録してください。
+kplug-none = KiCad が見つかりません（ドキュメント\KiCad の下のユーザーフォルダも、インストール先もない）。
+kplug-no-program = 本体が見つからない（ユーザーフォルダだけが残っている）
+kplug-too-old = 対象外（KiCad 9 以降のみ）
+kplug-may-break = KiCad 11 でこの種類のプラグイン（SWIG）が無くなるため、この版では動かないことがある
+kplug-state-not-installed = 未登録
+kplug-state-installed = 登録済み
+kplug-state-outdated = 登録済み（プラグインのファイルがこの krbr.exe より古い）
+kplug-state-other-exe = 登録済み（別の krbr.exe：{ $path }）
+kplug-state-missing-exe = 登録済み（指している krbr.exe が無い：{ $path }）
+kplug-state-no-path = 登録済み（krbr.exe の場所が書かれていない）
+kplug-install = 登録
+kplug-update = 更新
+kplug-switch = この krbr.exe に切り替え
+kplug-uninstall = 解除
+kplug-open-folder = フォルダを開く
+kplug-this-exe = この krbr.exe：{ $path }
+kplug-restart-hint = 登録・解除の後は、KiCad を開き直すか、PCB エディタの「ツール → 外部プラグイン → プラグインを再読み込み」を実行してください。
+kplug-installed = KiCad { $version } に登録した
+kplug-uninstalled = KiCad { $version } から解除した
+kplug-failed = 失敗した：{ $error }
+kplug-rescan = 探し直す
 
 ## メニュー：ヘルプ
 menu-help = ヘルプ

@@ -139,14 +139,22 @@ enum MaterialCmd {
 
 #[derive(Subcommand)]
 enum KicadPluginCmd {
-    /// install into every KiCad 9+ user folder (Documents\KiCad\<version>\scripting\plugins), or --dir
+    /// list the KiCad versions found and whether the plugin is installed in each
+    Status,
+    /// install into every KiCad 9+ version found (Documents\KiCad\<version>\scripting\plugins), or one with --kicad / --dir
     Install {
+        /// only this KiCad version (e.g. 10.0)
+        #[arg(long, conflicts_with = "dir")]
+        kicad: Option<String>,
         /// the scripting\plugins folder to install into
         #[arg(long)]
         dir: Option<PathBuf>,
     },
-    /// remove the plugin
+    /// remove the plugin from every KiCad version, or one with --kicad / --dir
     Uninstall {
+        /// only this KiCad version (e.g. 10.0)
+        #[arg(long, conflicts_with = "dir")]
+        kicad: Option<String>,
         #[arg(long)]
         dir: Option<PathBuf>,
     },
@@ -303,6 +311,9 @@ struct ViewArgs {
     /// development: open the material editor during the test
     #[arg(long)]
     test_material_editor: bool,
+    /// development: open "Settings > KiCad plugin" during the test
+    #[arg(long)]
+    test_kicad_plugin: bool,
     /// development: select the part with this reference during the test (instead of --test-pick)
     #[arg(long, default_value = "")]
     test_select: String,
@@ -651,6 +662,7 @@ fn main() {
                     save_as: args.test_save_as.clone(),
                     reset_settings: args.test_reset_settings,
                     material_editor: args.test_material_editor,
+                    kicad_plugin: args.test_kicad_plugin,
                     select: args.test_select.clone(),
                     open: args.test_open.clone(),
                     view: args.test_view.clone(),
@@ -683,8 +695,9 @@ fn main() {
             },
         },
         Command::Mask { cmd: MaskCmd::List } => krbr_app::material_cmd::cmd_mask_list(),
-        Command::KicadPlugin { cmd: KicadPluginCmd::Install { dir } } => krbr_app::kicad_plugin::cmd_install(dir.as_deref()),
-        Command::KicadPlugin { cmd: KicadPluginCmd::Uninstall { dir } } => krbr_app::kicad_plugin::cmd_uninstall(dir.as_deref()),
+        Command::KicadPlugin { cmd: KicadPluginCmd::Status } => krbr_app::kicad_plugin::cmd_status(),
+        Command::KicadPlugin { cmd: KicadPluginCmd::Install { kicad, dir } } => krbr_app::kicad_plugin::cmd_install(dir.as_deref(), kicad.as_deref()),
+        Command::KicadPlugin { cmd: KicadPluginCmd::Uninstall { kicad, dir } } => krbr_app::kicad_plugin::cmd_uninstall(dir.as_deref(), kicad.as_deref()),
         Command::Bench { pcb, spp, width, height } => krbr_app::bench::cmd_bench(&krbr_app::bench::BenchOptions { pcb: pcb.clone(), width: *width, height: *height, spp: *spp }),
         Command::Geom { pcb, dump } => cmd_geom(pcb, dump.as_deref()),
         Command::Diff { a, b } => cmd_diff(a, b),

@@ -3,7 +3,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\make_dist.ps1            # ビルドしてからまとめる
 #   powershell -ExecutionPolicy Bypass -File scripts\make_dist.ps1 -NoBuild   # ビルド済みのものをまとめる
 # 中身：krbr.exe、shaders\、dll\（step：STEP 変換器と OpenCASCADE、oidn：ノイズ除去、vcruntime：Visual C++ ランタイム）、
-#       KiCad のプラグイン（kicad_plugin\）とそのインストール・削除のバッチ、使い方、ライセンス
+#       使い方、ライセンス（KiCad のプラグインは krbr.exe に埋め込んであり、ビューアの「設定 → KiCad プラグイン」で入れる）
 # 直下には DLL を置かない。krbr.exe は Visual C++ ランタイムを静的に組み込んでいて（rust\.cargo\config.toml）、
 # 起動の直後に dll\vcruntime を DLL の探し先に足す（STEP 変換器・OIDN の DLL が使う）
 param(
@@ -42,7 +42,7 @@ foreach ($p in @($rustExe, "$rustShaders\pathtrace.comp.spv", "$stepOut\krbr_ste
 
 Write-Host "== $dst にまとめる"
 if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
-New-Item -ItemType Directory -Force "$dst\shaders", "$dst\dll\step", "$dst\dll\oidn", "$dst\dll\vcruntime", "$dst\kicad_plugin\krbr_preview", "$dst\licenses" | Out-Null
+New-Item -ItemType Directory -Force "$dst\shaders", "$dst\dll\step", "$dst\dll\oidn", "$dst\dll\vcruntime", "$dst\licenses" | Out-Null
 Copy-Item $rustExe $dst
 Copy-Item "$rustShaders\*.spv" "$dst\shaders"
 Copy-Item "$stepOut\krbr_step.dll", "$stepOut\TK*.dll" "$dst\dll\step"
@@ -55,9 +55,6 @@ foreach ($f in @("msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "vcruntime1
 }
 $rootDlls = Get-ChildItem "$dst\*.dll"
 if ($rootDlls) { throw "直下に DLL があります: $($rootDlls.Name -join ', ')" }
-# KiCad のプラグインと、そのインストール・削除（バッチは同じフォルダの krbr.exe を使う）
-Copy-Item "$repo\kicad_plugin\krbr_preview\*" "$dst\kicad_plugin\krbr_preview" -Exclude "krbr_path.txt", "__pycache__"
-Copy-Item "$repo\scripts\install_kicad_plugin.bat", "$repo\scripts\uninstall_kicad_plugin.bat" $dst
 # krbr bench の同梱の基板と、その 3D モデル（基板の設定ファイル .krbr は入れない）
 New-Item -ItemType Directory -Force "$dst\bench" | Out-Null
 Copy-Item "$repo\bench\krbr_bench.kicad_pcb", "$repo\bench\LICENSE.md" "$dst\bench"
@@ -80,9 +77,9 @@ KRB-Renderer $version（Rust 版）  KiCad の基板の物理ベースのレン�
 ・GPU の弱い PC では、ビューアのメニューの下の「一時停止」（P キー）でレンダリングを止めると操作が軽くなります。
 
 ■ KiCad のプラグイン（PCB エディタのツールバーに「KRB Render でプレビュー」のボタン）
-・install_kicad_plugin.bat をダブルクリックすると、KiCad 9 以降に入ります。KiCad を開き直すと出ます。
-・削除は uninstall_kicad_plugin.bat です。
-・このフォルダを移動したら、install_kicad_plugin.bat をもう一度実行してください（krbr.exe の場所を書き直します）。
+・ビューアのメニューの「設定 → KiCad プラグイン...」で、KiCad の版（9.0、10.0 など）ごとに登録・解除します。
+  登録した後、KiCad を開き直すと出ます。
+・このフォルダを移動したら、krbr.exe を一度起動してください（登録済みの版の krbr.exe の場所を書き直します）。
 
 ■ フォルダの中身（フォルダごと移動して使えます。中のファイルは動かさないでください）
 ・krbr.exe          本体
@@ -90,7 +87,6 @@ KRB-Renderer $version（Rust 版）  KiCad の基板の物理ベースのレン�
 ・dll\step\         STEP 変換器（3D モデルの読み込み）と OpenCASCADE
 ・dll\oidn\         ノイズ除去（Intel Open Image Denoise）
 ・dll\vcruntime\    Visual C++ ランタイム（インストール不要）
-・kicad_plugin\     KiCad のプラグイン（install_kicad_plugin.bat で入れる）
 ・bench\           krbr.exe bench で速さを測る基板（3D モデルも同梱。KiCad が無くても動く）
 ・licenses\         同梱物のライセンス
 

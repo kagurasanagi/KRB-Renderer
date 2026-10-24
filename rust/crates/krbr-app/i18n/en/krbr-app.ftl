@@ -32,9 +32,39 @@ menu-reset-view = Reset view
 menu-auto-exposure = Auto exposure
 menu-reset-all = Reset all settings to defaults
 menu-reset-all-tip = Set the panel settings (environment map, exposure, integrator, lens, color computation, surface, ...) back to the values of the settings files and the command line, and forget what was remembered for this board
+
+## Menu: Settings
+menu-settings = Settings
 menu-language = Language
 language-auto = Automatic
 language-auto-tip = The language chosen in KiCad, otherwise the language of the OS
+menu-kicad-plugin = KiCad plugin...
+menu-kicad-plugin-tip = Add or remove the "Preview in KRB Render" button on the KiCad PCB editor toolbar, for each KiCad version
+
+## KiCad plugin window
+kplug-title = KiCad plugin
+kplug-intro = Adds a "Preview in KRB Render" button to the KiCad PCB editor toolbar. Each KiCad version has its own plugins, so install it for each version you use.
+kplug-none = No KiCad was found (no user folder under Documents\KiCad and no installation).
+kplug-no-program = Program not found (only the user folder is left)
+kplug-too-old = Not supported (KiCad 9 or later)
+kplug-may-break = KiCad 11 drops this kind of plugin (SWIG); it may not work in this version
+kplug-state-not-installed = Not installed
+kplug-state-installed = Installed
+kplug-state-outdated = Installed (the plugin files are older than this krbr.exe)
+kplug-state-other-exe = Installed for another krbr.exe: { $path }
+kplug-state-missing-exe = Installed, but its krbr.exe is gone: { $path }
+kplug-state-no-path = Installed, but the location of krbr.exe is not recorded
+kplug-install = Install
+kplug-update = Update
+kplug-switch = Use this krbr.exe
+kplug-uninstall = Remove
+kplug-open-folder = Open folder
+kplug-this-exe = This krbr.exe: { $path }
+kplug-restart-hint = After installing or removing, restart KiCad, or in the PCB editor use Tools > External Plugins > Refresh Plugins.
+kplug-installed = Installed for KiCad { $version }
+kplug-uninstalled = Removed from KiCad { $version }
+kplug-failed = Failed: { $error }
+kplug-rescan = Search again
 
 ## Menu: Help
 menu-help = Help
