@@ -478,9 +478,66 @@ struct ViewerSettings {
 /// 最大のサンプル数の既定値
 const DEFAULT_MAX_SPP: u32 = 4096;
 
+/// 長さ（mm）を、大きさに合った単位と桁数の文字にする（単位も付ける）：1 mm 未満は µm、1 m 以上は m、1 km 以上は km。
+/// 有効数字はおよそ 3 桁（カメラの距離のように、1 mm 未満から数 km まで変わる値を読めるように）
+fn format_length(mm: f64) -> String {
+    if !mm.is_finite() {
+        return format!("{mm} mm");
+    }
+    let a = mm.abs();
+    let three = |v: f64, unit: &str| {
+        let d = if v.abs() >= 100.0 { 0 } else if v.abs() >= 10.0 { 1 } else { 2 };
+        format!("{v:.d$} {unit}")
+    };
+    if a == 0.0 {
+        "0 mm".into()
+    } else if a < 1.0 {
+        three(mm * 1000.0, "µm")
+    } else if a < 1000.0 {
+        three(mm, "mm")
+    } else if a < 1.0e6 {
+        three(mm / 1000.0, "m")
+    } else {
+        three(mm / 1.0e6, "km")
+    }
+}
+
 /// ピントの距離：カメラの前方向に測った、点までの距離（mm）。点がカメラの後ろや真横なら 1 mm（レンズの計算が壊れないように）
 fn focus_distance_to(point: Vec3, cam: &Camera) -> f32 {
     (point - cam.position).dot(cam.forward).max(1.0)
+}
+
+/// 基板が画面に写っているか
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoardInView {
+    Visible,
+    /// 画面の外（カメラの後ろ・画面の外側）
+    Outside,
+    /// 写っているが、遠すぎて点のように小さい
+    TooSmall,
+}
+
+/// これより小さく（画面の高さに対する割合で）写っていたら「遠すぎる」
+const TOO_SMALL_EXTENT: f32 = 0.02;
+
+/// カメラの前にある点の、画面の上での広がり（縦横の大きい方。画面の高さを 1 とした割合）。前に点が無ければ 0
+fn projected_extent(cam: &Camera, pts: &[Vec3]) -> f32 {
+    let (mut lo, mut hi) = (glam::Vec2::splat(f32::MAX), glam::Vec2::splat(f32::MIN));
+    for p in pts {
+        let v = *p - cam.position;
+        let z = v.dot(cam.forward);
+        if z <= 1e-3 {
+            continue;
+        }
+        let q = glam::Vec2::new(v.dot(cam.right), v.dot(cam.up)) / (z * 2.0 * cam.tan_half_fov_y);
+        lo = lo.min(q);
+        hi = hi.max(q);
+    }
+    if lo.x > hi.x {
+        0.0
+    } else {
+        (hi - lo).max_element()
+    }
 }
 
 /// 点がすべて画面の外か：すべてカメラの後ろ、またはすべて画面の同じ辺の外側（一部でも写っていれば false）
@@ -1635,9 +1692,9 @@ impl App {
             // KiCad の座標（mm）と、基板の上面からの高さ
             let (cx, cy) = (board_center.x, board_center.y);
             let t = st.target;
-            ui.label(fl!("camera-target", x = format!("{:.1}", t.x as f64 + cx), y = format!("{:.1}", t.z as f64 + cy), distance = format!("{:.0}", st.distance)));
+            ui.label(fl!("camera-target", x = format_length(t.x as f64 + cx), y = format_length(t.z as f64 + cy), distance = format_length(st.distance as f64)));
             let p = cam.position;
-            ui.label(fl!("camera-position", x = format!("{:.1}", p.x as f64 + cx), y = format!("{:.1}", p.z as f64 + cy), height = format!("{:.0}", p.y as f64 - board_half_thickness)));
+            ui.label(fl!("camera-position", x = format_length(p.x as f64 + cx), y = format_length(p.z as f64 + cy), height = format_length(p.y as f64 - board_half_thickness)));
         }
         ui.horizontal(|ui| {
             if ui.add_enabled(has_board, egui::Button::new(fl!("camera-fit"))).on_hover_text(fl!("toolbar-fit-tip")).clicked() {
@@ -1724,10 +1781,20 @@ impl App {
         orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, vp.w as f32 / vp.h.max(1) as f32)
     }
 
-    /// 基板が画面に写っていない（基板の範囲の点がすべてカメラの後ろか、すべて画面の同じ側の外）
-    fn board_out_of_view(&self) -> bool {
+    /// 基板が画面に写っているか（見失ったときに「全体を表示」を案内する）
+    fn board_visibility(&self) -> BoardInView {
         let pts = &self.prep.scene.framing_points;
-        !pts.is_empty() && points_out_of_view(&self.view_camera(), pts)
+        if pts.is_empty() {
+            return BoardInView::Visible;
+        }
+        let cam = self.view_camera();
+        if points_out_of_view(&cam, pts) {
+            BoardInView::Outside
+        } else if projected_extent(&cam, pts) < TOO_SMALL_EXTENT {
+            BoardInView::TooSmall
+        } else {
+            BoardInView::Visible
+        }
     }
 
     /// 画面の点（物理ピクセル）を通る視線：カメラと方向
@@ -1762,7 +1829,7 @@ impl App {
             if self.prep.cfg.lens.model == LensModel::Pinhole {
                 self.prep.cfg.lens.model = LensModel::Thin;
             }
-            self.last_update = fl!("focus-set", mm = format!("{:.1}", focus_distance_to(point, &c)));
+            self.last_update = fl!("focus-set", mm = format_length(focus_distance_to(point, &c) as f64));
             self.st.changed.frame = true;
         }
     }
@@ -2528,7 +2595,7 @@ impl App {
                 ui.separator();
                 ui.weak(format!("EV {:+.2}", st.exposure));
                 ui.separator();
-                ui.weak(fl!("status-camera", distance = format!("{:.0}", st.distance))).on_hover_text(fl!("status-camera-tip"));
+                ui.weak(fl!("status-camera", distance = format_length(st.distance as f64))).on_hover_text(fl!("status-camera-tip"));
                 ui.separator();
                 ui.weak(fl!("status-gpu", name = info.name.as_str(), method = method));
                 for (text, busy) in &notes {
@@ -2780,8 +2847,10 @@ impl App {
             }
             central = root.available_rect_before_wrap();
             self.draw_outline(root, central);
-            if self.has_board() && self.board_out_of_view() {
-                let galley = root.painter().layout(fl!("board-out-of-view"), egui::FontId::proportional(16.0), egui::Color32::from_rgb(255, 204, 77), (central.width() - 40.0).max(100.0));
+            let lost = if self.has_board() { self.board_visibility() } else { BoardInView::Visible };
+            if lost != BoardInView::Visible {
+                let text = if lost == BoardInView::TooSmall { fl!("board-too-small") } else { fl!("board-out-of-view") };
+                let galley = root.painter().layout(text, egui::FontId::proportional(16.0), egui::Color32::from_rgb(255, 204, 77), (central.width() - 40.0).max(100.0));
                 let pos = egui::pos2(central.center().x - galley.size().x / 2.0, central.top() + 16.0);
                 let bg = egui::Rect::from_min_size(pos, galley.size()).expand(6.0);
                 root.painter().with_clip_rect(central).rect_filled(bg, 4.0, egui::Color32::from_black_alpha(180));
@@ -3756,6 +3825,20 @@ mod tests {
         assert_eq!(key_action(KeyCode::KeyZ), None);
     }
 
+    /// 長さの表示：大きさに合わせて単位と桁数を変える
+    #[test]
+    fn length_formatting() {
+        assert_eq!(format_length(0.35), "350 µm");
+        assert_eq!(format_length(0.0042), "4.20 µm");
+        assert_eq!(format_length(4.25), "4.25 mm");
+        assert_eq!(format_length(42.5), "42.5 mm");
+        assert_eq!(format_length(186.2), "186 mm");
+        assert_eq!(format_length(2350.0), "2.35 m");
+        assert_eq!(format_length(12.5e6), "12.5 km");
+        assert_eq!(format_length(-1.5), "-1.50 mm");
+        assert_eq!(format_length(0.0), "0 mm");
+    }
+
     /// ピントの点はカメラを動かしても同じ点：距離はカメラの前方向に測る。基板が画面の外かの判定
     #[test]
     fn focus_point_distance_and_out_of_view() {
@@ -3770,6 +3853,9 @@ mod tests {
         // 画面より大きく、両側にはみ出す（真ん中は写っている）なら外ではない
         let around = [Vec3::new(-500.0, 0.0, 0.0), Vec3::new(500.0, 0.0, 0.0)];
         assert!(!points_out_of_view(&cam, &around));
+        // 遠くから見ると小さい（基板 20 mm を 10 m から：画面の高さの約 0.4 %）
+        let far = orbit_camera(Vec3::ZERO, 10_000.0, 90.0, 0.0, 30.0, 1.5);
+        assert!(projected_extent(&far, &near) < TOO_SMALL_EXTENT && projected_extent(&cam, &near) > 0.2);
         let behind = orbit_camera(Vec3::new(0.0, 0.0, 0.0), 100.0, -90.0, 180.0, 30.0, 1.5);
         assert!(points_out_of_view(&behind, &[Vec3::new(0.0, -200.0, 0.0)]));
     }
