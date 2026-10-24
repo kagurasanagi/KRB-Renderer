@@ -113,19 +113,21 @@ pub fn make_frame_ubo(sc: &GpuScene, width: u32, height: u32, fp: &FrameParams, 
 /// 実レンズのピントの距離の下限（焦点距離の何倍か）
 const MIN_FOCUS_IN_FOCAL_LENGTHS: f32 = 1.25;
 
-/// フィルムの中央の明るさ（LensSystem::center_weight。光線を数千本追うので、レンズ・F 値・フィルムの位置が同じなら覚えた値を使う。
-/// fill_lens はフレームごとに呼ばれる）
-fn center_weight_cached(file: &str, f_number: f32, sys: &LensSystem, film_dist: f32) -> f32 {
-    static LAST: Mutex<Option<(String, u32, u32, f32)>> = Mutex::new(None);
+/// フィルムの中央の明るさ（LensSystem::center_weight）と、画角に合うフィルムの高さ（film_height_for_angle）。
+/// 光線を数千本追うので、レンズ・F 値・フィルムの位置・画角が同じなら覚えた値を使う（fill_lens はフレームごとに呼ばれる）
+fn film_constants_cached(file: &str, f_number: f32, sys: &LensSystem, film_dist: f32, tan_half: f32) -> (f32, Option<f32>) {
+    type Key = (String, u32, u32, u32);
+    static LAST: Mutex<Option<(Key, (f32, Option<f32>))>> = Mutex::new(None);
+    let key: Key = (file.to_string(), f_number.to_bits(), film_dist.to_bits(), tan_half.to_bits());
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((f, n, d, w)) = last.as_ref() {
-        if f == file && *n == f_number.to_bits() && *d == film_dist.to_bits() {
-            return *w;
+    if let Some((k, v)) = last.as_ref() {
+        if *k == key {
+            return *v;
         }
     }
-    let w = sys.center_weight(film_dist);
-    *last = Some((file.to_string(), f_number.to_bits(), film_dist.to_bits(), w));
-    w
+    let v = (sys.center_weight(film_dist), sys.film_height_for_angle(film_dist, tan_half as f64));
+    *last = Some((key, v));
+    v
 }
 
 /// GPU で描ける実レンズか（面の数が FrameUbo::lens_surfaces に収まる）。エラーにはファイルの名前を含めない（呼び出し側が付ける）
@@ -193,9 +195,11 @@ pub fn fill_lens(u: &mut FrameUbo, fp: &FrameParams) {
         for i in 0..n {
             u.lens_surfaces[i] = Vec4::new(sys.surfaces[i].radius, zs[i], sys.surfaces[i].ior, 0.5 * sys.surfaces[i].aperture);
         }
-        // フィルムの大きさは、ピントの距離での倍率で設定の画角になるように
-        let half_h = fe * cam.tan_half_fov_y * if front_to_focus > fe * 1.01 { front_to_focus / (front_to_focus - fe) } else { 1.0 };
-        u.lens3.z = 1.0 / center_weight_cached(&l.lens_file, l.f_number, &sys, film_dist).max(1e-12);
+        // フィルムの大きさは、端の主光線（絞りの中心を通る光線）が設定の画角の向きになるように決める。ピントを変えても
+        // 画角（基板の見かけの大きさ）が変わらない。求まらなければ、薄いレンズの近似（ピントの距離での倍率）
+        let (center_weight, film_half_h) = film_constants_cached(&l.lens_file, l.f_number, &sys, film_dist, cam.tan_half_fov_y);
+        let half_h = film_half_h.unwrap_or_else(|| fe * cam.tan_half_fov_y * if front_to_focus > fe * 1.01 { front_to_focus / (front_to_focus - fe) } else { 1.0 });
+        u.lens3.z = 1.0 / center_weight.max(1e-12);
         u.lens3.w = n as f32;
         u.lens4 = Vec4::new(half_h * cam.aspect, half_h, zs[n - 1] - film_dist, 0.5 * sys.surfaces[n - 1].aperture);
     }

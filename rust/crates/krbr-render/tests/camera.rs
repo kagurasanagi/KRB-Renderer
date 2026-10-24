@@ -307,6 +307,27 @@ fn thin_lens_integrators_agree_and_realistic_lens() {
     }
 }
 
+/// 実レンズ：ピントを変えても画角が変わらない（画面の端の光源の像の位置が動かない）。以前はフィルムの大きさを
+/// 薄いレンズの近似で決めていたので、ピントを合わせ直すたびに基板の見かけの大きさが変わった
+#[test]
+#[ignore = "needs a Vulkan GPU with ray tracing"]
+fn realistic_lens_keeps_the_angle_of_view_when_refocusing() {
+    let _g = gpu_lock();
+    let ctx = context();
+    let at = Vec2::new(0.7, 0.0);
+    let mut xs = Vec::new();
+    for focus in [1000.0f32, 400.0, 150.0] {
+        let lens = LensParams { model: LensModel::Realistic, f_number: 8.0, focus_distance_mm: focus, ..Default::default() };
+        let out = render_lights(&ctx, &[at], 4.0, &lens, false, 512, IntegratorKind::Pt);
+        let b = measure_bokeh(&out.color, pixel_of(at.x, at.y), 60, 1);
+        println!("realistic lens, focus {focus} mm: image of the light at x = {:.2} px (expected {:.2})", b.centroid.x, pixel_of(at.x, at.y).x);
+        xs.push(b.centroid.x as f64);
+    }
+    for x in &xs {
+        assert!((x - xs[0]).abs() < 2.0, "{xs:?}");
+    }
+}
+
 /// 画像の R, G, B それぞれの平均
 fn mean_channels(img: &ImageF) -> [f64; 3] {
     let n = (img.rgba.len() / 4) as f64;

@@ -310,6 +310,81 @@ impl LensSystem {
         s
     }
 
+    /// フィルムの高さ y（mm、フィルムの中心から）の点から出て、絞りの中心を通る光線（主光線）が、物体側で軸となす角の正接。
+    /// 主光線の向きだけを見るので、開口（絞りを含む）は無視する。絞りの面が無い・追跡できないなら None
+    pub fn chief_ray_tan(&self, film_distance: f32, y: f64) -> Option<f64> {
+        let stop = self.surfaces.iter().rposition(|s| s.radius == 0.0)?;
+        let mut open = self.clone();
+        for s in &mut open.surfaces {
+            s.aperture *= 1000.0;
+        }
+        let zs = open.vertex_z();
+        let (z_rear, z_stop) = (*zs.last().unwrap() as f64, zs[stop] as f64);
+        let z_film = z_rear - film_distance as f64;
+        // フィルムから絞りまでの部分（座標は絞りの面を 0 にした部分系のもの）
+        let rear_part = LensSystem { surfaces: open.surfaces[stop..].to_vec(), name: String::new() };
+        let start = |a: f64| {
+            let o = DVec3::new(y, 0.0, z_film);
+            (o, (DVec3::new(a, 0.0, z_rear) - o).normalize())
+        };
+        let x_at_stop = |a: f64| -> Option<f64> {
+            let (o, d) = start(a);
+            let (mut o, mut d) = (o - DVec3::new(0.0, 0.0, z_stop), d);
+            rear_part.trace(&mut o, &mut d, false).then_some(o.x)
+        };
+        // 後ろの面のどこへ向ければ絞りの中心を通るか（割線法）
+        let (mut a0, mut a1) = (0.0f64, -0.5 * y);
+        let (mut f0, mut f1) = (x_at_stop(a0)?, x_at_stop(a1)?);
+        for _ in 0..40 {
+            if f1.abs() < 1e-9 || (f1 - f0).abs() < 1e-15 {
+                break;
+            }
+            let a2 = a1 - f1 * (a1 - a0) / (f1 - f0);
+            (a0, f0) = (a1, f1);
+            a1 = a2;
+            f1 = x_at_stop(a1)?;
+        }
+        if f1.abs() > 1e-6 {
+            return None;
+        }
+        let (mut o, mut d) = start(a1);
+        if !open.trace(&mut o, &mut d, false) || d.z.abs() < 1e-12 {
+            return None;
+        }
+        Some((d.x / d.z).abs())
+    }
+
+    /// 主光線が物体側で軸となす角の正接が tan_half になるフィルムの高さ（mm）。ピントを変えても（フィルムの位置が変わっても）
+    /// 画角が変わらないように、フィルムの大きさをこれで決める。端の主光線が追跡できない（画角が広い・ピントが近くてフィルムが
+    /// 大きい）ときは、中心の近くの主光線の傾きから比例で求める（近軸。歪曲は無視する）。それも求まらなければ None
+    pub fn film_height_for_angle(&self, film_distance: f32, tan_half: f64) -> Option<f32> {
+        if tan_half <= 0.0 {
+            return None;
+        }
+        let near = 0.5f64;
+        let paraxial = self.chief_ray_tan(film_distance, near).filter(|t| *t > 0.0).map(|t| (tan_half * near / t) as f32);
+        self.film_height_exact(film_distance, tan_half).or(paraxial)
+    }
+
+    fn film_height_exact(&self, film_distance: f32, tan_half: f64) -> Option<f32> {
+        let g = |y: f64| self.chief_ray_tan(film_distance, y).map(|t| t - tan_half);
+        let (mut y0, mut y1) = (film_distance as f64 * tan_half, film_distance as f64 * tan_half * 1.05);
+        let (mut g0, mut g1) = (g(y0)?, g(y1)?);
+        for _ in 0..40 {
+            if g1.abs() < 1e-10 || (g1 - g0).abs() < 1e-15 {
+                break;
+            }
+            let y2 = y1 - g1 * (y1 - y0) / (g1 - g0);
+            (y0, g0) = (y1, g1);
+            y1 = y2;
+            if y1 <= 0.0 {
+                return None;
+            }
+            g1 = g(y1)?;
+        }
+        (g1.abs() < 1e-6).then_some(y1 as f32)
+    }
+
     /// フィルムの中央での明るさ（cos⁴θ · A / z² の、光が通る割合を含めた平均）
     pub fn center_weight(&self, film_distance: f32) -> f32 {
         let zs = self.vertex_z();
@@ -374,6 +449,25 @@ mod tests {
             }
         }
         sum * (2.0 * r / n as f64).powi(2) / (z_rear - z_film).powi(2)
+    }
+
+    /// ピントをどこに合わせても、フィルムの端の主光線が設定の画角の向きになるフィルムの高さが求まる（ピントで画角が変わらない）
+    #[test]
+    fn film_height_keeps_the_angle_of_view_when_refocusing() {
+        let s = LensSystem::double_gauss50().stopped_down(8.0);
+        let tan_half = 0.25f64;
+        let mut heights = Vec::new();
+        for focus in [70.0f32, 150.0, 300.0, 1000.0, 0.0] {
+            let film = s.film_distance_for(focus);
+            let h = s.film_height_for_angle(film, tan_half).unwrap_or_else(|| panic!("focus {focus}"));
+            // 端の主光線が追跡できれば設定の画角ちょうど。できなければ近軸で求めた値（歪曲の分だけ違ってよい）
+            if let Some(t) = s.chief_ray_tan(film, h as f64) {
+                assert!((t - tan_half).abs() < 0.01, "focus {focus}: tan {t}");
+            }
+            heights.push((focus, film, h));
+        }
+        // 近くに合わせるほどフィルムは遠く、同じ画角にするフィルムは大きい
+        assert!(heights.windows(2).all(|w| w[0].1 > w[1].1 && w[0].2 > w[1].2), "{heights:?}");
     }
 
     /// 絞っても、ピントをどこに合わせても、中央の明るさは 0 にならない（0 だと明るさの補正が無限大になって画面が真っ白になった：
@@ -444,4 +538,3 @@ mod tests {
         assert!("realistc".parse::<LensModel>().is_err());
     }
 }
-
