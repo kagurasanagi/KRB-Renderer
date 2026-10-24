@@ -29,7 +29,7 @@ krbr render board.kicad_pcb --hdr studio.exr --spp 256 --width 1920 --height 108
 
 ### リアルタイム表示（`krbr <pcb>` / `krbr view <pcb>`）
 
-**試作：Web の画面**（`--web-ui`）：ボタン列・ステータスバー・設定パネル・警告の帯を WebView2（Tauri の WebView の部品 `wry`）で描きます。3D 表示は今までどおり Vulkan で描き、その上下・右に WebView を子ウィンドウとして並べます（`krbr-app/web/` の HTML・CSS を exe に埋め込む。データは全体用キャッシュの `webview2\`）。メニューと材質エディタは、まだ egui のままです。WebView2 の分、メモリが 200〜300 MB ほど増えます。
+**画面（WebView2）**：メニュー・ボタン列・ステータスバー・設定パネル・警告の帯・材質エディタ・説明の吹き出しは WebView2（Tauri の WebView の部品 `wry`）で描きます。3D 表示は今までどおり Vulkan で描き、その上下・右・上に WebView を子ウィンドウとして重ねます（`krbr-app/web/` の HTML・CSS・JavaScript を exe に埋め込む。材質の見本と部品のプレビューの画像は `http://krbr.localhost/` で渡す。データは全体用キャッシュの `webview2\`）。WebView2 の分、メモリが 300〜450 MB ほど増えます。`--egui-ui` で前の画面（egui）にできます。WebView2 が使えないとき（ランタイムが無いなど）と、隠したウィンドウのテストでも egui の画面になります。「設定 → KiCad プラグイン」の窓は、まだ egui です。
 
 起動するとすぐウィンドウを出し、基板は裏のスレッドで読み込みます（読み終えるまで 3D 表示に「読み込み中」と出す。その間に GPU の準備も進む）。読めなかったときは、ウィンドウを開いたまま知らせます。
 

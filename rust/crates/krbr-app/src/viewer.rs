@@ -59,7 +59,8 @@ pub struct ViewOptions {
     pub render_ratio: Option<f32>,
     /// 表示の言語（--lang。"ja" など）。None なら環境変数 KRBR_LANG、メニューで選んだもの、KiCad、OS の順
     pub language: Option<String>,
-    /// ボタン列とステータスバーを WebView で描く（--web-ui。試作）
+    /// メニュー・ボタン列・パネル・材質エディタを WebView（WebView2）で描く（既定。--egui-ui なら egui）。
+    /// 隠したウィンドウ（テスト）では作らない。作れなければ egui の画面にする
     pub web_ui: bool,
     /// 開発用のテストの操作（--test-*）
     pub test: TestOptions,
@@ -1552,7 +1553,8 @@ impl App {
         install_fonts(&self.egui_ctx, &self.language);
         self.egui_state = Some(EguiState::new(self.egui_ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, None));
         self.gpu = Some(Gpu { ctx, gpu, swap, prog, tone, denoiser: None, tone_denoised: None, egui_renderer, cmd, acquired, fence, timestamps, ts_period_ms });
-        if let (true, Some(proxy)) = (self.vo.web_ui, self.proxy.clone()) {
+        let hidden = self.vo.hidden || self.test.active();
+        if let (true, false, Some(proxy)) = (self.vo.web_ui, hidden, self.proxy.clone()) {
             let t0 = Instant::now();
             match crate::web_ui::WebUi::new(&window, proxy) {
                 Ok(w) => {
