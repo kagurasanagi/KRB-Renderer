@@ -29,6 +29,7 @@ use winit::window::{Window, WindowId};
 
 use crate::fl;
 
+mod web_about;
 mod web_menu;
 mod web_panel;
 use crate::i18n;
@@ -954,7 +955,10 @@ struct App {
     web: Option<crate::web_ui::WebUi>,
     proxy: Option<EventLoopProxy<crate::web_ui::Wake>>,
     /// ボタン列・ステータスバー・設定パネル・警告の帯の置き場所（egui のポイント。NOTHING なら出さない）
-    web_rects: [egui::Rect; 5],
+    web_rects: [egui::Rect; 6],
+    /// 「KRB Renderer について」を開いている。中身（JSON。開くたびに作り直す。ライセンスのファイルを読むので毎フレームは作らない）
+    about_open: bool,
+    about_json: Option<String>,
     /// --web-ui：材質エディタの窓の場所（egui のポイント。動かす・大きさを変えると変わる。None なら初めの場所）
     editor_rect: Option<egui::Rect>,
     /// --web-ui：開いているメニューのプルダウン
@@ -1566,6 +1570,7 @@ impl App {
             match crate::web_ui::WebUi::new(&window, proxy) {
                 Ok(w) => {
                     info!("web UI: WebView2 ready in {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0);
+                    web_about::publish_icon(w.images());
                     self.web = Some(w);
                 }
                 Err(e) => warn!("web UI: {e}; using the built-in UI"),
@@ -2813,6 +2818,7 @@ impl App {
         let language_choice = self.language_choice.clone();
         let editor_open = self.editor.open;
         let mut toggle_editor = false;
+        let mut open_about = false;
         let board = self.has_board();
         let st = &mut self.st;
         egui::Panel::top("menu").show(root, |ui| {
@@ -2975,11 +2981,19 @@ impl App {
                     for b in KEY_BINDINGS {
                         ui.label(format!("{}: {}", b.label, i18n::get(b.help).unwrap_or_else(|| b.log.to_string())));
                     }
+                    ui.separator();
+                    if ui.button(fl!("menu-about")).clicked() {
+                        open_about = true;
+                        ui.close();
+                    }
                 });
             });
         });
         if toggle_editor {
             self.editor.open = !self.editor.open;
+        }
+        if open_about {
+            self.about_open = true;
         }
     }
 
@@ -3070,6 +3084,8 @@ impl App {
                     }
                 }
                 crate::web_ui::Msg::Click(id) if id == "menu.close" => self.close_web_menu(),
+                crate::web_ui::Msg::Click(id) if id.starts_with("about.") => self.apply_about_click(&id),
+                crate::web_ui::Msg::Open(url) => krbr_core::platform::open_url(&url),
                 // 材質エディタ
                 crate::web_ui::Msg::Set(id, v) if id.starts_with("mated.") => {
                     let info = self.part_info();
@@ -3169,6 +3185,7 @@ impl App {
                 Pane::Panel => self.web_rects[2],
                 Pane::Banner => self.web_rects[3],
                 Pane::Editor => self.web_rects[4],
+                Pane::About => self.web_rects[5],
                 Pane::Menu => menu_rect?,
                 Pane::Tooltip => return None,
             };
@@ -3184,6 +3201,10 @@ impl App {
         rects.push(tip_rect.and_then(px));
         let tip = self.web_tip.as_ref().map(|t| serde_json::json!({ "text": t.text }).to_string());
         let menu = self.web_menu.as_ref().map(|m| self.menu_json(&m.id));
+        if rects[5].is_some() && self.about_json.is_none() {
+            self.about_json = Some(self.about_json());
+        }
+        let about = rects[5].is_some().then(|| self.about_json.clone().unwrap_or_default());
         let editor = rects[4].is_some().then(|| {
             let info = self.part_info();
             let scope = self.scope_json();
@@ -3213,6 +3234,9 @@ impl App {
         }
         if let Some(j) = editor {
             web.send(Pane::Editor, &j);
+        }
+        if let Some(j) = about {
+            web.send(Pane::About, &j);
         }
         if let Some(j) = tip {
             web.send(Pane::Tooltip, &j);
@@ -3309,12 +3333,22 @@ impl App {
                 } else {
                     egui::Rect::NOTHING
                 };
+                // 「について」：ウィンドウの真ん中
+                self.web_rects[5] = if self.about_open {
+                    let size = egui::vec2(780.0f32.min(screen.width() - 40.0), 600.0f32.min(screen.height() - 40.0)).max(egui::vec2(200.0, 200.0));
+                    egui::Rect::from_center_size(screen.center(), size)
+                } else {
+                    egui::Rect::NOTHING
+                };
             } else {
                 let scope = &mut self.assign_scope;
                 let actions = self.editor.ui(root.ctx(), &self.library, info.as_ref(), &mut |ui| scope_radios(ui, scope));
                 self.editor_actions.extend(actions);
             }
             self.plugin_window.ui(root.ctx());
+            if self.web.is_none() {
+                self.about_egui(root.ctx());
+            }
         });
         self.egui_state.as_mut().unwrap().handle_platform_output(self.window.as_ref().unwrap(), full.platform_output);
         let primitives = egui_ctx.tessellate(full.shapes, full.pixels_per_point);
@@ -3950,6 +3984,11 @@ impl ApplicationHandler<crate::web_ui::Wake> for App {
                     self.close_web_menu();
                     return;
                 }
+                // 「について」の外を押した：閉じるだけ
+                if down && self.about_open && self.web.is_some() {
+                    self.about_open = false;
+                    return;
+                }
                 if down && (response.consumed || !self.st.viewport.contains(self.st.last_cursor)) {
                     return; // メニュー・パネルの上での操作はカメラに渡さない
                 }
@@ -4146,7 +4185,9 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         window: None,
         web: None,
         proxy: None,
-        web_rects: [egui::Rect::NOTHING; 5],
+        web_rects: [egui::Rect::NOTHING; 6],
+        about_open: false,
+        about_json: None,
         editor_rect: None,
         web_menu: None,
         web_menu_closed: None,

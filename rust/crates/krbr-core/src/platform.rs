@@ -187,6 +187,49 @@ pub fn reveal_in_file_manager(path: &Path) {
     }
 }
 
+/// URL を既定のブラウザで開く（http・https だけ）
+pub fn open_url(url: &str) {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        crate::warn!("not a web address: {url}");
+        return;
+    }
+    let r = if cfg!(windows) {
+        std::process::Command::new("explorer").arg(url).spawn()
+    } else {
+        std::process::Command::new(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }).arg(url).spawn()
+    };
+    if let Err(e) = r {
+        crate::warn!("cannot open {url}: {e}");
+    }
+}
+
+/// OS の名前と版（"Windows 11 (build 26100)" など）
+pub fn os_description() -> String {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        struct OsVersionInfo {
+            size: u32,
+            major: u32,
+            minor: u32,
+            build: u32,
+            platform: u32,
+            csd: [u16; 128],
+        }
+        #[link(name = "ntdll")]
+        extern "system" {
+            fn RtlGetVersion(info: *mut OsVersionInfo) -> i32;
+        }
+        let mut v = OsVersionInfo { size: std::mem::size_of::<OsVersionInfo>() as u32, major: 0, minor: 0, build: 0, platform: 0, csd: [0; 128] };
+        if unsafe { RtlGetVersion(&mut v) } == 0 {
+            // Windows 11 も版の番号は 10.0（ビルド 22000 から 11）
+            let name = if v.major == 10 && v.build >= 22000 { "11".to_string() } else { format!("{}.{}", v.major, v.minor) };
+            return format!("Windows {name} (build {}, {})", v.build, std::env::consts::ARCH);
+        }
+    }
+    format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH)
+}
+
 /// ユーザーの「ドキュメント」フォルダ。Windows は既知のフォルダ（OneDrive などへ移したらその場所。KiCad と同じ決め方）、
 /// 取れなければ %USERPROFILE%\Documents。ほかは ~/Documents
 pub fn documents_dir() -> Option<PathBuf> {

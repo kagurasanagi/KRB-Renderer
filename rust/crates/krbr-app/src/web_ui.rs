@@ -17,6 +17,7 @@ use wry::{dpi, Rect, WebContext, WebView, WebViewBuilder};
 const STYLE: &str = include_str!("../web/style.css");
 const PANEL_STYLE: &str = include_str!("../web/panel.css");
 const EDITOR_STYLE: &str = include_str!("../web/editor.css");
+const ABOUT_STYLE: &str = include_str!("../web/about.css");
 const TOOLBAR_HTML: &str = include_str!("../web/toolbar.html");
 const STATUS_HTML: &str = include_str!("../web/status.html");
 const PANEL_HTML: &str = include_str!("../web/panel.html");
@@ -24,6 +25,7 @@ const BANNER_HTML: &str = include_str!("../web/banner.html");
 const MENU_HTML: &str = include_str!("../web/menu.html");
 const TOOLTIP_HTML: &str = include_str!("../web/tooltip.html");
 const EDITOR_HTML: &str = include_str!("../web/editor.html");
+const ABOUT_HTML: &str = include_str!("../web/about.html");
 /// どのページにも入れる、説明の吹き出しの仕掛け
 const TIP_JS: &str = include_str!("../web/tip.js");
 
@@ -56,6 +58,8 @@ pub enum Msg {
     Tip { pane: Pane, text: String, rect: [f32; 4] },
     /// 吹き出しの大きさ（CSS の px）
     TipSize(f32, f32),
+    /// リンクを押した（既定のブラウザで開く）
+    Open(String),
     /// 新しい大きさで描き終えた（重ねる WebView を、画面の外で描いてから置くため。pane は受け取ったところで入れる）
     Painted(Pane),
     /// ページを読み終えた（状態を送り直す）
@@ -76,6 +80,7 @@ fn parse(body: &str) -> Option<Msg> {
         "tip" => Some(Msg::Tip { pane: Pane::Toolbar, text: s("text")?, rect: [f("left").unwrap_or(0.0), f("top").unwrap_or(0.0), f("right").unwrap_or(0.0), f("bottom").unwrap_or(0.0)] }),
         "tipsize" => Some(Msg::TipSize(f("width")?, f("height")?)),
         "painted" => Some(Msg::Painted(Pane::Toolbar)),
+        "open" => s("url").map(Msg::Open),
         "ready" => Some(Msg::Ready),
         _ => None,
     }
@@ -97,6 +102,8 @@ pub enum Pane {
     Banner,
     /// 材質エディタ（3D 表示の上に重ねる、動かせる窓）
     Editor,
+    /// 「KRB Renderer について」の窓（真ん中に重ねる）
+    About,
     /// メニューのプルダウン（3D 表示などの上に重ねる）
     Menu,
     /// 説明の吹き出し（いちばん上に重ねる）
@@ -105,7 +112,7 @@ pub enum Pane {
 
 impl Pane {
     /// 作る順（後のものほど上に重なる）
-    pub const ALL: [Pane; 7] = [Pane::Toolbar, Pane::Status, Pane::Panel, Pane::Banner, Pane::Editor, Pane::Menu, Pane::Tooltip];
+    pub const ALL: [Pane; 8] = [Pane::Toolbar, Pane::Status, Pane::Panel, Pane::Banner, Pane::Editor, Pane::About, Pane::Menu, Pane::Tooltip];
 
     /// ページの window.krbr の関数の名前
     fn func(self) -> &'static str {
@@ -115,6 +122,7 @@ impl Pane {
             Pane::Panel => "panel",
             Pane::Banner => "banner",
             Pane::Editor => "editor",
+            Pane::About => "about",
             Pane::Menu => "menu",
             Pane::Tooltip => "tooltip",
         }
@@ -133,6 +141,7 @@ impl Pane {
             Pane::Panel => PANEL_HTML,
             Pane::Banner => BANNER_HTML,
             Pane::Editor => EDITOR_HTML,
+            Pane::About => ABOUT_HTML,
             Pane::Menu => MENU_HTML,
             Pane::Tooltip => TOOLTIP_HTML,
         }
@@ -166,7 +175,7 @@ impl WebUi {
     pub fn new(window: &Window, proxy: EventLoopProxy<Wake>) -> Result<Self, String> {
         let (tx, rx) = mpsc::channel();
         let mut context = WebContext::new(Some(krbr_core::platform::cache_dir().join("webview2")));
-        let style = format!("{STYLE}\n{PANEL_STYLE}\n{EDITOR_STYLE}");
+        let style = format!("{STYLE}\n{PANEL_STYLE}\n{EDITOR_STYLE}\n{ABOUT_STYLE}");
         let images: Images = Images::default();
         let mut views = Vec::new();
         for pane in Pane::ALL {
@@ -340,6 +349,11 @@ impl WebUi {
         msgs
     }
 
+    /// ページの window.krbr の関数を呼ぶ（引数なし。読み終える前なら何もしない）
+    pub fn call(&mut self, pane: Pane, func: &str) {
+        let _ = self.view(pane).view.evaluate_script(&format!("window.krbr && window.krbr.{func} && window.krbr.{func}()"));
+    }
+
     /// 状態を送る（JSON。前に送ったものと同じなら送らない）
     pub fn send(&mut self, pane: Pane, json: &str) {
         let v = self.view(pane);
@@ -363,6 +377,7 @@ mod tests {
         assert_eq!(parse(r#"{"type":"size","width":240,"height":300.5}"#), Some(Msg::MenuSize(240.0, 300.5)));
         assert_eq!(parse(r#"{"type":"tip","text":"a","left":1,"top":2,"right":3,"bottom":4}"#), Some(Msg::Tip { pane: Pane::Toolbar, text: "a".into(), rect: [1.0, 2.0, 3.0, 4.0] }));
         assert_eq!(parse(r#"{"type":"tipsize","width":100,"height":20}"#), Some(Msg::TipSize(100.0, 20.0)));
+        assert_eq!(parse(r#"{"type":"open","url":"https://example.com/"}"#), Some(Msg::Open("https://example.com/".into())));
         assert_eq!(parse(r#"{"type":"ready"}"#), Some(Msg::Ready));
         assert_eq!(parse(r#"{"type":"other"}"#), None);
         assert_eq!(parse("not json"), None);

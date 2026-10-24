@@ -1,0 +1,235 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>/*STYLE*/</style>
+</head>
+<body class="about">
+  <header>
+    <span id="title"></span>
+    <button class="icon-btn" id="close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </header>
+  <div class="hero">
+    <img id="icon" alt="">
+    <div class="hero-text">
+      <div class="app-name" id="name"></div>
+      <div class="tagline" id="tagline"></div>
+      <div class="ver"><span id="version" class="mono"></span><span id="commit" class="mono muted"></span></div>
+      <div class="update" id="update"></div>
+      <div class="links" id="links"></div>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs"></nav>
+  <main class="scroll" id="body"></main>
+  <footer>
+    <button class="btn" id="copy"></button>
+    <span class="note-text accent" id="copied"></span>
+    <span class="spacer"></span>
+    <button class="btn primary" id="ok"></button>
+  </footer>
+<script>
+// 「KRB Renderer について」：Rust が組み立てた内容（JSON）を描く。リンクはこの WebView では開かず、既定のブラウザで開く。
+// 新しい版の有無は、開いたときに GitHub のリリースの API に問い合わせる
+const post = (m) => window.ipc.postMessage(JSON.stringify(m));
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+};
+const close = () => post({ type: "click", id: "about.close" });
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" || e.key === "Enter") {
+    close();
+    e.preventDefault();
+  }
+});
+$("close").addEventListener("click", close);
+$("ok").addEventListener("click", close);
+function link(text, url) {
+  const a = el("a", null, text);
+  a.href = url;
+  a.title = url;
+  a.addEventListener("click", (e) => {
+    e.preventDefault();
+    post({ type: "open", url });
+  });
+  return a;
+}
+
+let model = null;
+let tab = "about";
+let update = null; // 問い合わせの結果（{ kind, latest, url, error }）
+
+// 版の比べ方："v0.2.0" と "0.1.0" など（数字の並びで比べる）
+function newer(a, b) {
+  const p = (s) => String(s).replace(/^v/i, "").split(/[.\-+]/).map((x) => parseInt(x, 10) || 0);
+  const x = p(a), y = p(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  }
+  return false;
+}
+
+async function checkUpdate(m) {
+  update = { kind: "checking" };
+  showUpdate();
+  try {
+    const r = await fetch(m.api, { headers: { Accept: "application/vnd.github+json" }, cache: "no-store" });
+    if (r.status === 404) {
+      update = { kind: "none" };
+    } else if (!r.ok) {
+      update = { kind: "failed", error: "HTTP " + r.status };
+    } else {
+      const j = await r.json();
+      const latest = j.tag_name || j.name || "?";
+      update = { kind: newer(latest, m.version) ? "newer" : "latest", latest, url: j.html_url || m.releases };
+    }
+  } catch (e) {
+    update = { kind: "failed", error: String(e.message || e) };
+  }
+  showUpdate();
+}
+
+function showUpdate() {
+  const box = $("update");
+  box.replaceChildren();
+  if (!model || !update) return;
+  const t = model.text;
+  const icon = el("span", "dot-" + update.kind);
+  box.append(icon);
+  if (update.kind === "checking") box.append(el("span", "muted", t.checking));
+  else if (update.kind === "none") box.append(el("span", "muted", t.none));
+  else if (update.kind === "failed") box.append(el("span", "muted", t.failed.replace("{error}", update.error)));
+  else if (update.kind === "latest") box.append(el("span", null, t.latest.replace("{latest}", update.latest)));
+  else {
+    box.append(el("span", "strong", t.newer.replace("{latest}", update.latest)), link(t.download, update.url));
+  }
+}
+
+function section(title, ...children) {
+  const s = el("div", "block");
+  if (title) s.append(el("h3", null, title));
+  s.append(...children);
+  return s;
+}
+
+function libTable(rows, withVersion) {
+  const t = el("table", "libs");
+  for (const r of rows) {
+    const tr = el("tr");
+    const name = el("td", "lib-name");
+    name.append(link(r.name, r.url));
+    tr.append(name);
+    if (withVersion) tr.append(el("td", "mono muted", r.version));
+    tr.append(el("td", "mono lic", r.license));
+    if (!withVersion) tr.append(el("td", "muted", r.note || ""));
+    t.append(tr);
+  }
+  return t;
+}
+
+function renderBody() {
+  const m = model, t = m.text;
+  for (const b of $("tabs").children) b.classList.toggle("on", b.dataset.tab === tab);
+  const body = $("body");
+  body.replaceChildren();
+  if (tab === "about") {
+    body.append(
+      section(null, el("p", null, t.description), el("p", "made", t.madeWith)),
+      section(null, el("p", "strong", t.copyright), el("p", "muted", t.licenseShort)),
+    );
+    const ul = el("ul", "link-list");
+    for (const [label, url] of [[t.github, m.repo], [t.releases, m.releases], [t.issues, m.issues]]) {
+      const li = el("li");
+      li.append(el("span", null, label + " — "), link(url, url));
+      ul.append(li);
+    }
+    body.append(section(t.links, ul));
+  } else if (tab === "libraries") {
+    body.append(section(t.native, libTable(m.native, false)), section(t.assets, libTable(m.assets, false)), section(t.crates, libTable(m.crates, true)));
+  } else if (tab === "license") {
+    for (const l of m.licenses) {
+      const pre = el("pre", "license", l.text);
+      body.append(section(l.name, pre));
+    }
+    if (m.hasLicenseFolder) {
+      const b = el("button", "btn", t.licenseFolder);
+      b.addEventListener("click", () => post({ type: "click", id: "about.licenses" }));
+      body.append(section(null, b));
+    }
+  } else {
+    const tb = el("table", "env");
+    for (const [k, v] of envRows()) {
+      const tr = el("tr");
+      tr.append(el("td", "muted", k), el("td", "mono", v));
+      tb.append(tr);
+    }
+    body.append(section(null, tb));
+  }
+  body.scrollTop = 0;
+}
+
+function envRows() {
+  return model.env;
+}
+
+// 版の情報をコピー（不具合を知らせるときに貼る）
+$("copy").addEventListener("click", () => {
+  const text = envRows().map(([k, v]) => `${k}: ${v}`).join("\n");
+  const ta = el("textarea");
+  ta.value = text;
+  document.body.append(ta);
+  ta.select();
+  document.execCommand("copy");
+  ta.remove();
+  $("copied").textContent = model.text.copied;
+  setTimeout(() => ($("copied").textContent = ""), 2000);
+});
+
+window.krbr = {
+  about(m) {
+    const first = !model;
+    model = m;
+    const t = m.text;
+    $("title").textContent = t.title;
+    $("close").title = t.close;
+    $("icon").src = m.icon;
+    $("name").textContent = m.name;
+    $("tagline").textContent = m.tagline;
+    $("version").textContent = m.versionText;
+    $("commit").textContent = m.commitText || "";
+    const links = $("links");
+    links.replaceChildren(link(t.github, m.repo), link(t.releases, m.releases));
+    $("copy").textContent = t.copy;
+    $("ok").textContent = t.ok;
+    const tabs = $("tabs");
+    tabs.replaceChildren();
+    for (const [id, label] of [["about", t.tabAbout], ["libraries", t.tabLibraries], ["license", t.tabLicense], ["env", t.tabEnv]]) {
+      const b = el("button", "tab", label);
+      b.dataset.tab = id;
+      b.addEventListener("click", () => {
+        tab = id;
+        renderBody();
+      });
+      tabs.append(b);
+    }
+    renderBody();
+    if (first || !update || update.kind === "failed") checkUpdate(m);
+    else showUpdate();
+  },
+  // 開き直したとき：最初のタブにして、もう一度問い合わせる
+  reopen() {
+    tab = "about";
+    if (model) {
+      renderBody();
+      checkUpdate(model);
+    }
+  },
+};
+post({ type: "ready" });
+</script>
+</body>
+</html>

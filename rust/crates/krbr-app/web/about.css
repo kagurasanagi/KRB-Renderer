@@ -1,0 +1,224 @@
+/* ---------------------------------------------------------------- KRB Renderer について */
+body.about {
+  display: flex;
+  flex-direction: column;
+  background:
+    radial-gradient(520px 260px at 12% 0%, rgba(232, 148, 90, 0.1), transparent 70%),
+    var(--panel);
+  box-shadow: inset 0 0 0 1px var(--line-3);
+  border-radius: 10px;
+}
+
+body.about header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 40px;
+  padding: 0 10px 0 16px;
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+  flex: none;
+}
+
+.hero {
+  display: flex;
+  gap: 28px;
+  align-items: center;
+  padding: 22px 32px 18px;
+  flex: none;
+}
+
+.hero img {
+  width: 128px;
+  height: 128px;
+  flex: none;
+  filter: drop-shadow(0 8px 24px rgba(232, 148, 90, 0.25));
+}
+
+.hero-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.app-name {
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  line-height: 1.1;
+}
+
+.tagline {
+  color: var(--text-2);
+}
+
+.ver {
+  display: flex;
+  gap: 14px;
+  align-items: baseline;
+  margin-top: 4px;
+  font-size: 12.5px;
+}
+
+.update {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-height: 20px;
+  font-size: 12.5px;
+}
+
+.update [class^="dot-"] {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--text-4);
+}
+
+.update .dot-checking {
+  background: var(--accent);
+  animation: pulse 1.2s var(--ease) infinite;
+}
+
+.update .dot-latest {
+  background: var(--ok);
+}
+
+.update .dot-newer {
+  background: var(--warn);
+  box-shadow: 0 0 8px rgba(242, 193, 78, 0.6);
+}
+
+.links {
+  display: flex;
+  gap: 16px;
+  font-size: 12.5px;
+}
+
+body.about a {
+  color: var(--accent-hi);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+body.about a:hover {
+  text-decoration: underline;
+}
+
+.strong {
+  font-weight: 600;
+}
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+
+.tab {
+  height: 34px;
+  padding: 0 14px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab.on {
+  color: var(--accent-hi);
+  border-bottom-color: var(--accent);
+}
+
+body.about main {
+  flex: 1;
+  padding: 6px 32px 16px;
+}
+
+.block {
+  padding: 10px 0;
+}
+
+.block h3 {
+  margin: 4px 0 8px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+.block p {
+  margin: 0 0 8px;
+  line-height: 1.6;
+}
+
+.made {
+  color: var(--accent-hi);
+}
+
+.link-list {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.9;
+}
+
+table.libs,
+table.env {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+table.libs td,
+table.env td {
+  padding: 4px 10px 4px 0;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+table.libs .lic {
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+table.env td:first-child {
+  width: 120px;
+}
+
+pre.license {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  user-select: text;
+  max-height: 340px;
+  overflow: auto;
+}
+
+body.about footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--line);
+  flex: none;
+}
+
+body.about footer .spacer {
+  flex: 1;
+}

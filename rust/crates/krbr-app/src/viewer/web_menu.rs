@@ -48,6 +48,15 @@ fn note(text: String) -> Value {
 }
 
 impl App {
+    /// 「KRB Renderer について」を開く（開き直すたびに、最初のタブにして新しい版を確かめ直す）
+    pub(super) fn open_about(&mut self) {
+        self.about_open = true;
+        self.about_json = None;
+        if let Some(w) = &mut self.web {
+            w.call(crate::web_ui::Pane::About, "reopen");
+        }
+    }
+
     /// 開いたメニューの項目（web/menu.html の krbr.menu に渡す JSON）
     pub(super) fn menu_json(&self, menu: &str) -> String {
         let st = &self.st;
@@ -113,6 +122,8 @@ impl App {
                 let mut v: Vec<Value> = [fl!("help-rotate"), fl!("help-select"), fl!("help-pan"), fl!("help-zoom"), fl!("help-focus")].into_iter().map(note).collect();
                 v.push(sep());
                 v.extend(KEY_BINDINGS.iter().map(|b| json!({ "note": i18n::get(b.help).unwrap_or_else(|| b.log.to_string()), "key": b.label })));
+                v.push(sep());
+                v.push(item("about", fl!("menu-about")));
                 v
             }
             _ => Vec::new(),
@@ -156,6 +167,7 @@ impl App {
             "reset_all" => st.req.reset_all = true,
             "lang.auto" => st.req.language = Some(None),
             "kicad_plugin" => st.req.kicad_plugin = true,
+            "about" => self.open_about(),
             _ => {
                 if let Some((w, h)) = id.strip_prefix("size.").and_then(|s| s.split_once('x')).and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))) {
                     st.size_mode = Some((w, h));
