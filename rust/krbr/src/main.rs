@@ -326,6 +326,9 @@ struct ViewArgs {
     /// development: hide these kinds of parts with the toolbar during the test (smd, tht or smd,tht)
     #[arg(long, default_value = "")]
     test_hide: String,
+    /// development: after the board is open, export a short small video to this file (320x180, 1 s, 10 fps, 16 spp)
+    #[arg(long)]
+    test_video: Option<PathBuf>,
     /// rendering size: WxH (the window is resized so that the 3D view is that size / ratio) or "fit" (follow the window); default: last used
     #[arg(long, value_parser = parse_render_size)]
     render_size: Option<RenderSize>,
@@ -689,6 +692,7 @@ fn main() {
                     open: args.test_open.clone(),
                     view: args.test_view.clone(),
                     hide: args.test_hide.clone(),
+                    video: args.test_video.clone(),
                 },
             };
             // エクスプローラーから開いたビューア（exe のアイコンへのドラッグ＆ドロップなど）は、コンソールの無いプロセスで

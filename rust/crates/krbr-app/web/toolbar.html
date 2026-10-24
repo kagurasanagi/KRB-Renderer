@@ -12,6 +12,10 @@
       <svg id="pause-icon" viewBox="0 0 24 24"></svg>
       <span id="pause-label"></span>
     </button>
+    <button class="tool" id="lock">
+      <svg id="lock-icon" viewBox="0 0 24 24"></svg>
+      <span id="lock-label"></span>
+    </button>
   </div></div>
   <div class="sep"></div>
   <div class="cluster"><div class="title" id="group-camera"></div><div class="group">
@@ -52,9 +56,11 @@ const ICONS = {
   pause: '<rect x="6.5" y="4.5" width="3.5" height="15" rx="1"/><rect x="14" y="4.5" width="3.5" height="15" rx="1"/>',
   resume: '<path d="M7.5 4.8v14.4a.8.8 0 0 0 1.2.7l11.3-7.2a.8.8 0 0 0 0-1.4L8.7 4.1a.8.8 0 0 0-1.2.7z"/>',
   done: '<circle cx="12" cy="12" r="9"/><path d="m8 12.3 2.7 2.7L16.2 9.5"/>',
+  locked: '<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/><path d="M12 14.5v2.5"/>',
+  unlocked: '<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 7.7-1.6"/>',
 };
 const post = (m) => window.ipc.postMessage(JSON.stringify(m));
-for (const id of ["pause", "top", "bottom", "fit", "smd", "tht", "denoise"]) {
+for (const id of ["pause", "lock", "top", "bottom", "fit", "smd", "tht", "denoise"]) {
   document.getElementById(id).addEventListener("click", () => post({ type: "click", id }));
 }
 // キーはビューアに渡す（このページにフォーカスがあっても P・S・F などが効くように）
@@ -108,9 +114,11 @@ window.krbr = {
     const mode = s.done ? "done" : s.paused ? "resume" : "pause";
     document.getElementById("pause-icon").innerHTML = ICONS[mode];
     setTool("pause", { label: s.text[mode], tip: s.tips[mode === "done" ? "done" : "pause"], on: s.paused && !s.done, enabled: !s.done });
-    setTool("top", { label: s.text.top, tip: s.tips.top, enabled: s.board });
-    setTool("bottom", { label: s.text.bottom, tip: s.tips.bottom, enabled: s.board });
-    setTool("fit", { label: s.text.fit, tip: s.tips.fit, enabled: s.board });
+    document.getElementById("lock-icon").innerHTML = ICONS[s.locked ? "locked" : "unlocked"];
+    setTool("lock", { label: s.locked ? s.text.locked : s.text.lock, tip: s.tips.lock, on: s.locked, enabled: !s.video });
+    setTool("top", { label: s.text.top, tip: s.tips.top, enabled: s.board && !s.locked });
+    setTool("bottom", { label: s.text.bottom, tip: s.tips.bottom, enabled: s.board && !s.locked });
+    setTool("fit", { label: s.text.fit, tip: s.tips.fit, enabled: s.board && !s.locked });
     setTool("smd", { label: s.text.smd, tip: s.tips.smd, on: s.smd, crossed: !s.smd, enabled: s.board });
     setTool("tht", { label: s.text.tht, tip: s.tips.tht, on: s.tht, crossed: !s.tht, enabled: s.board });
     setTool("denoise", { label: s.text.denoise, tip: s.tips.denoise, on: s.denoise });

@@ -15,6 +15,7 @@ pub mod swatch_cache;
 pub mod toolbar;
 pub mod viewer;
 pub mod watch;
+pub mod video;
 pub mod web_ui;
 
 pub use prepare::{cmd_render, prepare_scene, RenderOptions};

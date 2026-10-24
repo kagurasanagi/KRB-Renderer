@@ -92,6 +92,7 @@ impl App {
                     tip(key(item("save", fl!("menu-save-image")), "S"), fl!("menu-save-image-tip")),
                     tip(item("save_png", fl!("menu-save-png")), fl!("menu-save-png-tip")),
                     tip(item("save_exr", fl!("menu-save-exr")), fl!("menu-save-exr-tip")),
+                    tip(item("video", fl!("menu-video")), fl!("menu-video-tip")),
                     sep(),
                     sub(
                         fl!("menu-settings-location"),
@@ -114,6 +115,7 @@ impl App {
                     key(checked(item("panel", fl!("menu-settings-panel")), st.show_panel), "F1 / Tab"),
                     key(checked(item("editor", fl!("menu-material-editor")), self.editor.open), "M"),
                     key(checked(item("pause", fl!("menu-pause")), st.paused), "P"),
+                    tip(key(checked(item("lock", fl!("menu-lock")), st.locked), "L"), fl!("toolbar-lock-tip")),
                     checked(item("denoise", fl!("denoise")), st.denoise),
                     sep(),
                     enabled(item("top", fl!("menu-top-view")), board),
@@ -158,6 +160,8 @@ impl App {
         let st = &mut self.st;
         match id {
             "open" => st.req.open_board = true,
+            "video" => self.video_dialog.open = true,
+            "lock" => st.locked = !st.locked,
             "recent.clear" => {
                 remember::clear_recent_boards();
                 self.recent_boards.clear();

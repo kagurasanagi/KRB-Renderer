@@ -1,0 +1,146 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>/*STYLE*/</style>
+</head>
+<body class="video">
+  <header>
+    <span id="title"></span>
+    <button class="icon-btn" id="close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </header>
+  <main class="scroll" id="main"></main>
+  <footer id="foot"></footer>
+<script>
+// 「動画を書き出す」：設定（カメラの動き・長さ・サイズ・サンプル数・画質）と、書き出しの進み具合。
+// 値は変えるたびに Rust に送る（"video.<名前>"）。書き出し中は設定を変えられない
+const post = (m) => window.ipc.postMessage(JSON.stringify(m));
+const set = (id, value) => post({ type: "set", id: "video." + id, value });
+const click = (id) => post({ type: "click", id: "video." + id });
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+};
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") click("close");
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "SELECT")) return;
+  e.preventDefault();
+});
+$("close").addEventListener("click", () => click("close"));
+
+function segmented(id, options, value, disabled) {
+  const seg = el("div", "segmented");
+  for (const o of options) {
+    const b = el("button", o.v === value ? "on" : "", o.label);
+    if (o.tip) b.title = o.tip;
+    b.disabled = disabled;
+    b.addEventListener("click", () => set(id, o.v));
+    seg.append(b);
+  }
+  return seg;
+}
+
+function select(id, options, value, disabled) {
+  const s = el("select");
+  for (const o of options) {
+    const opt = el("option", null, o.label);
+    opt.value = o.v;
+    if (o.v === value) opt.selected = true;
+    s.append(opt);
+  }
+  s.disabled = disabled;
+  s.addEventListener("change", () => {
+    set(id, s.value);
+    s.blur();
+  });
+  return s;
+}
+
+function row(label, control, tip) {
+  const r = el("div", "vrow");
+  const l = el("span", "vlabel", label);
+  if (tip) l.title = tip;
+  r.append(l, control);
+  return r;
+}
+
+let lastKey = "";
+function render(m) {
+  // 入力中（長さの欄）は描き直さない
+  const a = document.activeElement;
+  if (a && a.tagName === "INPUT" && a.type === "number") return;
+  const key = JSON.stringify(m);
+  if (key === lastKey) return;
+  lastKey = key;
+  const t = m.text, v = m.values, o = m.options;
+  const busy = !!m.running;
+  $("title").textContent = t.title || m.title;
+  $("close").title = m.close;
+  const main = $("main");
+  main.replaceChildren();
+  const pat = el("div", "patterns");
+  for (const p of o.pattern) {
+    const b = el("button", "pattern" + (p.v === v.pattern ? " on" : ""));
+    b.disabled = busy;
+    b.append(el("span", "pname", p.label), el("span", "pdesc", p.tip));
+    b.addEventListener("click", () => set("pattern", p.v));
+    pat.append(b);
+  }
+  main.append(el("div", "sub-title", t.pattern), pat);
+  if (v.pattern !== "swing") main.append(row(t.direction, segmented("direction", o.direction, v.direction, busy)));
+  main.append(row(t.center, segmented("center", o.center, v.center, busy)));
+  const secs = el("input", "num mono");
+  secs.type = "number";
+  secs.min = 1;
+  secs.max = 600;
+  secs.step = 1;
+  secs.value = v.seconds;
+  secs.disabled = busy;
+  secs.addEventListener("change", () => set("seconds", Number(secs.value)));
+  const sw = el("div", "value");
+  sw.append(secs, el("span", "unit", "s"));
+  main.append(row(t.seconds, sw), row(t.fps, segmented("fps", o.fps, v.fps, busy)), row(t.size, select("size", o.size, v.size, busy)));
+  main.append(row(t.spp, select("spp", o.spp, v.spp, busy), t.sppTip));
+  const dn = el("label", "check");
+  dn.title = t.denoiseTip;
+  const box = el("input");
+  box.type = "checkbox";
+  box.checked = v.denoise;
+  box.disabled = busy;
+  box.addEventListener("change", () => set("denoise", box.checked));
+  dn.append(box, el("span", "mark"), el("span", null, t.denoise));
+  main.append(row("", dn, t.denoiseTip), row(t.quality, segmented("quality", o.quality, v.quality, busy)));
+  main.append(el("div", "note-text muted", t.summary), el("div", "note-text muted", t.estimate), el("div", "note-text muted", t.hint));
+  if (m.message) main.append(el("div", "note-text " + (m.error ? "error" : "accent"), m.message));
+  const foot = $("foot");
+  foot.replaceChildren();
+  if (busy) {
+    const r = m.running;
+    const box = el("div", "progress-box");
+    const bar = el("div", "progress");
+    const fill = el("div");
+    fill.style.width = (r.progress * 100).toFixed(1) + "%";
+    bar.append(fill);
+    box.append(el("div", "note-text", `${t.running} ${r.frame} / ${r.total}`), bar, el("div", "note-text muted mono", `${r.elapsed}${r.remaining ? "  ·  " + t.remaining + " " + r.remaining : ""}`));
+    const stop = el("button", "btn danger", t.cancel);
+    stop.addEventListener("click", () => click("cancel"));
+    foot.append(box, stop);
+  } else {
+    const go = el("button", "btn primary", t.start);
+    go.disabled = !m.board;
+    go.title = m.board ? "" : t.noBoard;
+    go.addEventListener("click", () => click("start"));
+    foot.append(el("span", "spacer"), go);
+  }
+}
+
+window.krbr = { video: render };
+post({ type: "ready" });
+</script>
+</body>
+</html>

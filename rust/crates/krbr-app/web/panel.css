@@ -494,3 +494,28 @@ body.banner .btn.primary {
   background: rgba(242, 193, 78, 0.16);
   color: #ffe6a6;
 }
+
+/* 描画ロック・書き出し中の帯（銅色） */
+body.banner.info {
+  background-color: #1a130e;
+  background-image: linear-gradient(90deg, rgba(232, 148, 90, 0.2), rgba(232, 148, 90, 0.05));
+  border-bottom-color: var(--accent-a30);
+  color: var(--accent-hi);
+}
+
+.info-icon {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  stroke: var(--accent);
+  stroke-width: 1.9;
+  fill: var(--accent-a15);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+body.banner.info .btn.primary {
+  border-color: var(--accent-a30);
+  background: var(--accent-a15);
+  color: var(--accent-hi);
+}

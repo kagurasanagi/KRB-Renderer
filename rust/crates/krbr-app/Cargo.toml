@@ -33,3 +33,7 @@ serde_json.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 # ビューアのボタン列・ステータスバーを WebView（WebView2）で描く試作（--web-ui）。Tauri の中の WebView の部品だけを使う
 wry = { version = "0.57", default-features = false, features = ["os-webview"] }
+
+# 動画の書き出し（Media Foundation の H.264 エンコーダー）。版は wry が使うものと同じ
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_Foundation"] }

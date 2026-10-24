@@ -29,6 +29,7 @@ use winit::window::{Window, WindowId};
 
 use crate::fl;
 
+mod video_job;
 mod web_about;
 mod web_menu;
 mod web_panel;
@@ -100,6 +101,8 @@ pub struct TestOptions {
     pub view: String,
     /// テスト中にボタン列で隠す部品の種類（"smd" / "tht" / "smd,tht"）
     pub hide: String,
+    /// 基板を開いたら、短い小さな動画（320x180、1 秒、10 fps、16 spp）をこのファイルに書き出す（開発用。テストのフレーム数とは別に、見えるウィンドウで使う）
+    pub video: Option<PathBuf>,
 }
 
 /// テストのパネルの操作（レジストの色・すべて既定に戻す）をするフレーム（0 から数える）。
@@ -421,6 +424,9 @@ struct ViewState {
     mask_choice: Option<usize>,
     /// レンダリングを一時停止する（サンプルを積み足さない。GPU の弱い PC で操作を軽くする）
     paused: bool,
+    /// 描画ロック：今の累積を守る。視点の操作は効かず、設定の変更・ファイルの保存による読み直しは、解除するまで待たせる
+    /// （時間をかけた画像を、うっかり触ってやり直しにしない）。表示だけの設定（露出・グロー・ノイズ除去）は効く
+    locked: bool,
     /// ピントを合わせる点（ワールド座標）。None なら注視点（自動）。カメラを動かしても、この点までの距離にピントを合わせ続ける
     focus_point: Option<Vec3>,
     /// 表面実装の部品・スルーホールの部品を表示する（どちらでもない部品と基板はいつも表示）
@@ -565,6 +571,7 @@ fn key_code_of_js(code: &str) -> Option<KeyCode> {
         "KeyF" => KeyCode::KeyF,
         "KeyS" => KeyCode::KeyS,
         "KeyP" => KeyCode::KeyP,
+        "KeyL" => KeyCode::KeyL,
         "KeyD" => KeyCode::KeyD,
         "KeyM" => KeyCode::KeyM,
         "KeyO" => KeyCode::KeyO,
@@ -752,6 +759,7 @@ enum KeyAction {
     Mode(DisplayMode),
     MaterialEditor,
     OpenBoard,
+    Lock,
 }
 
 /// キーの割り当ての 1 行（ヘルプの 1 行）
@@ -775,6 +783,7 @@ const KEY_BINDINGS: &[KeyBinding] = &[
     KeyBinding { label: "F", keys: &[(KeyCode::KeyF, KeyAction::FitView)], help: "key-fit-view", log: "fit the board in the view" },
     KeyBinding { label: "S", keys: &[(KeyCode::KeyS, KeyAction::Save)], help: "key-save", log: "save" },
     KeyBinding { label: "P", keys: &[(KeyCode::KeyP, KeyAction::Pause)], help: "key-pause", log: "pause" },
+    KeyBinding { label: "L", keys: &[(KeyCode::KeyL, KeyAction::Lock)], help: "key-lock", log: "render lock" },
     KeyBinding { label: "D", keys: &[(KeyCode::KeyD, KeyAction::DenoiseNow)], help: "key-denoise", log: "denoise now (CPU)" },
     KeyBinding {
         label: "+ / -",
@@ -962,9 +971,12 @@ struct App {
     splash_icon: Option<egui::TextureHandle>,
     /// 最近使った基板（メニューを開いたときに読み直す）
     recent_boards: Vec<PathBuf>,
+    /// 動画の書き出し（している間）
+    video: Option<video_job::VideoJob>,
+    video_dialog: video_job::VideoDialog,
     proxy: Option<EventLoopProxy<crate::web_ui::Wake>>,
     /// ボタン列・ステータスバー・設定パネル・警告の帯の置き場所（egui のポイント。NOTHING なら出さない）
-    web_rects: [egui::Rect; 6],
+    web_rects: [egui::Rect; 7],
     /// 「KRB Renderer について」を開いている。中身（JSON。開くたびに作り直す。ライセンスのファイルを読むので毎フレームは作らない）
     about_open: bool,
     about_json: Option<String>,
@@ -2915,6 +2927,10 @@ impl App {
                         st.paused = !st.paused;
                         ui.close();
                     }
+                    if ui.add(egui::Button::new(fl!("menu-lock")).selected(st.locked).shortcut_text("L")).on_hover_text(fl!("toolbar-lock-tip")).clicked() {
+                        st.locked = !st.locked;
+                        ui.close();
+                    }
                     if ui.add(egui::Button::new(fl!("denoise")).selected(st.denoise)).clicked() {
                         st.denoise = !st.denoise;
                         ui.close();
@@ -3080,6 +3096,8 @@ impl App {
         self.handle_saves(shown.denoised);
         self.step_web_ui();
         self.update_splash();
+        self.step_video();
+        self.poll_video_dialog();
         if last_test_frame {
             self.finish_test(shown.screenshot, shown.extent);
         } else if let Some(mut b) = shown.screenshot {
@@ -3124,6 +3142,15 @@ impl App {
                 }
                 crate::web_ui::Msg::Click(id) if id == "menu.close" => self.close_web_menu(),
                 crate::web_ui::Msg::Click(id) if id.starts_with("about.") => self.apply_about_click(&id),
+                crate::web_ui::Msg::Click(id) if id.starts_with("video.") => self.apply_video_click(&id),
+                crate::web_ui::Msg::Set(id, v) if id.starts_with("video.") => self.apply_video_set(&id, &v),
+                // 書き出しの間は、ほかの操作（パネル・ボタン列・メニューの項目・材質エディタ）を受けない
+                crate::web_ui::Msg::Click(id) if self.video.is_some() && id.starts_with("menu:") && id != "menu:video" && id != "menu:about" && id != "menu:quit" => self.close_web_menu(),
+                crate::web_ui::Msg::Click(id) if self.video.is_some() && !id.starts_with("menu") => {}
+                crate::web_ui::Msg::Set(_, _) if self.video.is_some() => {}
+                crate::web_ui::Msg::Key(_) if self.video.is_some() => {}
+                crate::web_ui::Msg::Click(id) if id == "unlock" => self.st.locked = false,
+                crate::web_ui::Msg::Click(id) if id == "lock" => self.st.locked = !self.st.locked,
                 crate::web_ui::Msg::Open(url) => krbr_core::platform::open_url(&url),
                 crate::web_ui::Msg::Dropped(paths) => self.open_dropped(paths),
                 // 材質エディタ
@@ -3182,6 +3209,25 @@ impl App {
                 }
                 crate::web_ui::Msg::Ready | crate::web_ui::Msg::Painted(_) => {}
             }
+        }
+    }
+
+    /// 描画ロック（または動画の書き出し）中か
+    fn render_locked(&self) -> bool {
+        self.st.locked || self.video.is_some()
+    }
+
+    /// 描画ロック中に、解除したら反映するもの（保存された基板・変えた設定）があるか
+    fn lock_pending(&self) -> bool {
+        let c = &self.st.changed;
+        c.frame || c.materials || c.mask || c.integrator || c.visibility || self.st.req.reload || self.silk_dirty || self.materials_dirty_files || !self.editor_actions.is_empty() || self.env_job.is_some() || self.board_dialog.is_some() || self.st.req.open_path.is_some() || self.reload_job.is_some()
+    }
+
+    /// 描画ロック中に基板が保存された：読み直しは解除してから（そのときに読み直すよう覚えておく）
+    fn note_saves_while_locked(&mut self) {
+        if self.watcher.as_mut().is_some_and(|w| w.poll()) {
+            self.st.req.reload = true;
+            info!("render lock: the board was saved; it is read again when the lock is released");
         }
     }
 
@@ -3357,6 +3403,7 @@ impl App {
                 Pane::Banner => self.web_rects[3],
                 Pane::Editor => self.web_rects[4],
                 Pane::About => self.web_rects[5],
+                Pane::Video => self.web_rects[6],
                 Pane::Menu => menu_rect?,
                 Pane::Tooltip => return None,
             };
@@ -3376,6 +3423,7 @@ impl App {
             self.about_json = Some(self.about_json());
         }
         let about = rects[5].is_some().then(|| self.about_json.clone().unwrap_or_default());
+        let video = rects[6].is_some().then(|| self.video_json());
         let editor = rects[4].is_some().then(|| {
             let info = self.part_info();
             let scope = self.scope_json();
@@ -3385,6 +3433,13 @@ impl App {
         let status = self.status_texts().map(|t| t.json()).unwrap_or_default();
         let panel = rects[2].is_some().then(|| self.panel_json());
         let banner = rects[3].is_some().then(|| {
+            if let Some(s) = self.video_status() {
+                return serde_json::json!({ "text": s, "action": fl!("video-cancel"), "actionId": "video.cancel", "tone": "info" }).to_string();
+            }
+            if self.st.locked {
+                let text = if self.lock_pending() { fl!("lock-banner-pending") } else { fl!("lock-banner") };
+                return serde_json::json!({ "text": text, "action": fl!("lock-release"), "actionId": "unlock", "tone": "info" }).to_string();
+            }
             let text = if self.board_visibility() == BoardInView::TooSmall { fl!("board-too-small") } else { fl!("board-out-of-view") };
             serde_json::json!({ "text": text, "action": fl!("camera-fit"), "actionId": "fit" }).to_string()
         });
@@ -3409,6 +3464,9 @@ impl App {
         if let Some(j) = about {
             web.send(Pane::About, &j);
         }
+        if let Some(j) = video {
+            web.send(Pane::Video, &j);
+        }
         if let Some(j) = tip {
             web.send(Pane::Tooltip, &j);
         }
@@ -3425,15 +3483,15 @@ impl App {
         let st = &self.st;
         let done = self.gpu.as_ref().is_some_and(|g| g.prog.samples() >= st.max_spp);
         serde_json::json!({
-            "paused": st.paused, "done": done, "board": self.has_board(),
+            "paused": st.paused, "done": done, "board": self.has_board(), "locked": self.render_locked(), "video": self.video.is_some(),
             "smd": st.show_smd, "tht": st.show_tht, "denoise": st.denoise,
             "text": {
-                "pause": fl!("toolbar-pause"), "resume": fl!("toolbar-resume"), "done": fl!("toolbar-done"),
+                "pause": fl!("toolbar-pause"), "resume": fl!("toolbar-resume"), "done": fl!("toolbar-done"), "lock": fl!("toolbar-lock"), "locked": fl!("toolbar-locked"),
                 "top": fl!("toolbar-top"), "bottom": fl!("toolbar-bottom"), "fit": fl!("toolbar-fit"),
                 "smd": fl!("toolbar-smd"), "tht": fl!("toolbar-tht"), "denoise": fl!("toolbar-denoise"),
             },
             "tips": {
-                "pause": fl!("toolbar-pause-tip"), "done": fl!("toolbar-done-tip"),
+                "pause": fl!("toolbar-pause-tip"), "done": fl!("toolbar-done-tip"), "lock": fl!("toolbar-lock-tip"),
                 "top": fl!("toolbar-top-tip"), "bottom": fl!("toolbar-bottom-tip"), "fit": fl!("toolbar-fit-tip"),
                 "smd": fl!("toolbar-smd-tip"), "tht": fl!("toolbar-tht-tip"), "denoise": fl!("toolbar-denoise-tip"),
             },
@@ -3458,7 +3516,7 @@ impl App {
             if self.splash {
                 // 起動中：メニュー・パネルは出さず（WebView もまだ隠す）、進み具合とログだけ
                 central = root.available_rect_before_wrap();
-                self.web_rects = [egui::Rect::NOTHING; 6];
+                self.web_rects = [egui::Rect::NOTHING; 7];
                 self.draw_splash(root.ctx());
                 return;
             }
@@ -3473,9 +3531,18 @@ impl App {
             self.draw_outline(root, central);
             let lost = if self.has_board() { self.board_visibility() } else { BoardInView::Visible };
             // WebView のときは、警告は 3D 表示の上端の帯（WebView）に出す
-            self.web_rects[3] = if lost != BoardInView::Visible { egui::Rect::from_min_size(central.min, egui::vec2(central.width(), WEB_BANNER_HEIGHT)) } else { egui::Rect::NOTHING };
-            if lost != BoardInView::Visible && self.web.is_none() {
-                let text = if lost == BoardInView::TooSmall { fl!("board-too-small") } else { fl!("board-out-of-view") };
+            let banner = lost != BoardInView::Visible || self.render_locked();
+            self.web_rects[3] = if banner { egui::Rect::from_min_size(central.min, egui::vec2(central.width(), WEB_BANNER_HEIGHT)) } else { egui::Rect::NOTHING };
+            if (lost != BoardInView::Visible || self.render_locked()) && self.web.is_none() {
+                let text = if let Some(v) = self.video_status() {
+                    v
+                } else if self.st.locked {
+                    if self.lock_pending() { fl!("lock-banner-pending") } else { fl!("lock-banner") }
+                } else if lost == BoardInView::TooSmall {
+                    fl!("board-too-small")
+                } else {
+                    fl!("board-out-of-view")
+                };
                 let galley = root.painter().layout(text, egui::FontId::proportional(16.0), egui::Color32::from_rgb(255, 204, 77), (central.width() - 40.0).max(100.0));
                 let pos = egui::pos2(central.center().x - galley.size().x / 2.0, central.top() + 16.0);
                 let bg = egui::Rect::from_min_size(pos, galley.size()).expand(6.0);
@@ -3518,6 +3585,13 @@ impl App {
                 } else {
                     egui::Rect::NOTHING
                 };
+                // 「動画を書き出す」：3D 表示の右上（書き出している画像が見えるように、真ん中には置かない）
+                self.web_rects[6] = if self.video_dialog.open {
+                    let size = egui::vec2(440.0f32.min(central.width() - 24.0), 620.0f32.min(central.height() - 24.0)).max(egui::vec2(200.0, 200.0));
+                    egui::Rect::from_min_size(egui::pos2(central.right() - size.x - 12.0, central.top() + 12.0), size)
+                } else {
+                    egui::Rect::NOTHING
+                };
             } else {
                 let scope = &mut self.assign_scope;
                 let actions = self.editor.ui(root.ctx(), &self.library, info.as_ref(), &mut |ui| scope_radios(ui, scope));
@@ -3537,18 +3611,28 @@ impl App {
     fn apply_requests(&mut self, ui: &UiFrame, fbw: u32, fbh: u32) -> Result<(), String> {
         // 覚えるのは前のフレームまでに反映した値（「すべて既定に戻す」は、apply_view_requests で基準を取り直す）
         self.save_view(false);
-        if std::mem::take(&mut self.st.req.reset_all) {
+        // 描画ロック中は、累積をやり直すもの（読み直し・基板を開く・材質・環境マップ・シーンの変更）を解除まで待たせる
+        let locked = self.render_locked();
+        if !locked && std::mem::take(&mut self.st.req.reset_all) {
             self.reset_all_settings();
         }
-        self.apply_reload()?;
-        self.poll_board_open()?;
-        self.poll_silk();
+        if locked {
+            self.note_saves_while_locked();
+        } else {
+            self.apply_reload()?;
+            self.poll_board_open()?;
+            self.poll_silk();
+        }
         self.flush_emit_edit(false);
-        self.apply_editor_actions();
-        self.start_reload_if_needed();
+        if !locked {
+            self.apply_editor_actions();
+            self.start_reload_if_needed();
+        }
         self.apply_menu_requests();
-        self.poll_environment()?;
-        self.apply_scene_changes()?;
+        if !locked {
+            self.poll_environment()?;
+            self.apply_scene_changes()?;
+        }
         let ctx = self.gpu.as_ref().unwrap().ctx;
         let info = self.part_info();
         self.editor.render(ctx, &self.prep.scene, info.as_ref(), &self.library, self.st.spectral, self.scene_epoch);
@@ -3718,6 +3802,8 @@ impl App {
         let vp = viewport_px(ui.central, ui.pixels_per_point, g.swap.extent.width, g.swap.extent.height);
         let (rw, rh) = self.st.size_mode.unwrap_or_else(|| (((vp.w as f32 * self.st.render_ratio).round() as u32).max(1), ((vp.h as f32 * self.st.render_ratio).round() as u32).max(1)));
         let t = g.prog.targets();
+        // 描画ロック中は描画の大きさを変えない（ウィンドウの大きさを変えても、今の画像を縮めて見せる）
+        let (rw, rh) = if self.st.locked && self.video.is_none() { (t.width, t.height) } else { (rw, rh) };
         if rw != t.width || rh != t.height {
             g.prog.resize(rw, rh)?;
             g.tone = Tonemapper::new(g.ctx, g.prog.targets())?;
@@ -3753,6 +3839,16 @@ impl App {
         }
         if let Some(m) = self.st.req.assign_all.take() {
             self.assign_material("", &m, false);
+        }
+        if self.render_locked() {
+            // 描画ロック中：視点の操作は捨てる（あとで動き出さないように）。設定の変更（changed.frame）は解除まで残す
+            self.st.req.focus_pick = None;
+            self.st.req.reset_view = false;
+            self.st.req.view_preset = None;
+            self.st.req.fit_view = false;
+        }
+        if self.render_locked() && self.video.is_none() {
+            return;
         }
         if let Some(p) = self.st.req.focus_pick.take() {
             self.focus_at(p);
@@ -4165,7 +4261,9 @@ impl ApplicationHandler<crate::web_ui::Wake> for App {
                     return; // メニュー・パネルの上での操作はカメラに渡さない
                 }
                 if down && button == MouseButton::Left && self.st.ctrl {
-                    self.st.req.focus_pick = Some(self.st.last_cursor);
+                    if !self.render_locked() {
+                        self.st.req.focus_pick = Some(self.st.last_cursor);
+                    }
                     return;
                 }
                 match button {
@@ -4188,7 +4286,9 @@ impl ApplicationHandler<crate::web_ui::Wake> for App {
                 if self.st.press_at.is_some() {
                     self.st.press_moved += dx.abs() + dy.abs();
                 }
-                if self.st.rotating {
+                if self.render_locked() {
+                    // 描画ロック中は視点を動かさない（クリックで部品を選ぶのはできる）
+                } else if self.st.rotating {
                     self.st.azimuth -= dx * 0.3;
                     self.st.elevation = (self.st.elevation + dy * 0.3).clamp(-90.0, 90.0);
                     self.st.changed.frame = true;
@@ -4200,7 +4300,7 @@ impl ApplicationHandler<crate::web_ui::Wake> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if response.consumed || !self.st.viewport.contains(self.st.last_cursor) {
+                if response.consumed || !self.st.viewport.contains(self.st.last_cursor) || self.render_locked() {
                     return;
                 }
                 let yoff = match delta {
@@ -4216,6 +4316,9 @@ impl ApplicationHandler<crate::web_ui::Wake> for App {
                 }
                 let PhysicalKey::Code(code) = event.physical_key else { return };
                 let Some(action) = key_action(code) else { return };
+                if self.video.is_some() && action != KeyAction::Quit {
+                    return;
+                }
                 if self.apply_key_action(action) {
                     el.exit();
                 }
@@ -4256,6 +4359,7 @@ impl App {
                     KeyAction::Mode(m) => st.mode = m,
                     KeyAction::MaterialEditor => self.editor.open = !self.editor.open,
                     KeyAction::OpenBoard => st.req.open_board = true,
+                    KeyAction::Lock => st.locked = !st.locked,
                 }
             }
         }
@@ -4312,6 +4416,7 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         show_panel: win.panel_shown,
         mask_choice: mask_choice_of(&cfg.scene),
         paused: vo.paused,
+        locked: false,
         focus_point: None,
         show_smd: true,
         show_tht: true,
@@ -4362,8 +4467,10 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         splash,
         splash_icon: None,
         recent_boards: Vec::new(),
+        video: None,
+        video_dialog: video_job::VideoDialog::default(),
         proxy: None,
-        web_rects: [egui::Rect::NOTHING; 6],
+        web_rects: [egui::Rect::NOTHING; 7],
         about_open: false,
         about_json: None,
         editor_rect: None,

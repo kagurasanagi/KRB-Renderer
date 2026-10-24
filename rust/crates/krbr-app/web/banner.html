@@ -5,7 +5,8 @@
 <style>/*STYLE*/</style>
 </head>
 <body class="banner">
-  <svg class="warn-icon" viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18.5A2 2 0 0 0 3.5 21.5h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v5"/><circle cx="12" cy="17.4" r=".6"/></svg>
+  <svg class="info-icon" id="lock-icon" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg>
+  <svg class="warn-icon" id="warn-icon" viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18.5A2 2 0 0 0 3.5 21.5h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v5"/><circle cx="12" cy="17.4" r=".6"/></svg>
   <span class="msg" id="msg"></span>
   <button class="btn primary" id="action"></button>
 <script>
@@ -20,6 +21,12 @@ document.getElementById("action").addEventListener("click", () => post({ type: "
 window.krbr = {
   banner(s) {
     document.getElementById("msg").textContent = s.text;
+    document.getElementById("msg").title = s.text;
+    // tone：info（描画ロック・書き出し中。銅色の帯と鍵）、無ければ警告（黄色の帯と ⚠）
+    const info = s.tone === "info";
+    document.body.classList.toggle("info", info);
+    document.getElementById("lock-icon").style.display = info ? "" : "none";
+    document.getElementById("warn-icon").style.display = info ? "none" : "";
     const a = document.getElementById("action");
     a.textContent = s.action || "";
     a.dataset.id = s.actionId || "";

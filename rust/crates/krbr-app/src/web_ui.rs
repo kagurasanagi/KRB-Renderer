@@ -26,6 +26,7 @@ const MENU_HTML: &str = include_str!("../web/menu.html");
 const TOOLTIP_HTML: &str = include_str!("../web/tooltip.html");
 const EDITOR_HTML: &str = include_str!("../web/editor.html");
 const ABOUT_HTML: &str = include_str!("../web/about.html");
+const VIDEO_HTML: &str = include_str!("../web/video.html");
 /// どのページにも入れる、説明の吹き出しの仕掛け
 const TIP_JS: &str = include_str!("../web/tip.js");
 
@@ -106,6 +107,8 @@ pub enum Pane {
     Editor,
     /// 「KRB Renderer について」の窓（真ん中に重ねる）
     About,
+    /// 「動画を書き出す」の窓（真ん中に重ねる）
+    Video,
     /// メニューのプルダウン（3D 表示などの上に重ねる）
     Menu,
     /// 説明の吹き出し（いちばん上に重ねる）
@@ -114,7 +117,7 @@ pub enum Pane {
 
 impl Pane {
     /// 作る順（後のものほど上に重なる）
-    pub const ALL: [Pane; 8] = [Pane::Toolbar, Pane::Status, Pane::Panel, Pane::Banner, Pane::Editor, Pane::About, Pane::Menu, Pane::Tooltip];
+    pub const ALL: [Pane; 9] = [Pane::Toolbar, Pane::Status, Pane::Panel, Pane::Banner, Pane::Editor, Pane::About, Pane::Video, Pane::Menu, Pane::Tooltip];
 
     /// ページの window.krbr の関数の名前
     fn func(self) -> &'static str {
@@ -125,6 +128,7 @@ impl Pane {
             Pane::Banner => "banner",
             Pane::Editor => "editor",
             Pane::About => "about",
+            Pane::Video => "video",
             Pane::Menu => "menu",
             Pane::Tooltip => "tooltip",
         }
@@ -144,6 +148,7 @@ impl Pane {
             Pane::Banner => BANNER_HTML,
             Pane::Editor => EDITOR_HTML,
             Pane::About => ABOUT_HTML,
+            Pane::Video => VIDEO_HTML,
             Pane::Menu => MENU_HTML,
             Pane::Tooltip => TOOLTIP_HTML,
         }
