@@ -18,6 +18,9 @@ const STATUS_HTML: &str = include_str!("../web/status.html");
 const PANEL_HTML: &str = include_str!("../web/panel.html");
 const BANNER_HTML: &str = include_str!("../web/banner.html");
 const MENU_HTML: &str = include_str!("../web/menu.html");
+const TOOLTIP_HTML: &str = include_str!("../web/tooltip.html");
+/// どのページにも入れる、説明の吹き出しの仕掛け
+const TIP_JS: &str = include_str!("../web/tip.js");
 
 /// WebView からの知らせでイベントループを起こす（待機中のビューアにも、押したボタンをすぐ反映する）
 #[derive(Debug, Clone, Copy)]
@@ -38,6 +41,11 @@ pub enum Msg {
     Menu { id: String, x: f32, y: f32 },
     /// プルダウンの中身の大きさ（CSS の px。サブメニューを開くと変わる）
     MenuSize(f32, f32),
+    /// 説明の吹き出しを出す（text が空なら消す）。rect は説明のある要素の位置（そのページの中の CSS の px：左・上・右・下）。
+    /// pane はどのページからか（受け取ったところで入れる）
+    Tip { pane: Pane, text: String, rect: [f32; 4] },
+    /// 吹き出しの大きさ（CSS の px）
+    TipSize(f32, f32),
     /// ページを読み終えた（状態を送り直す）
     Ready,
 }
@@ -53,6 +61,8 @@ fn parse(body: &str) -> Option<Msg> {
         "resize" => v.get("width").and_then(|w| w.as_f64()).filter(|w| w.is_finite()).map(|w| Msg::Resize(w as f32)),
         "menu" => Some(Msg::Menu { id: s("id")?, x: f("x")?, y: f("y")? }),
         "size" => Some(Msg::MenuSize(f("width")?, f("height")?)),
+        "tip" => Some(Msg::Tip { pane: Pane::Toolbar, text: s("text")?, rect: [f("left").unwrap_or(0.0), f("top").unwrap_or(0.0), f("right").unwrap_or(0.0), f("bottom").unwrap_or(0.0)] }),
+        "tipsize" => Some(Msg::TipSize(f("width")?, f("height")?)),
         "ready" => Some(Msg::Ready),
         _ => None,
     }
@@ -74,10 +84,12 @@ pub enum Pane {
     Banner,
     /// メニューのプルダウン（3D 表示などの上に重ねる）
     Menu,
+    /// 説明の吹き出し（いちばん上に重ねる）
+    Tooltip,
 }
 
 impl Pane {
-    pub const ALL: [Pane; 5] = [Pane::Toolbar, Pane::Status, Pane::Panel, Pane::Banner, Pane::Menu];
+    pub const ALL: [Pane; 6] = [Pane::Toolbar, Pane::Status, Pane::Panel, Pane::Banner, Pane::Menu, Pane::Tooltip];
 
     /// ページの window.krbr の関数の名前
     fn func(self) -> &'static str {
@@ -87,6 +99,7 @@ impl Pane {
             Pane::Panel => "panel",
             Pane::Banner => "banner",
             Pane::Menu => "menu",
+            Pane::Tooltip => "tooltip",
         }
     }
 
@@ -97,6 +110,7 @@ impl Pane {
             Pane::Panel => PANEL_HTML,
             Pane::Banner => BANNER_HTML,
             Pane::Menu => MENU_HTML,
+            Pane::Tooltip => TOOLTIP_HTML,
         }
     }
 }
@@ -126,13 +140,17 @@ impl WebUi {
         for pane in Pane::ALL {
             let (tx, proxy) = (tx.clone(), proxy.clone());
             let view = WebViewBuilder::new_with_web_context(&mut context)
-                .with_html(pane.html().replace("/*STYLE*/", &style))
+                .with_html(pane.html().replace("/*STYLE*/", &style).replace("</body>", &format!("<script>{TIP_JS}</script>
+</body>")))
                 // 読み込みの間も、まわりと同じ暗い色（白く光らない）
                 .with_background_color((17, 19, 22, 255))
                 .with_bounds(rect((0, 0, 1, 1)))
                 .with_visible(false)
                 .with_ipc_handler(move |req| {
-                    if let Some(m) = parse(req.body()) {
+                    if let Some(mut m) = parse(req.body()) {
+                        if let Msg::Tip { pane: p, .. } = &mut m {
+                            *p = pane;
+                        }
                         let _ = tx.send(m);
                         let _ = proxy.send_event(Wake);
                     }
@@ -180,6 +198,11 @@ impl WebUi {
         let _ = self.view(pane).view.focus_parent();
     }
 
+    /// 次の send を、前と同じ内容でも送る（ページに描き直して、大きさを測り直してもらう）
+    pub fn resend(&mut self, pane: Pane) {
+        self.view(pane).sent.clear();
+    }
+
     /// 届いた操作。ページを読み終えた知らせがあれば、次の送信で状態を送り直す
     pub fn messages(&mut self) -> Vec<Msg> {
         let msgs: Vec<Msg> = self.rx.try_iter().collect();
@@ -212,6 +235,8 @@ mod tests {
         assert_eq!(parse(r#"{"type":"resize","width":360}"#), Some(Msg::Resize(360.0)));
         assert_eq!(parse(r#"{"type":"menu","id":"file","x":4,"y":28}"#), Some(Msg::Menu { id: "file".into(), x: 4.0, y: 28.0 }));
         assert_eq!(parse(r#"{"type":"size","width":240,"height":300.5}"#), Some(Msg::MenuSize(240.0, 300.5)));
+        assert_eq!(parse(r#"{"type":"tip","text":"a","left":1,"top":2,"right":3,"bottom":4}"#), Some(Msg::Tip { pane: Pane::Toolbar, text: "a".into(), rect: [1.0, 2.0, 3.0, 4.0] }));
+        assert_eq!(parse(r#"{"type":"tipsize","width":100,"height":20}"#), Some(Msg::TipSize(100.0, 20.0)));
         assert_eq!(parse(r#"{"type":"ready"}"#), Some(Msg::Ready));
         assert_eq!(parse(r#"{"type":"other"}"#), None);
         assert_eq!(parse("not json"), None);

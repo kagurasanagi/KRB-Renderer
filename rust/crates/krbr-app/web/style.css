@@ -122,6 +122,10 @@ body.menu {
 }
 
 .lists {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: max-content;
   display: inline-flex;
   align-items: stretch;
   border-radius: 8px;
@@ -426,4 +430,27 @@ body.status {
 
 .note.busy {
   color: var(--warn);
+}
+
+/* ---------------------------------------------------------------- 説明の吹き出し */
+body.tooltip {
+  height: auto;
+  background: var(--panel-3);
+}
+
+/* 隠している間の WebView の幅（1px）で折り返さないように、中身の幅で測る */
+.tip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: max-content;
+  max-width: 360px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--panel-3);
+  box-shadow: inset 0 0 0 1px var(--line-3);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-line;
 }

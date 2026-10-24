@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>/*STYLE*/</style>
+</head>
+<body class="tooltip">
+  <div class="tip" id="tip"></div>
+<script>
+// 説明の吹き出し：Rust から文字を受け取って描き、大きさを知らせる（その大きさで、要素の下か上に置いてもらう）
+const post = (m) => window.ipc.postMessage(JSON.stringify(m));
+window.krbr = {
+  tooltip(m) {
+    const tip = document.getElementById("tip");
+    tip.textContent = m.text;
+    // 長い説明は折り返す（幅の上限は CSS）
+    const r = tip.getBoundingClientRect();
+    post({ type: "tipsize", width: Math.ceil(r.width), height: Math.ceil(r.height) });
+  },
+};
+post({ type: "ready" });
+</script>
+</body>
+</html>

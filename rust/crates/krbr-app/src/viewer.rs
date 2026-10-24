@@ -501,6 +501,17 @@ struct WebMenu {
     focused: bool,
 }
 
+/// --web-ui の説明の吹き出し
+struct WebTip {
+    /// 説明のある要素のページ
+    pane: crate::web_ui::Pane,
+    /// その要素の位置（ページの中。egui のポイント = CSS の px）
+    target: egui::Rect,
+    text: String,
+    /// 吹き出しの大きさ（ページが測って知らせてくる。それまでは隠しておく）
+    size: Option<egui::Vec2>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StatusState {
     Rendering,
@@ -947,6 +958,8 @@ struct App {
     web_menu: Option<WebMenu>,
     /// 最後にプルダウンを閉じたメニューと時刻（外をクリックして閉じたのが、同じ見出しのクリックだったら開き直さない）
     web_menu_closed: Option<(String, Instant)>,
+    /// --web-ui：出している説明の吹き出し
+    web_tip: Option<WebTip>,
     egui_ctx: egui::Context,
     egui_state: Option<EguiState>,
     gpu: Option<Gpu>,
@@ -3028,6 +3041,16 @@ impl App {
                         self.web_menu = Some(WebMenu { id, at: egui::pos2(x, y), size: None, focused });
                     }
                 }
+                crate::web_ui::Msg::Tip { pane, text, rect } => {
+                    let target = egui::Rect::from_min_max(egui::pos2(rect[0], rect[1]), egui::pos2(rect[2], rect[3]));
+                    self.web_tip = (!text.is_empty()).then_some(WebTip { pane, target, text, size: None });
+                    self.web.as_mut().unwrap().resend(crate::web_ui::Pane::Tooltip);
+                }
+                crate::web_ui::Msg::TipSize(w, h) => {
+                    if let Some(t) = &mut self.web_tip {
+                        t.size = Some(egui::vec2(w, h));
+                    }
+                }
                 crate::web_ui::Msg::MenuSize(w, h) => {
                     if let Some(m) = &mut self.web_menu {
                         m.size = Some(egui::vec2(w, h));
@@ -3103,6 +3126,28 @@ impl App {
             r.is_positive().then_some(r)
         });
         rects.push(menu_rect.and_then(px));
+        // 説明の吹き出し：要素の下の中央に（下に入らなければ上に。左右はウィンドウの中に収める）
+        let tip_rect = self.web_tip.as_ref().and_then(|t| {
+            let size = t.size?;
+            let origin = match t.pane {
+                Pane::Toolbar => self.web_rects[0],
+                Pane::Status => self.web_rects[1],
+                Pane::Panel => self.web_rects[2],
+                Pane::Banner => self.web_rects[3],
+                Pane::Menu => menu_rect?,
+                Pane::Tooltip => return None,
+            };
+            if !origin.is_positive() {
+                return None;
+            }
+            let target = t.target.translate(origin.min.to_vec2());
+            let x = (target.center().x - size.x / 2.0).clamp(screen.left() + 4.0, (screen.right() - size.x - 4.0).max(screen.left() + 4.0));
+            let below = target.bottom() + 6.0;
+            let y = if below + size.y <= screen.bottom() - 4.0 { below } else { (target.top() - 6.0 - size.y).max(screen.top()) };
+            Some(egui::Rect::from_min_size(egui::pos2(x, y), size))
+        });
+        rects.push(tip_rect.and_then(px));
+        let tip = self.web_tip.as_ref().map(|t| serde_json::json!({ "text": t.text }).to_string());
         let menu = self.web_menu.as_ref().map(|m| self.menu_json(&m.id));
         let toolbar = self.toolbar_json();
         let status = self.status_texts().map(|t| t.json()).unwrap_or_default();
@@ -3125,6 +3170,9 @@ impl App {
         }
         if let Some(j) = menu {
             web.send(Pane::Menu, &j);
+        }
+        if let Some(j) = tip {
+            web.send(Pane::Tooltip, &j);
         }
         if let Some(m) = &mut self.web_menu {
             if menu_rect.is_some() && !m.focused {
@@ -4036,6 +4084,7 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         web_rects: [egui::Rect::NOTHING; 4],
         web_menu: None,
         web_menu_closed: None,
+        web_tip: None,
         egui_ctx: egui::Context::default(),
         egui_state: None,
         gpu: None,
