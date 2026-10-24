@@ -66,13 +66,162 @@ body {
 /* ---------------------------------------------------------------- ボタン列 */
 body.toolbar {
   display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0 10px;
+  flex-direction: column;
   background:
     radial-gradient(600px 120px at 0% -40%, rgba(232, 148, 90, 0.07), transparent 70%),
     linear-gradient(180deg, var(--panel-2), var(--panel));
   border-bottom: 1px solid var(--line);
+}
+
+.tools {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 10px;
+}
+
+/* ---------------------------------------------------------------- メニューの見出し（ボタン列の上端） */
+.menubar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 28px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+.menu-head {
+  height: 22px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12.5px;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+.menu-head:hover,
+.menu-head.open {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+
+.menu-head.open {
+  color: var(--accent-hi);
+}
+
+/* ---------------------------------------------------------------- メニューのプルダウン */
+/* サブメニューは右に列を足す（WebView は四角いので、1 枚の板の中で列を分ける） */
+body.menu {
+  height: auto;
+  background: var(--panel-2);
+}
+
+.lists {
+  display: inline-flex;
+  align-items: stretch;
+  border-radius: 8px;
+  background: var(--panel-2);
+  box-shadow: inset 0 0 0 1px var(--line-3);
+}
+
+.list {
+  min-width: 220px;
+  max-width: 420px;
+  padding: 5px;
+}
+
+.list + .list {
+  box-shadow: inset 1px 0 0 var(--line-2);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.list .item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 28px;
+  padding: 0 10px 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.list .item:hover:not(:disabled),
+.list .item.open {
+  background: var(--accent-a15);
+  color: var(--accent-hi);
+}
+
+.list .item:disabled {
+  color: var(--text-4);
+}
+
+.list .tick {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+.list .tick svg {
+  width: 16px;
+  height: 16px;
+  stroke: var(--accent);
+  stroke-width: 2.2;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.list .label {
+  flex: 1;
+}
+
+.list .shortcut {
+  margin-left: 18px;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.list .chev {
+  margin-left: 10px;
+  color: var(--text-3);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.list .sep {
+  width: auto;
+  height: 1px;
+  margin: 5px 6px;
+  background: var(--line-2);
+}
+
+.menu-note {
+  display: flex;
+  gap: 12px;
+  padding: 4px 10px 4px 30px;
+  color: var(--text-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.menu-note .label {
+  flex: 1;
+}
+
+.menu-note .shortcut {
+  margin-left: 18px;
 }
 
 /* 見出し付きのボタンのグループ */

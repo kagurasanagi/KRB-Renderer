@@ -29,6 +29,7 @@ use winit::window::{Window, WindowId};
 
 use crate::fl;
 
+mod web_menu;
 mod web_panel;
 use crate::i18n;
 use crate::kicad_cli::SilkJob;
@@ -482,11 +483,23 @@ struct ViewerSettings {
 /// 最大のサンプル数の既定値
 const DEFAULT_MAX_SPP: u32 = 4096;
 
-/// --web-ui のボタン列とステータスバーの高さ（egui のポイント）
-const WEB_TOOLBAR_HEIGHT: f32 = 78.0;
+/// --web-ui のボタン列（上端のメニューの見出しを含む）とステータスバーの高さ（egui のポイント）
+const WEB_TOOLBAR_HEIGHT: f32 = 106.0;
 const WEB_STATUS_HEIGHT: f32 = 48.0;
 /// --web-ui の警告の帯の高さ（3D 表示の上端に重ねる）
 const WEB_BANNER_HEIGHT: f32 = 40.0;
+
+/// --web-ui の開いているメニュー
+struct WebMenu {
+    /// どのメニューか（"file" など）
+    id: String,
+    /// プルダウンの左上（ボタン列の中の位置。egui のポイント = CSS の px）
+    at: egui::Pos2,
+    /// 中身の大きさ（ページが測って知らせてくる。それまでは隠しておく）
+    size: Option<egui::Vec2>,
+    /// キーボードの入力をプルダウンへ渡したか（見せたときに一度だけ）
+    focused: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StatusState {
@@ -930,6 +943,10 @@ struct App {
     proxy: Option<EventLoopProxy<crate::web_ui::Wake>>,
     /// ボタン列・ステータスバー・設定パネル・警告の帯の置き場所（egui のポイント。NOTHING なら出さない）
     web_rects: [egui::Rect; 4],
+    /// --web-ui：開いているメニューのプルダウン
+    web_menu: Option<WebMenu>,
+    /// 最後にプルダウンを閉じたメニューと時刻（外をクリックして閉じたのが、同じ見出しのクリックだったら開き直さない）
+    web_menu_closed: Option<(String, Instant)>,
     egui_ctx: egui::Context,
     egui_state: Option<EguiState>,
     gpu: Option<Gpu>,
@@ -2765,6 +2782,10 @@ impl App {
     }
 
     fn menu_bar(&mut self, root: &mut egui::Ui) {
+        // --web-ui のときは、メニューの見出しはボタン列（WebView）の上端にある
+        if self.web.is_some() {
+            return;
+        }
         let language_choice = self.language_choice.clone();
         let editor_open = self.editor.open;
         let mut toggle_editor = false;
@@ -2997,6 +3018,26 @@ impl App {
         let done = self.gpu.as_ref().is_some_and(|g| g.prog.samples() >= self.st.max_spp);
         for m in web.messages() {
             match m {
+                crate::web_ui::Msg::Menu { id, x, y } => {
+                    let reopen = self.web_menu_closed.as_ref().is_some_and(|(c, t)| *c == id && t.elapsed() < Duration::from_millis(400));
+                    if self.web_menu.as_ref().is_some_and(|m| m.id == id) || reopen {
+                        // 開いている見出しをもう一度押した：閉じる
+                        self.close_web_menu();
+                    } else {
+                        let focused = self.web_menu.as_ref().is_some_and(|m| m.focused);
+                        self.web_menu = Some(WebMenu { id, at: egui::pos2(x, y), size: None, focused });
+                    }
+                }
+                crate::web_ui::Msg::MenuSize(w, h) => {
+                    if let Some(m) = &mut self.web_menu {
+                        m.size = Some(egui::vec2(w, h));
+                    }
+                }
+                crate::web_ui::Msg::Click(id) if id == "menu.close" => self.close_web_menu(),
+                crate::web_ui::Msg::Click(id) if id.starts_with("menu:") => {
+                    self.close_web_menu();
+                    self.apply_menu_click(&id["menu:".len()..]);
+                }
                 crate::web_ui::Msg::Click(id) if self.apply_panel_click(&id) => {}
                 crate::web_ui::Msg::Set(id, v) => self.apply_panel_set(&id, &v),
                 crate::web_ui::Msg::Resize(w) => self.panel_width = w.clamp(300.0, 640.0),
@@ -3031,6 +3072,18 @@ impl App {
         }
     }
 
+    /// メニューのプルダウンを閉じる（キーボードの入力はビューアに戻す）
+    fn close_web_menu(&mut self) {
+        if let Some(m) = self.web_menu.take() {
+            if m.focused {
+                if let Some(web) = &mut self.web {
+                    web.focus_parent(crate::web_ui::Pane::Menu);
+                }
+            }
+            self.web_menu_closed = Some((m.id, Instant::now()));
+        }
+    }
+
     /// WebView を egui が空けた場所へ置き、ボタン列とステータスバーの状態を送る
     fn update_web(&mut self, ppp: f32) {
         if self.web.is_none() {
@@ -3040,7 +3093,17 @@ impl App {
         let px = |r: egui::Rect| -> Option<crate::web_ui::PxRect> {
             (r.is_positive()).then(|| ((r.min.x * ppp).round() as i32, (r.min.y * ppp).round() as i32, (r.width() * ppp).round() as u32, (r.height() * ppp).round() as u32))
         };
-        let rects = self.web_rects.map(px);
+        let mut rects = self.web_rects.map(px).to_vec();
+        // メニューのプルダウン：見出しの下に、中身の大きさで（ウィンドウからはみ出す分は切る）
+        let screen = self.egui_ctx.content_rect();
+        let menu_rect = self.web_menu.as_ref().and_then(|m| {
+            let size = m.size?;
+            let min = self.web_rects[0].min + m.at.to_vec2();
+            let r = egui::Rect::from_min_size(min, size).intersect(screen);
+            r.is_positive().then_some(r)
+        });
+        rects.push(menu_rect.and_then(px));
+        let menu = self.web_menu.as_ref().map(|m| self.menu_json(&m.id));
         let toolbar = self.toolbar_json();
         let status = self.status_texts().map(|t| t.json()).unwrap_or_default();
         let panel = rects[2].is_some().then(|| self.panel_json());
@@ -3059,6 +3122,15 @@ impl App {
         }
         if let Some(j) = banner {
             web.send(Pane::Banner, &j);
+        }
+        if let Some(j) = menu {
+            web.send(Pane::Menu, &j);
+        }
+        if let Some(m) = &mut self.web_menu {
+            if menu_rect.is_some() && !m.focused {
+                web.focus(Pane::Menu);
+                m.focused = true;
+            }
         }
     }
 
@@ -3080,6 +3152,8 @@ impl App {
                 "smd": fl!("toolbar-smd-tip"), "tht": fl!("toolbar-tht-tip"), "denoise": fl!("toolbar-denoise-tip"),
             },
             "groups": { "camera": fl!("toolbar-group-camera"), "visibility": fl!("toolbar-group-visibility"), "effects": fl!("toolbar-group-effects") },
+            "menus": web_menu::menu_heads(),
+            "menuOpen": self.web_menu.as_ref().map(|m| m.id.as_str()),
         })
         .to_string()
     }
@@ -3759,6 +3833,11 @@ impl ApplicationHandler<crate::web_ui::Wake> for App {
             WindowEvent::ModifiersChanged(m) => self.st.ctrl = m.state().control_key(),
             WindowEvent::MouseInput { state, button, .. } => {
                 let down = state == ElementState::Pressed;
+                // メニューのプルダウンの外（3D 表示）を押した：閉じるだけにする（WebView のフォーカスはこのウィンドウへ移らないので、ページは気づかない）
+                if down && self.web_menu.is_some() {
+                    self.close_web_menu();
+                    return;
+                }
                 if down && (response.consumed || !self.st.viewport.contains(self.st.last_cursor)) {
                     return; // メニュー・パネルの上での操作はカメラに渡さない
                 }
@@ -3955,6 +4034,8 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         web: None,
         proxy: None,
         web_rects: [egui::Rect::NOTHING; 4],
+        web_menu: None,
+        web_menu_closed: None,
         egui_ctx: egui::Context::default(),
         egui_state: None,
         gpu: None,

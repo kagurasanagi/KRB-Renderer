@@ -1,0 +1,94 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>/*STYLE*/</style>
+</head>
+<body class="menu">
+  <div class="lists" id="lists"></div>
+<script>
+// プルダウンのメニュー：Rust が組み立てた項目（JSON）を描く。サブメニューは右に列を足し、その分の大きさを Rust に頼む
+const post = (m) => window.ipc.postMessage(JSON.stringify(m));
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+document.addEventListener("keydown", (e) => {
+  if (e.code === "Escape") post({ type: "click", id: "menu.close" });
+  e.preventDefault();
+});
+// 外をクリックしたら（フォーカスが外れたら）閉じる
+window.addEventListener("blur", () => post({ type: "click", id: "menu.close" }));
+
+const el = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+};
+
+let model = null;
+// 開いているサブメニュー（入れ子の深さごとの項目の番号）
+let open = [];
+
+function list(items, depth) {
+  const ul = el("div", "list");
+  items.forEach((it, i) => {
+    if (it.sep) return ul.append(el("div", "sep"));
+    if (it.note != null) {
+      const n = el("div", "menu-note");
+      n.append(el("span", "label", it.note));
+      if (it.key) n.append(el("span", "shortcut mono", it.key));
+      return ul.append(n);
+    }
+    const row = el("button", "item" + (it.sub ? " has-sub" : "") + (open[depth] === i && it.sub ? " open" : ""));
+    row.disabled = it.enabled === false;
+    if (it.tip) row.title = it.tip;
+    const check = el("span", "tick");
+    if (it.checked === true) check.innerHTML = '<svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>';
+    row.append(check, el("span", "label", it.label));
+    if (it.shortcut) row.append(el("span", "shortcut mono", it.shortcut));
+    if (it.sub) row.append(el("span", "chev", "›"));
+    // 載せたらサブメニューを開く・閉じる（開いているものが変わるときだけ描き直す。描き直すとマウスの下の項目が替わるので）
+    row.addEventListener("mouseenter", () => {
+      const next = open.slice(0, depth);
+      if (it.sub) next[depth] = i;
+      if (next.length !== open.length || next.some((v, k) => v !== open[k])) {
+        open = next;
+        render();
+      }
+    });
+    row.addEventListener("click", () => {
+      if (it.sub) return;
+      post({ type: "click", id: "menu:" + it.id });
+    });
+    ul.append(row);
+  });
+  return ul;
+}
+
+function render() {
+  const lists = document.getElementById("lists");
+  const parts = [];
+  let items = model.items;
+  parts.push(list(items, 0));
+  for (let d = 0; d < open.length; d++) {
+    const it = items[open[d]];
+    if (!it || !it.sub) break;
+    items = it.sub;
+    parts.push(list(items, d + 1));
+  }
+  lists.replaceChildren(...parts);
+  // 中身の大きさを Rust に知らせる（その大きさに WebView を合わせてもらう。隠している間も測れる）
+  const r = lists.getBoundingClientRect();
+  post({ type: "size", width: Math.ceil(r.width), height: Math.ceil(r.height) });
+}
+
+window.krbr = {
+  menu(m) {
+    if (!model || m.key !== model.key) open = [];
+    model = m;
+    render();
+  },
+};
+post({ type: "ready" });
+</script>
+</body>
+</html>

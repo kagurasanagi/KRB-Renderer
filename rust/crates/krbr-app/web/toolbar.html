@@ -5,6 +5,8 @@
 <style>/*STYLE*/</style>
 </head>
 <body class="toolbar">
+  <nav class="menubar" id="menubar"></nav>
+  <div class="tools">
   <div class="cluster"><div class="title"></div><div class="group">
     <button class="tool" id="pause">
       <svg id="pause-icon" viewBox="0 0 24 24"></svg>
@@ -44,6 +46,7 @@
       <span id="denoise-label"></span>
     </button>
   </div></div>
+  </div>
 <script>
 const ICONS = {
   pause: '<rect x="6.5" y="4.5" width="3.5" height="15" rx="1"/><rect x="14" y="4.5" width="3.5" height="15" rx="1"/>',
@@ -61,6 +64,34 @@ document.addEventListener("keydown", (e) => {
   e.preventDefault();
 });
 document.addEventListener("contextmenu", (e) => e.preventDefault());
+
+// メニューの見出し：押すと Rust がその下にプルダウンを出す。開いている間は、載せただけで隣のメニューに替える
+let openMenu = null;
+function openAt(b) {
+  const r = b.getBoundingClientRect();
+  post({ type: "menu", id: b.dataset.id, x: r.left, y: r.bottom + 2 });
+}
+function setMenus(heads, open) {
+  const bar = document.getElementById("menubar");
+  if (bar.children.length !== heads.length) {
+    bar.replaceChildren(...heads.map((h) => {
+      const b = document.createElement("button");
+      b.className = "menu-head";
+      b.dataset.id = h.id;
+      b.addEventListener("click", () => openAt(b));
+      b.addEventListener("mouseenter", () => {
+        if (openMenu && openMenu !== h.id) openAt(b);
+      });
+      return b;
+    }));
+  }
+  heads.forEach((h, i) => {
+    const b = bar.children[i];
+    b.textContent = h.label;
+    b.classList.toggle("open", open === h.id);
+  });
+  openMenu = open;
+}
 
 function setTool(id, { label, tip, on = false, crossed = false, enabled = true }) {
   const b = document.getElementById(id);
@@ -83,6 +114,7 @@ window.krbr = {
     setTool("smd", { label: s.text.smd, tip: s.tips.smd, on: s.smd, crossed: !s.smd, enabled: s.board });
     setTool("tht", { label: s.text.tht, tip: s.tips.tht, on: s.tht, crossed: !s.tht, enabled: s.board });
     setTool("denoise", { label: s.text.denoise, tip: s.tips.denoise, on: s.denoise });
+    setMenus(s.menus, s.menuOpen);
     for (const [k, t] of Object.entries(s.groups)) document.getElementById("group-" + k).textContent = t;
   },
 };

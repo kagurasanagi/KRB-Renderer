@@ -1,4 +1,4 @@
-//! ビューアのボタン列・ステータスバー・設定パネル・警告の帯を WebView（WebView2）で描く（`krbr view --web-ui`）。
+//! ビューアのメニュー・ボタン列・ステータスバー・設定パネル・警告の帯を WebView（WebView2）で描く（`krbr view --web-ui`）。
 //! 3D 表示は今までどおり Vulkan で描き、その上下・右の四角い領域に WebView を子ウィンドウとして並べる（ボタン列・ステータスバー・
 //! 設定パネルは 3D 表示と重ならないので透過は要らない。警告の帯は 3D 表示の上端に重ねる、不透明な帯）。
 //! 画面は web/ の HTML・CSS を exe に埋め込んだもの。操作は JavaScript から window.ipc.postMessage で受け取り、
@@ -17,6 +17,7 @@ const TOOLBAR_HTML: &str = include_str!("../web/toolbar.html");
 const STATUS_HTML: &str = include_str!("../web/status.html");
 const PANEL_HTML: &str = include_str!("../web/panel.html");
 const BANNER_HTML: &str = include_str!("../web/banner.html");
+const MENU_HTML: &str = include_str!("../web/menu.html");
 
 /// WebView からの知らせでイベントループを起こす（待機中のビューアにも、押したボタンをすぐ反映する）
 #[derive(Debug, Clone, Copy)]
@@ -33,6 +34,10 @@ pub enum Msg {
     Key(String),
     /// 設定パネルの幅を変えた（CSS の px = egui のポイント）
     Resize(f32),
+    /// メニューの見出しを押した（開いているときは、見出しに載せただけでも）。x・y はボタン列の中の、プルダウンを出す位置（CSS の px）
+    Menu { id: String, x: f32, y: f32 },
+    /// プルダウンの中身の大きさ（CSS の px。サブメニューを開くと変わる）
+    MenuSize(f32, f32),
     /// ページを読み終えた（状態を送り直す）
     Ready,
 }
@@ -40,11 +45,14 @@ pub enum Msg {
 fn parse(body: &str) -> Option<Msg> {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let f = |k: &str| v.get(k).and_then(|x| x.as_f64()).filter(|x| x.is_finite()).map(|x| x as f32);
     match s("type")?.as_str() {
         "click" => s("id").map(Msg::Click),
         "set" => Some(Msg::Set(s("id")?, v.get("value")?.clone())),
         "key" => s("code").map(Msg::Key),
         "resize" => v.get("width").and_then(|w| w.as_f64()).filter(|w| w.is_finite()).map(|w| Msg::Resize(w as f32)),
+        "menu" => Some(Msg::Menu { id: s("id")?, x: f("x")?, y: f("y")? }),
+        "size" => Some(Msg::MenuSize(f("width")?, f("height")?)),
         "ready" => Some(Msg::Ready),
         _ => None,
     }
@@ -64,10 +72,12 @@ pub enum Pane {
     Status,
     Panel,
     Banner,
+    /// メニューのプルダウン（3D 表示などの上に重ねる）
+    Menu,
 }
 
 impl Pane {
-    pub const ALL: [Pane; 4] = [Pane::Toolbar, Pane::Status, Pane::Panel, Pane::Banner];
+    pub const ALL: [Pane; 5] = [Pane::Toolbar, Pane::Status, Pane::Panel, Pane::Banner, Pane::Menu];
 
     /// ページの window.krbr の関数の名前
     fn func(self) -> &'static str {
@@ -76,6 +86,7 @@ impl Pane {
             Pane::Status => "status",
             Pane::Panel => "panel",
             Pane::Banner => "banner",
+            Pane::Menu => "menu",
         }
     }
 
@@ -85,6 +96,7 @@ impl Pane {
             Pane::Status => STATUS_HTML,
             Pane::Panel => PANEL_HTML,
             Pane::Banner => BANNER_HTML,
+            Pane::Menu => MENU_HTML,
         }
     }
 }
@@ -158,6 +170,16 @@ impl WebUi {
         v.bounds = r;
     }
 
+    /// キーボードの入力をこのページへ（プルダウンを開いたとき。外をクリックしたら閉じるのは、ページがフォーカスを失った知らせで）
+    pub fn focus(&mut self, pane: Pane) {
+        let _ = self.view(pane).view.focus();
+    }
+
+    /// キーボードの入力をビューアのウィンドウへ戻す
+    pub fn focus_parent(&mut self, pane: Pane) {
+        let _ = self.view(pane).view.focus_parent();
+    }
+
     /// 届いた操作。ページを読み終えた知らせがあれば、次の送信で状態を送り直す
     pub fn messages(&mut self) -> Vec<Msg> {
         let msgs: Vec<Msg> = self.rx.try_iter().collect();
@@ -188,6 +210,8 @@ mod tests {
         assert_eq!(parse(r#"{"type":"set","id":"env.intensity","value":1.5}"#), Some(Msg::Set("env.intensity".into(), serde_json::json!(1.5))));
         assert_eq!(parse(r#"{"type":"key","code":"KeyP"}"#), Some(Msg::Key("KeyP".into())));
         assert_eq!(parse(r#"{"type":"resize","width":360}"#), Some(Msg::Resize(360.0)));
+        assert_eq!(parse(r#"{"type":"menu","id":"file","x":4,"y":28}"#), Some(Msg::Menu { id: "file".into(), x: 4.0, y: 28.0 }));
+        assert_eq!(parse(r#"{"type":"size","width":240,"height":300.5}"#), Some(Msg::MenuSize(240.0, 300.5)));
         assert_eq!(parse(r#"{"type":"ready"}"#), Some(Msg::Ready));
         assert_eq!(parse(r#"{"type":"other"}"#), None);
         assert_eq!(parse("not json"), None);
