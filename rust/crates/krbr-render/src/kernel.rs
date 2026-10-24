@@ -110,6 +110,24 @@ pub fn make_frame_ubo(sc: &GpuScene, width: u32, height: u32, fp: &FrameParams, 
     u
 }
 
+/// 実レンズのピントの距離の下限（焦点距離の何倍か）
+const MIN_FOCUS_IN_FOCAL_LENGTHS: f32 = 1.25;
+
+/// フィルムの中央の明るさ（LensSystem::center_weight。光線を数千本追うので、レンズ・F 値・フィルムの位置が同じなら覚えた値を使う。
+/// fill_lens はフレームごとに呼ばれる）
+fn center_weight_cached(file: &str, f_number: f32, sys: &LensSystem, film_dist: f32) -> f32 {
+    static LAST: Mutex<Option<(String, u32, u32, f32)>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((f, n, d, w)) = last.as_ref() {
+        if f == file && *n == f_number.to_bits() && *d == film_dist.to_bits() {
+            return *w;
+        }
+    }
+    let w = sys.center_weight(film_dist);
+    *last = Some((file.to_string(), f_number.to_bits(), film_dist.to_bits(), w));
+    w
+}
+
 /// GPU で描ける実レンズか（面の数が FrameUbo::lens_surfaces に収まる）。エラーにはファイルの名前を含めない（呼び出し側が付ける）
 fn check_lens_for_gpu(sys: LensSystem) -> Result<LensSystem, String> {
     if sys.surfaces.len() > MAX_LENS_SURFACES {
@@ -164,9 +182,11 @@ pub fn fill_lens(u: &mut FrameUbo, fp: &FrameParams) {
     if l.model == LensModel::Realistic {
         // F 値は設計値（開放）から絞る方向にだけ効く。絞りの面の有効径を縮める
         let sys = lens_system_for(&l.lens_file).stopped_down(l.f_number);
-        let front_to_focus = focus.max(1.0);
-        let film_dist = sys.film_distance_for(front_to_focus);
         let fe = sys.effective_focal_length();
+        // 焦点距離に近いほどフィルムが遠くなり、焦点距離より近いと実像ができない。焦点距離の 1.25 倍より近くには合わせない
+        // （Ctrl + クリックで手前の物を選んでも、像が壊れて真っ白にならないように）
+        let front_to_focus = focus.max(MIN_FOCUS_IN_FOCAL_LENGTHS * fe).max(1.0);
+        let film_dist = sys.film_distance_for(front_to_focus);
         let zs = sys.vertex_z();
         // 面の数は lens_system_for が MAX_LENS_SURFACES 以下に限っている（切り詰めると光学系が食い違うので、そうしない）
         let n = sys.surfaces.len();
@@ -175,7 +195,7 @@ pub fn fill_lens(u: &mut FrameUbo, fp: &FrameParams) {
         }
         // フィルムの大きさは、ピントの距離での倍率で設定の画角になるように
         let half_h = fe * cam.tan_half_fov_y * if front_to_focus > fe * 1.01 { front_to_focus / (front_to_focus - fe) } else { 1.0 };
-        u.lens3.z = 1.0 / sys.center_weight(film_dist).max(1e-12);
+        u.lens3.z = 1.0 / center_weight_cached(&l.lens_file, l.f_number, &sys, film_dist).max(1e-12);
         u.lens3.w = n as f32;
         u.lens4 = Vec4::new(half_h * cam.aspect, half_h, zs[n - 1] - film_dist, 0.5 * sys.surfaces[n - 1].aperture);
     }

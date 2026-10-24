@@ -315,7 +315,18 @@ impl LensSystem {
         let zs = self.vertex_z();
         let z_rear = *zs.last().unwrap() as f64;
         let z_film = z_rear - film_distance as f64;
-        let r = 0.5 * self.surfaces.last().unwrap().aperture as f64;
+        let rear = 0.5 * self.surfaces.last().unwrap().aperture as f64;
+        // 中央から後ろの面へ向けた光線が通る範囲（軸対称なので円になる）の半径を先に探し、その円の中で積分する。
+        // 後ろの面全体を粗い格子で見ると、絞ったときに通る範囲が格子の間に落ちて 0 になり、明るさの補正（この値の逆数）が
+        // 無限大に近くなって画面が真っ白になる（F 22 で、ピントを 300 mm より遠くにしたとき）
+        const STEPS: usize = 4096;
+        let passes = |x: f64| {
+            let mut o = DVec3::new(0.0, 0.0, z_film);
+            let mut d = (DVec3::new(x, 0.0, z_rear) - o).normalize();
+            self.trace(&mut o, &mut d, false)
+        };
+        let Some(k) = (0..STEPS).rev().find(|&k| passes(rear * (k as f64 + 0.5) / STEPS as f64)) else { return 0.0 };
+        let r = (rear * (k as f64 + 1.0) / STEPS as f64).min(rear);
         let n = 64;
         let mut sum = 0.0;
         for j in 0..n {
@@ -341,6 +352,48 @@ impl LensSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 後ろの面全体を細かい格子で積分した中央の明るさ（center_weight と比べる用）
+    fn brute_center_weight(s: &LensSystem, film_distance: f32, n: usize) -> f64 {
+        let z_rear = *s.vertex_z().last().unwrap() as f64;
+        let z_film = z_rear - film_distance as f64;
+        let r = 0.5 * s.surfaces.last().unwrap().aperture as f64;
+        let mut sum = 0.0;
+        for j in 0..n {
+            for i in 0..n {
+                let (x, y) = ((2.0 * (i as f64 + 0.5) / n as f64 - 1.0) * r, (2.0 * (j as f64 + 0.5) / n as f64 - 1.0) * r);
+                if x * x + y * y > r * r {
+                    continue;
+                }
+                let mut o = DVec3::new(0.0, 0.0, z_film);
+                let mut d = (DVec3::new(x, y, z_rear) - o).normalize();
+                let c = d.z;
+                if s.trace(&mut o, &mut d, false) {
+                    sum += c.powi(4);
+                }
+            }
+        }
+        sum * (2.0 * r / n as f64).powi(2) / (z_rear - z_film).powi(2)
+    }
+
+    /// 絞っても、ピントをどこに合わせても、中央の明るさは 0 にならない（0 だと明るさの補正が無限大になって画面が真っ白になった：
+    /// F 22 でピントを 300 mm より遠くにしたとき）。開放と絞ったときで、細かい格子で全面を積分した値と合う
+    #[test]
+    fn center_weight_is_positive_and_accurate_when_stopped_down() {
+        let open = LensSystem::double_gauss50();
+        for f_number in [2.0f32, 8.0, 22.0] {
+            let s = open.stopped_down(f_number);
+            for focus in [80.0f32, 300.0, 1000.0, 0.0] {
+                let film = s.film_distance_for(focus);
+                let w = s.center_weight(film) as f64;
+                assert!(w > 0.0, "f/{f_number}, focus {focus}: {w}");
+                if f_number < 10.0 {
+                    let b = brute_center_weight(&s, film, 1024);
+                    assert!((w / b - 1.0).abs() < 0.03, "f/{f_number}, focus {focus}: {w} vs {b}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn double_gauss_focal_length() {
@@ -391,3 +444,4 @@ mod tests {
         assert!("realistc".parse::<LensModel>().is_err());
     }
 }
+
