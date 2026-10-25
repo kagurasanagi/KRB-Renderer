@@ -124,6 +124,10 @@ pub(super) struct VideoJob {
     restore: Restore,
     writer: Option<VideoWriter>,
     started: Instant,
+    /// 前のコマのカメラ（フローを求める）
+    prev_cam: Option<krbr_render::flow::FlowCamera>,
+    /// 開発用：このコマ数で書き出しを終える（KRBR_TEST_VIDEO_MAXFRAMES）
+    max_frames: Option<u32>,
 }
 
 /// 「動画を書き出す」の窓の状態
@@ -181,7 +185,7 @@ impl App {
         st.paused = false;
         let total = s.frames();
         info!("video: {} ({}x{}, {} fps, {} frames, {} spp, {:.1} Mbit/s, {})", path.display(), s.width, s.height, s.fps, total, s.spp, s.bitrate() as f64 / 1e6, s.pattern.as_str());
-        self.video = Some(VideoJob { total, frame: 0, target, distance: st.distance, elevation: st.elevation, azimuth: st.azimuth, restore, writer: Some(writer), started: Instant::now(), path, s });
+        self.video = Some(VideoJob { total, frame: 0, target, distance: st.distance, elevation: st.elevation, azimuth: st.azimuth, restore, writer: Some(writer), started: Instant::now(), path, s, prev_cam: None, max_frames: std::env::var("KRBR_TEST_VIDEO_MAXFRAMES").ok().and_then(|v| v.parse().ok()) });
         self.video_dialog.message.clear();
         self.set_video_frame();
         Ok(())
@@ -198,9 +202,13 @@ impl App {
                     (s.width, s.height, s.spp, s.seconds) = (1280, 720, n, 0.2);
                     s.denoise = std::env::var_os("KRBR_TEST_VIDEO_NODENOISE").is_none();
                 }
+                if let Some(x) = std::env::var("KRBR_TEST_VIDEO_SECONDS").ok().and_then(|v| v.parse().ok()) {
+                    (s.seconds, s.fps) = (x, 30);
+                }
                 if let Err(e) = self.start_video(p) {
                     error!("video (test): {e}");
                 }
+                self.video_test_exit = true;
             }
         }
         let Some(job) = &self.video else { return };
@@ -219,6 +227,7 @@ impl App {
             Ok(i) => i,
             Err(e) => return self.end_video(Some(e)),
         };
+        self.note_video_camera();
         let rgba = image_io::tonemap_rgba8(&img, self.st.exposure, &self.st.glow_params());
         let job = self.video.as_mut().unwrap();
         // 開発用：エンコードする前のコマを PNG でも書く（画質の比べ用）
@@ -229,10 +238,35 @@ impl App {
             return self.end_video(Some(e));
         }
         job.frame += 1;
-        if job.frame >= job.total {
+        if job.frame >= job.total || job.max_frames.is_some_and(|m| job.frame >= m) {
             self.end_video(None);
         } else {
             self.set_video_frame();
+        }
+    }
+
+    /// 今のコマのカメラ（フローを求める。レンズの写し方を含む）
+    fn video_flow_camera(&self, w: u32, h: u32) -> krbr_render::flow::FlowCamera {
+        let cam = orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, w as f32 / h.max(1) as f32);
+        krbr_render::flow::FlowCamera::new(cam, &self.prep.cfg.lens)
+    }
+
+    /// このコマのカメラを覚える（次のコマのフローに使う）。開発用（KRBR_VIDEO_RAW_DIR）：前のコマへの後ろ向きのフローを
+    /// flow_<コマ>.bin（float の x, y）にも書く（ちらつきを、前のコマをずらして比べて測る）
+    fn note_video_camera(&mut self) {
+        let Some(g) = self.gpu.as_ref() else { return };
+        let (w, h) = (g.prog.targets().width, g.prog.targets().height);
+        let cam = self.video_flow_camera(w, h);
+        if let Some(dir) = std::env::var_os("KRBR_VIDEO_RAW_DIR") {
+            if let (Some(prev), Ok(pos)) = (self.video.as_ref().and_then(|j| j.prev_cam.clone()), g.prog.readback_position()) {
+                let f = krbr_render::flow::backward_flow(&pos, w, h, &cam, &prev);
+                let bytes: Vec<u8> = f.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
+                let frame = self.video.as_ref().map(|j| j.frame).unwrap_or(0);
+                let _ = std::fs::write(PathBuf::from(dir).join(format!("flow_{frame:04}.bin")), bytes);
+            }
+        }
+        if let Some(j) = self.video.as_mut() {
+            j.prev_cam = Some(cam);
         }
     }
 
@@ -265,6 +299,10 @@ impl App {
             }
         }
         self.last_update = d.message.clone();
+        // 開発用の書き出し（--test-video）は、終えたらビューアも閉じる
+        if self.video_test_exit {
+            self.done = true;
+        }
     }
 
     /// 書き出しを途中でやめる（そこまでのコマで動画を閉じる）

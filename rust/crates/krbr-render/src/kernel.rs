@@ -184,6 +184,31 @@ fn lens_system_for(file: &str) -> LensSystem {
     sys
 }
 
+/// 実レンズの光学系（絞った後）と、フィルムの位置（最後の面から）・高さの半分（mm）・中央の明るさ
+pub struct RealisticFilm {
+    pub sys: LensSystem,
+    pub film_dist: f32,
+    pub half_h: f32,
+    pub center_weight: f32,
+}
+
+/// 実レンズのフィルム（fill_lens と、動画のフロー（crate::flow）が使う）
+pub fn realistic_film(l: &LensParams, cam: &krbr_scene::Camera) -> RealisticFilm {
+    let focus = if l.focus_distance_mm > 0.0 { l.focus_distance_mm } else { cam.distance };
+    // F 値は設計値（開放）から絞る方向にだけ効く。絞りの面の有効径を縮める
+    let sys = lens_system_for(&l.lens_file).stopped_down(l.f_number);
+    let fe = sys.effective_focal_length();
+    // 焦点距離に近いほどフィルムが遠くなり、焦点距離より近いと実像ができない。焦点距離の 1.25 倍より近くには合わせない
+    // （Ctrl + クリックで手前の物を選んでも、像が壊れて真っ白にならないように）
+    let front_to_focus = focus.max(MIN_FOCUS_IN_FOCAL_LENGTHS * fe).max(1.0);
+    let film_dist = sys.film_distance_for(front_to_focus);
+    // フィルムの大きさは、端の主光線（絞りの中心を通る光線）が設定の画角の向きになるように決める。ピントを変えても
+    // 画角（基板の見かけの大きさ）が変わらない。求まらなければ、薄いレンズの近似（ピントの距離での倍率）
+    let (center_weight, film_half_h) = film_constants_cached(&l.lens_file, l.f_number, &sys, film_dist, cam.tan_half_fov_y);
+    let half_h = film_half_h.unwrap_or_else(|| fe * cam.tan_half_fov_y * if front_to_focus > fe * 1.01 { front_to_focus / (front_to_focus - fe) } else { 1.0 });
+    RealisticFilm { sys, film_dist, half_h, center_weight }
+}
+
 /// レンズの値（make_frame_ubo から呼ぶ）
 pub fn fill_lens(u: &mut FrameUbo, fp: &FrameParams) {
     let l: &LensParams = &fp.lens;
@@ -201,23 +226,13 @@ pub fn fill_lens(u: &mut FrameUbo, fp: &FrameParams) {
     const ND: f32 = 1.5168; // BK7 相当
     u.lens3 = Vec4::new(ND, if l.abbe_number > 0.0 { (ND - 1.0) / l.abbe_number } else { 0.0 }, 0.0, 0.0);
     if l.model == LensModel::Realistic {
-        // F 値は設計値（開放）から絞る方向にだけ効く。絞りの面の有効径を縮める
-        let sys = lens_system_for(&l.lens_file).stopped_down(l.f_number);
-        let fe = sys.effective_focal_length();
-        // 焦点距離に近いほどフィルムが遠くなり、焦点距離より近いと実像ができない。焦点距離の 1.25 倍より近くには合わせない
-        // （Ctrl + クリックで手前の物を選んでも、像が壊れて真っ白にならないように）
-        let front_to_focus = focus.max(MIN_FOCUS_IN_FOCAL_LENGTHS * fe).max(1.0);
-        let film_dist = sys.film_distance_for(front_to_focus);
+        let RealisticFilm { sys, film_dist, half_h, center_weight } = realistic_film(l, cam);
         let zs = sys.vertex_z();
         // 面の数は lens_system_for が MAX_LENS_SURFACES 以下に限っている（切り詰めると光学系が食い違うので、そうしない）
         let n = sys.surfaces.len();
         for i in 0..n {
             u.lens_surfaces[i] = Vec4::new(sys.surfaces[i].radius, zs[i], sys.surfaces[i].ior, 0.5 * sys.surfaces[i].aperture);
         }
-        // フィルムの大きさは、端の主光線（絞りの中心を通る光線）が設定の画角の向きになるように決める。ピントを変えても
-        // 画角（基板の見かけの大きさ）が変わらない。求まらなければ、薄いレンズの近似（ピントの距離での倍率）
-        let (center_weight, film_half_h) = film_constants_cached(&l.lens_file, l.f_number, &sys, film_dist, cam.tan_half_fov_y);
-        let half_h = film_half_h.unwrap_or_else(|| fe * cam.tan_half_fov_y * if front_to_focus > fe * 1.01 { front_to_focus / (front_to_focus - fe) } else { 1.0 });
         u.lens3.z = 1.0 / center_weight.max(1e-12);
         u.lens3.w = n as f32;
         u.lens4 = Vec4::new(half_h * cam.aspect, half_h, zs[n - 1] - film_dist, 0.5 * sys.surfaces[n - 1].aperture);

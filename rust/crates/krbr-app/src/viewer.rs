@@ -974,6 +974,8 @@ struct App {
     /// 動画の書き出し（している間）
     video: Option<video_job::VideoJob>,
     video_dialog: video_job::VideoDialog,
+    /// --test-video：書き出しを終えたら閉じる
+    video_test_exit: bool,
     proxy: Option<EventLoopProxy<crate::web_ui::Wake>>,
     /// ボタン列・ステータスバー・設定パネル・警告の帯の置き場所（egui のポイント。NOTHING なら出さない）
     web_rects: [egui::Rect; 7],
@@ -4469,6 +4471,7 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         recent_boards: Vec::new(),
         video: None,
         video_dialog: video_job::VideoDialog::default(),
+        video_test_exit: false,
         proxy: None,
         web_rects: [egui::Rect::NOTHING; 7],
         about_open: false,

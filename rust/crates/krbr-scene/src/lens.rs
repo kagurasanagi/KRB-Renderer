@@ -317,6 +317,13 @@ impl LensSystem {
     /// フィルムの高さ y（mm、フィルムの中心から）の点から出て、絞りの中心を通る光線（主光線）が、物体側で軸となす角の正接。
     /// 主光線の向きだけを見るので、開口（絞りを含む）は無視する。絞りの面が無い・追跡できないなら None
     pub fn chief_ray_tan(&self, film_distance: f32, y: f64) -> Option<f64> {
+        let (_, d) = self.chief_ray(film_distance, y)?;
+        (d.z.abs() >= 1e-12).then(|| (d.x / d.z).abs())
+    }
+
+    /// フィルムの高さ y（mm、+x の上）の点から出る主光線の、前の面を出たところの点と向き（レンズの座標）。
+    /// 開口は無視する。絞りの面が無い・追跡できないなら None
+    pub fn chief_ray(&self, film_distance: f32, y: f64) -> Option<(DVec3, DVec3)> {
         let stop = self.surfaces.iter().rposition(|s| s.radius == 0.0)?;
         let mut open = self.clone();
         for s in &mut open.surfaces {
@@ -352,10 +359,7 @@ impl LensSystem {
             return None;
         }
         let (mut o, mut d) = start(a1);
-        if !open.trace(&mut o, &mut d, false) || d.z.abs() < 1e-12 {
-            return None;
-        }
-        Some((d.x / d.z).abs())
+        open.trace(&mut o, &mut d, false).then_some((o, d))
     }
 
     /// 主光線が物体側で軸となす角の正接が tan_half になるフィルムの高さ（mm）。ピントを変えても（フィルムの位置が変わっても）
