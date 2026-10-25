@@ -1,13 +1,8 @@
 //! 動画の書き出し（ファイル → 動画を書き出す）：カメラを決まった動き（ターンテーブルなど）で動かしながら、1 コマずつ
 //! 決まったサンプル数まで積んで（ノイズ除去して）トーンマッピングし、MP4（H.264）にする。書き出しの間は描画ロックと
 //! 同じく、ほかの操作で累積が変わらないようにする。
-//! 時間方向のちらつき：OIDN は 1 枚ずつのノイズ除去で、時間方向は見ない。ガラスなどでは、ノイズ除去した後に残る
-//! まだらな模様がコマごとに変わってちらつき、サンプル数を増やしても減りにくい（ガラス越しの明るい経路はまれなので、
-//! 256 spp でも 1024 spp でもノイズ除去の結果の揺れはほぼ同じだった）。そこで 1 コマを、乱数の種を変えた
-//! サブフレーム（それぞれ spp / サブフレーム数）に分けて、それぞれノイズ除去してから平均する。揺れは
-//! 1/√(サブフレーム数) になる（同じ計算量で 1 枚を積むより、ずっと効く）。種の組はどのコマも同じなので、拡散面の
-//! 模様はコマの間で変わらない。モーションブラーを付けると、サブフレームをシャッターの開いている間（コマの間隔の半分）の
-//! カメラの位置で描く
+//! 時間方向のちらつき：OIDN は 1 枚ずつのノイズ除去（時間方向は見ない）。どのコマも同じ乱数の列（画素・サンプル番号・
+//! シードが同じ）で積むので、残ったノイズは画面に張り付いた模様になり、コマごとに跳ねない。サンプル数を増やすほど消える
 
 use serde_json::{json, Value};
 
@@ -80,26 +75,17 @@ pub(super) struct VideoSettings {
     pub quality: Quality,
     /// 基板の中心のまわりを回る（false なら今の注視点）
     pub center_board: bool,
-    /// 1 コマを分けるサブフレームの数（それぞれ違う乱数の種で spp / 数 を積み、ノイズ除去して平均する）
-    pub subframes: u32,
-    /// モーションブラー（シャッター 180°：コマの間隔の半分の間のカメラの動き）
-    pub motion_blur: bool,
 }
 
 impl Default for VideoSettings {
     fn default() -> Self {
-        Self { pattern: Pattern::Turntable, clockwise: false, seconds: 12.0, fps: 30, width: 1920, height: 1080, spp: 512, denoise: true, quality: Quality::Standard, center_board: true, subframes: 4, motion_blur: true }
+        Self { pattern: Pattern::Turntable, clockwise: false, seconds: 12.0, fps: 30, width: 1920, height: 1080, spp: 128, denoise: true, quality: Quality::Standard, center_board: true }
     }
 }
 
 impl VideoSettings {
     pub fn frames(&self) -> u32 {
         ((self.seconds * self.fps as f32).round() as u32).max(1)
-    }
-
-    /// サブフレーム 1 枚のサンプル数（16 以上）
-    pub fn sub_spp(&self) -> u32 {
-        (self.spp / self.subframes.max(1)).max(16)
     }
 
     pub fn bitrate(&self) -> u32 {
@@ -111,7 +97,6 @@ impl VideoSettings {
 const SIZES: [(u32, u32); 5] = [(1920, 1080), (1280, 720), (1080, 1080), (1080, 1350), (3840, 2160)];
 const SPPS: [u32; 6] = [32, 64, 128, 256, 512, 1024];
 const FPS: [u32; 3] = [24, 30, 60];
-const SUBFRAMES: [u32; 5] = [1, 2, 4, 8, 16];
 
 /// 書き出しの前の視点と設定（終わったら戻す）
 struct Restore {
@@ -129,11 +114,8 @@ pub(super) struct VideoJob {
     s: VideoSettings,
     path: PathBuf,
     total: u32,
-    /// 今描いているコマと、その中のサブフレーム
+    /// 今描いているコマ
     frame: u32,
-    sub: u32,
-    /// 今のコマのサブフレームの和（リニア）
-    acc: Option<ImageF>,
     /// 回る中心と距離・向きの基準
     target: Vec3,
     distance: f32,
@@ -168,16 +150,10 @@ impl App {
         }
     }
 
-    /// 書き出すコマ（サブフレーム）のカメラと乱数の種にする（累積は、次のフレームでやり直される）
+    /// 書き出すコマのカメラにする（累積は、次のフレームでやり直される）
     fn set_video_frame(&mut self) {
         let Some(job) = &self.video else { return };
-        let k = job.s.subframes.max(1) as f64;
-        // シャッター 180°：コマの時刻を中心に、コマの間隔の半分に広げる
-        let shutter = if job.s.motion_blur && k > 1.0 { 0.5 } else { 0.0 };
-        let t = (job.frame as f64 + shutter * ((job.sub as f64 + 0.5) / k - 0.5)) / job.total as f64;
-        let (az, el) = Self::video_camera(job, t);
-        // 種はサブフレームの番号（--seed をずらす分も足す）
-        self.seed_override = Some(self.vo.common.seed.wrapping_mul(1009).wrapping_add(job.sub));
+        let (az, el) = Self::video_camera(job, job.frame as f64 / job.total as f64);
         let (target, distance) = (job.target, job.distance);
         let st = &mut self.st;
         (st.target, st.distance, st.azimuth, st.elevation) = (target, distance, az, el);
@@ -200,12 +176,12 @@ impl App {
         let b = &self.prep.scene.board;
         let target = if s.center_board { krbr_geom::board_mesh::board_to_world(b.center, 0.0, b.center) } else { st.target };
         st.size_mode = Some((s.width, s.height));
-        st.max_spp = s.sub_spp();
+        st.max_spp = s.spp;
         st.denoise = s.denoise;
         st.paused = false;
         let total = s.frames();
-        info!("video: {} ({}x{}, {} fps, {} frames, {} spp = {} x {}, motion blur {}, {:.1} Mbit/s, {})", path.display(), s.width, s.height, s.fps, total, s.sub_spp() * s.subframes, s.subframes, s.sub_spp(), s.motion_blur, s.bitrate() as f64 / 1e6, s.pattern.as_str());
-        self.video = Some(VideoJob { total, frame: 0, sub: 0, acc: None, target, distance: st.distance, elevation: st.elevation, azimuth: st.azimuth, restore, writer: Some(writer), started: Instant::now(), path, s });
+        info!("video: {} ({}x{}, {} fps, {} frames, {} spp, {:.1} Mbit/s, {})", path.display(), s.width, s.height, s.fps, total, s.spp, s.bitrate() as f64 / 1e6, s.pattern.as_str());
+        self.video = Some(VideoJob { total, frame: 0, target, distance: st.distance, elevation: st.elevation, azimuth: st.azimuth, restore, writer: Some(writer), started: Instant::now(), path, s });
         self.video_dialog.message.clear();
         self.set_video_frame();
         Ok(())
@@ -221,13 +197,10 @@ impl App {
                 if let Some(n) = std::env::var("KRBR_TEST_VIDEO_SPP").ok().and_then(|v| v.parse().ok()) {
                     (s.width, s.height, s.spp, s.seconds) = (1280, 720, n, 0.2);
                     s.denoise = std::env::var_os("KRBR_TEST_VIDEO_NODENOISE").is_none();
-                    s.subframes = std::env::var("KRBR_TEST_VIDEO_SUB").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
-                    s.motion_blur = false;
                 }
                 if let Err(e) = self.start_video(p) {
                     error!("video (test): {e}");
                 }
-                self.video_test_exit = true;
             }
         }
         let Some(job) = &self.video else { return };
@@ -236,7 +209,7 @@ impl App {
         let use_denoise = job.s.denoise && g.denoiser.is_some();
         let ready = (t.width, t.height) == (job.s.width, job.s.height)
             && !self.st.changed.frame
-            && g.prog.samples() >= job.s.sub_spp()
+            && g.prog.samples() >= job.s.spp
             && (!use_denoise || (self.denoised_samples == g.prog.samples() && self.denoised_epoch == self.accum_epoch));
         // ノイズ除去を頼んだのに使えない（作れなかった）ときは、そのまま書く
         if !ready {
@@ -246,20 +219,6 @@ impl App {
             Ok(i) => i,
             Err(e) => return self.end_video(Some(e)),
         };
-        // サブフレームを足していき、そろったら平均してトーンマッピングする
-        let job = self.video.as_mut().unwrap();
-        match &mut job.acc {
-            Some(a) => a.rgba.iter_mut().zip(&img.rgba).for_each(|(x, y)| *x += y),
-            None => job.acc = Some(img),
-        }
-        job.sub += 1;
-        if job.sub < job.s.subframes.max(1) {
-            return self.set_video_frame();
-        }
-        let mut img = job.acc.take().unwrap();
-        let k = job.sub as f32;
-        img.rgba.iter_mut().for_each(|x| *x /= k);
-        job.sub = 0;
         let rgba = image_io::tonemap_rgba8(&img, self.st.exposure, &self.st.glow_params());
         let job = self.video.as_mut().unwrap();
         // 開発用：エンコードする前のコマを PNG でも書く（画質の比べ用）
@@ -280,7 +239,6 @@ impl App {
     /// 書き出しを終える（error があれば失敗、中止は cancel_video）。視点と設定を戻す
     pub(super) fn end_video(&mut self, error: Option<String>) {
         let Some(mut job) = self.video.take() else { return };
-        self.seed_override = None;
         let result = job.writer.take().map(|w| w.finish()).unwrap_or(Ok(0));
         let r = &job.restore;
         let st = &mut self.st;
@@ -307,10 +265,6 @@ impl App {
             }
         }
         self.last_update = d.message.clone();
-        // 開発用の書き出し（--test-video）は、終えたらビューアも閉じる
-        if self.video_test_exit {
-            self.done = true;
-        }
     }
 
     /// 書き出しを途中でやめる（そこまでのコマで動画を閉じる）
@@ -324,8 +278,7 @@ impl App {
     fn video_progress(&self) -> Option<(f64, Option<f64>)> {
         let job = self.video.as_ref()?;
         let g = self.gpu.as_ref()?;
-        let k = job.s.subframes.max(1) as f64;
-        let within = (job.sub as f64 + (g.prog.samples() as f64 / job.s.sub_spp() as f64).min(1.0)) / k;
+        let within = (g.prog.samples() as f64 / job.s.spp.max(1) as f64).min(1.0);
         let done = (job.frame as f64 + within) / job.total as f64;
         let elapsed = job.started.elapsed().as_secs_f64();
         let remaining = (done > 0.002).then(|| elapsed / done * (1.0 - done));
@@ -348,7 +301,7 @@ impl App {
         let t = g.prog.targets();
         let per_sample = self.accum_wall.as_secs_f64() / self.accum_measured as f64 / (t.width as f64 * t.height as f64).max(1.0);
         let s = &self.video_dialog.settings;
-        Some(per_sample * s.width as f64 * s.height as f64 * (s.sub_spp() * s.subframes) as f64 * s.frames() as f64)
+        Some(per_sample * s.width as f64 * s.height as f64 * s.spp as f64 * s.frames() as f64)
     }
 
     /// 「動画を書き出す」の窓の内容（web/video.html の krbr.video に渡す JSON）
@@ -372,7 +325,6 @@ impl App {
                 "pattern": s.pattern.as_str(), "direction": if s.clockwise { "cw" } else { "ccw" }, "seconds": s.seconds, "fps": s.fps.to_string(),
                 "size": format!("{}x{}", s.width, s.height), "spp": s.spp.to_string(), "denoise": s.denoise, "quality": s.quality.as_str(),
                 "center": if s.center_board { "board" } else { "target" },
-                "subframes": s.subframes.to_string(), "blur": s.motion_blur,
             },
             "options": {
                 "pattern": [
@@ -386,13 +338,11 @@ impl App {
                 "spp": SPPS.iter().map(|n| opt(n.to_string(), format!("{n} spp"))).collect::<Vec<_>>(),
                 "quality": [opt("high".into(), fl!("video-quality-high")), opt("standard".into(), fl!("video-quality-standard")), opt("small".into(), fl!("video-quality-small"))],
                 "center": [opt("board".into(), fl!("video-center-board")), opt("target".into(), fl!("video-center-target"))],
-                "subframes": SUBFRAMES.iter().map(|n| opt(n.to_string(), if *n == 1 { fl!("video-subframes-off") } else { fl!("video-subframes-n", n = n.to_string(), spp = (s.spp / n).max(16).to_string()) })).collect::<Vec<_>>(),
             },
             "text": {
                 "pattern": fl!("video-pattern"), "direction": fl!("video-direction"), "seconds": fl!("video-seconds"), "fps": fl!("video-fps"), "size": fl!("video-size"),
                 "spp": fl!("video-spp"), "sppTip": fl!("video-spp-tip"), "denoise": fl!("video-denoise"), "denoiseTip": fl!("video-denoise-tip"),
-                "quality": fl!("video-quality"), "center": fl!("video-center"),
-                "subframes": fl!("video-subframes"), "subframesTip": fl!("video-subframes-tip"), "blur": fl!("video-blur"), "blurTip": fl!("video-blur-tip"), "start": fl!("video-start"), "cancel": fl!("video-cancel"),
+                "quality": fl!("video-quality"), "center": fl!("video-center"), "start": fl!("video-start"), "cancel": fl!("video-cancel"),
                 "summary": fl!("video-summary", frames = s.frames().to_string(), mb = format!("{:.0}", mb.max(1.0)), mbps = format!("{:.1}", s.bitrate() as f64 / 1e6)),
                 "estimate": self.video_estimate().map(|e| fl!("video-estimate", time = format_duration(e))).unwrap_or_else(|| fl!("video-estimate-unknown")),
                 "hint": fl!("video-hint"), "noBoard": fl!("save-no-board"), "running": fl!("video-running"), "remaining": fl!("video-remaining"),
@@ -431,8 +381,6 @@ impl App {
                 }
             }
             "video.center" => s.center_board = text == "board",
-            "video.subframes" => s.subframes = text.parse().ok().filter(|n| SUBFRAMES.contains(n)).unwrap_or(s.subframes),
-            "video.blur" => s.motion_blur = v.as_bool().unwrap_or(s.motion_blur),
             _ => {}
         }
     }
@@ -490,7 +438,6 @@ mod tests {
     fn turntable_loops_and_settings() {
         let s = VideoSettings::default();
         assert_eq!(s.frames(), 360);
-        assert_eq!(s.sub_spp(), 128);
         assert!(s.bitrate() > 1_000_000);
         assert_eq!(Pattern::parse("swing"), Some(Pattern::Swing));
     }

@@ -106,16 +106,6 @@ function render(m) {
   sw.append(secs, el("span", "unit", "s"));
   main.append(row(t.seconds, sw), row(t.fps, segmented("fps", o.fps, v.fps, busy)), row(t.size, select("size", o.size, v.size, busy)));
   main.append(row(t.spp, select("spp", o.spp, v.spp, busy), t.sppTip));
-  main.append(row(t.subframes, select("subframes", o.subframes, v.subframes, busy), t.subframesTip));
-  const bl = el("label", "check");
-  bl.title = t.blurTip;
-  const bbox = el("input");
-  bbox.type = "checkbox";
-  bbox.checked = v.blur;
-  bbox.disabled = busy || v.subframes === "1";
-  bbox.addEventListener("change", () => set("blur", bbox.checked));
-  bl.append(bbox, el("span", "mark"), el("span", null, t.blur));
-  main.append(row("", bl, t.blurTip));
   const dn = el("label", "check");
   dn.title = t.denoiseTip;
   const box = el("input");

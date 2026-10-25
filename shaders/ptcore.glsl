@@ -39,22 +39,16 @@ vec4 directLightPt(Shade s, vec3 p, vec3 ng, vec3 ns, vec3 t, vec3 b, vec3 v, ve
 // 経路を depth0 番目の線分から最後まで追う（depth 番目の線分の先の頂点は、始点から depth + 1 本目の線分の先）。
 // 経路の線分は maxPathLength() 本まで：最後の頂点では光源・環境光に当たった分だけを数え、直接サンプリングも散乱もしない
 // （同じ長さの経路を、直接サンプリングでも BSDF サンプリングでも作れるようにして、MIS の両方がそろうように）。
-// 返り値は放射輝度（beta をかけた後）。depth0 == 0 のときだけ、ノイズ除去の手がかり（アルベドと法線）を書く：
-// 滑らかなガラス・鏡（isDeltaLike）を通り抜けた先の、最初のふつうの面のもの（OIDN の勧め。ガラスそのものの白い
-// アルベドと円柱の法線を渡すと、屈折して見える像とノイズの区別がつかず、ガラスの中がまだらになり、動画ではコマごとに
-// まだらの模様が変わってちらつく）。途中のガラス・鏡の色はかけていく
-const uint GUIDE_MAX_DEPTH = 6u;
+// 返り値は放射輝度（beta をかけた後）。depth0 == 0 のときだけ、最初の交点のアルベドと法線を書く
 vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, inout vec3 normal) {
     vec4 L = vec4(0.0);
-    bool guideOpen = depth0 == 0u;
-    vec3 guideTint = vec3(1.0);
     for (uint depth = depth0;; ++depth) {
         Hit hit;
         if (!traceClosest(st.origin, st.dir, hit)) {
             vec4 Le = envSpectrum(st.dir);
-            if (guideOpen) albedo = guideTint * clamp(envRadiance(st.dir), 0.0, 1.0);
             if (depth == 0u) {
                 L += st.beta * Le;  // beta はカメラの重み（周辺減光など）
+                albedo = clamp(envRadiance(st.dir), 0.0, 1.0);
             } else if (st.prevPdf > 0.0) {  // prevPdf = 0 は基材の中など（中から抜けた光は捨てる）
                 float w = st.prevNee ? powerHeuristic(st.prevPdf, envLightPdfW(st.dir)) : 1.0;
                 L += clampIndirect(st.beta * Le * w, st.rough, st.terminated);
@@ -91,13 +85,9 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
             st.terminated = true;
         }
         if (st.rough > 0u || !isDeltaLike(s)) st.rough++;
-        if (guideOpen) {
-            vec3 a = shadeAlbedoRgb(s);
-            albedo = guideTint * a;
+        if (depth == 0u) {
+            albedo = shadeAlbedoRgb(s);
             normal = ns;
-            // 滑らかなガラス・鏡なら、その先の面まで手がかりを延ばす
-            if (isDeltaLike(s) && depth + 1u < GUIDE_MAX_DEPTH) guideTint *= a;
-            else guideOpen = false;
         }
         // 最後の頂点：ここで終わる経路（光源に当たった分）だけを数えた
         if (depth + 1u >= maxPathLength()) break;

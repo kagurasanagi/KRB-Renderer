@@ -193,9 +193,6 @@ void main() {
 
     vec4 L = vec4(0.0);
     vec3 albedo = vec3(0.0), normal = vec3(0.0);
-    // ノイズ除去の手がかりは、滑らかなガラス・鏡を通り抜けた先の最初のふつうの面のもの（PT の ptTrace と同じ）
-    bool guideOpen = true;
-    vec3 guideTint = vec3(1.0);
     // 間接光の上限をかけるかの判定に使う頂点の数（PT の PtState.rough と同じ。カメラから最初の鏡面でない
     // 頂点までのガラス・鏡は数えない）
     uint camRough = 0u;
@@ -204,9 +201,9 @@ void main() {
         if (!traceClosest(cam.origin, cam.dir, hit)) {
             // 環境光に当たった（s = 0）
             vec4 Le = envSpectrum(cam.dir);
-            if (guideOpen) albedo = guideTint * clamp(envRadiance(cam.dir), 0.0, 1.0);
             if (cam.pathLength == 1u) {
                 L += maskTerminated(cam.throughput * Le, cam.terminated);
+                albedo = clamp(envRadiance(cam.dir), 0.0, 1.0);
             } else {
                 float directPdfW = envLightPdfW(cam.dir);  // 環境光の「点」の確率密度は立体角あたり（LightEmission.directPdf と同じ）
                 float emissionPdfW = envEmissionPdfW(directPdfW);
@@ -243,12 +240,9 @@ void main() {
                 L += clampIndirect(c, roughBefore, cam.terminated);
             }
         }
-        if (guideOpen) {
-            vec3 a = shadeAlbedoRgb(s);
-            albedo = guideTint * a;
+        if (cam.pathLength == 1u) {
+            albedo = shadeAlbedoRgb(s);
             normal = ns;
-            if (isDeltaLike(s) && cam.pathLength < GUIDE_MAX_DEPTH) guideTint *= a;
-            else guideOpen = false;
         }
         // 最後の頂点：ここで終わる経路（光源に当たった分）だけを数えた（PT の ptTrace と同じ）
         if (cam.pathLength >= maxPathLength()) break;
