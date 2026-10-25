@@ -497,7 +497,7 @@ bump_scale = 0.1
 
 **シェーダの探し方**：環境変数 `KRBR_SHADER_DIR`、exe と同じフォルダの `shaders\`、ビルドの出力（`rust\target\<profile>\shaders`。`deps\` に置かれるテストの実行ファイル用）の順です。
 
-**アイコン**：`krbr.exe` とビューアのウィンドウ、KiCad のツールバーのボタンは同じ絵です（`scripts/make_icon.py` で作り、`rust/krbr/assets/krbr.ico` を `build.rs` で exe に埋め込む）。
+**アイコン**：`krbr.exe` とビューアのウィンドウ、KiCad のツールバーのボタンは同じ絵です（元絵 `rust/krbr/assets/krbr_icon.png` から `scripts/make_icon.py` で各サイズを作り、`rust/krbr/assets/krbr.ico` を `build.rs` で exe に埋め込む）。
 
 **exe のアイコンへのドラッグ＆ドロップ**：`krbr.exe`（またはそのショートカット）に `.kicad_pcb` をドロップすると、ビューアで開きます。作業フォルダは変えません（`S` で保存する画像は、起動の仕方によらず基板のフォルダに入り、ファイルのダイアログも基板・環境マップのフォルダから始まります）。エラーで終わるときは、コンソールが閉じる前に Enter を待ちます。
 
