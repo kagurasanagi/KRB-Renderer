@@ -59,6 +59,7 @@ pub fn scene_bindings(sc: &GpuScene, targets: &RenderTargets, frame_ubo: &Buffer
         storage(BINDING_ACCUM_COLOR, targets.color.view),
         storage(BINDING_ACCUM_ALBEDO, targets.albedo.view),
         storage(BINDING_ACCUM_NORMAL, targets.normal.view),
+        storage(BINDING_ACCUM_POSITION, targets.position.view),
         Binding::Buffer { binding: BINDING_FRAME, ty: vk::DescriptorType::UNIFORM_BUFFER, buffer: frame_ubo.buffer },
         buffer_binding(BINDING_INSTANCES, &sc.instance_infos),
         buffer_binding(BINDING_RGB2SPEC, &sc.rgb2spec),

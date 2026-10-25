@@ -19,6 +19,8 @@ pub struct RenderTargets {
     pub color: Image,
     pub albedo: Image,
     pub normal: Image,
+    /// 最初に当たった点の和（xyz）と当たったサンプルの数（w）
+    pub position: Image,
     pub width: u32,
     pub height: u32,
 }
@@ -382,7 +384,8 @@ impl<'a> Progressive<'a> {
         self.targets.color = self.ctx.create_image_2d(w, h, 1, f, usage)?;
         self.targets.albedo = self.ctx.create_image_2d(w, h, 1, f, usage)?;
         self.targets.normal = self.ctx.create_image_2d(w, h, 1, f, usage)?;
-        let imgs = [self.targets.color.image, self.targets.albedo.image, self.targets.normal.image];
+        self.targets.position = self.ctx.create_image_2d(w, h, 1, f, usage)?;
+        let imgs = [self.targets.color.image, self.targets.albedo.image, self.targets.normal.image, self.targets.position.image];
         let trace = self.ctx.trace_stages();
         self.ctx.submit_and_wait(|dev, cmd| {
             for img in imgs {
@@ -399,6 +402,7 @@ impl<'a> Progressive<'a> {
         self.ctx.destroy_image(&mut self.targets.color);
         self.ctx.destroy_image(&mut self.targets.albedo);
         self.ctx.destroy_image(&mut self.targets.normal);
+        self.ctx.destroy_image(&mut self.targets.position);
     }
 
     /// 解像度を変える（出力先と積分器を作り直し、累積は 0 から）。失敗したら Err（積分器は無いままになり、record は何もしない）
@@ -478,6 +482,39 @@ impl<'a> Progressive<'a> {
     }
     pub fn integrator_name(&self) -> &str {
         self.kind.as_str()
+    }
+
+    /// 最初に当たった点の平均（ワールド座標）と、当たったサンプルの割合（w。0 なら環境光だけ）を読み戻す
+    /// （GPU が待機中に呼ぶこと。動画のフローを求める）
+    pub fn readback_position(&self) -> Result<Vec<[f32; 4]>, String> {
+        let (w, h) = (self.targets.width, self.targets.height);
+        let bytes = w as u64 * h as u64 * 16;
+        let mut rb = self.ctx.create_buffer(bytes, vk::BufferUsageFlags::TRANSFER_DST, true, true)?;
+        let (img, rbb) = (self.targets.position.image, rb.buffer);
+        let r = self.ctx.submit_and_wait(|dev, cmd| {
+            let region = vk::BufferImageCopy::default()
+                .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
+                .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
+            unsafe { dev.cmd_copy_image_to_buffer(cmd, img, vk::ImageLayout::GENERAL, rbb, &[region]) };
+            memory_barrier(dev, cmd, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, vk::PipelineStageFlags2::HOST, vk::AccessFlags2::HOST_READ);
+        });
+        if let Err(e) = r {
+            self.ctx.destroy_buffer(&mut rb);
+            return Err(e);
+        }
+        let src = rb.mapped_bytes().expect("the readback buffer is host-visible");
+        let n = self.samples.max(1) as f32;
+        let out = src
+            .chunks_exact(16)
+            .map(|c| {
+                let f = |k: usize| f32::from_le_bytes([c[k * 4], c[k * 4 + 1], c[k * 4 + 2], c[k * 4 + 3]]);
+                let hits = f(3);
+                let inv = if hits > 0.0 { 1.0 / hits } else { 0.0 };
+                [f(0) * inv, f(1) * inv, f(2) * inv, hits / n]
+            })
+            .collect();
+        self.ctx.destroy_buffer(&mut rb);
+        Ok(out)
     }
 
     /// 現在の累積を読み戻す（GPU が待機中に呼ぶこと）。分光モードでも RGB に変換して返す。

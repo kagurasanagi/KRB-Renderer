@@ -33,6 +33,8 @@ pub const BINDING_COUNTERS: u32 = 23;
 pub const BINDING_SPLAT: u32 = 24;
 /// 金属の測定値の表（shaders/common.glsl）
 pub const BINDING_CONDUCTORS: u32 = 25;
+/// カメラの光線が最初に当たった点の累積（動画のフローを求める）
+pub const BINDING_ACCUM_POSITION: u32 = 26;
 
 /// 金属の n, k の表の波長の格子（krbr_scene::conductor と同じ値。gpu_types.rs で確かめる）
 pub const CONDUCTOR_LAMBDA_MIN: u32 = 360;
@@ -78,6 +80,7 @@ pub fn glsl_defines() -> Vec<(String, String)> {
         ("BINDING_ACCUM_COLOR", BINDING_ACCUM_COLOR),
         ("BINDING_ACCUM_ALBEDO", BINDING_ACCUM_ALBEDO),
         ("BINDING_ACCUM_NORMAL", BINDING_ACCUM_NORMAL),
+        ("BINDING_ACCUM_POSITION", BINDING_ACCUM_POSITION),
         ("BINDING_FRAME", BINDING_FRAME),
         ("BINDING_INSTANCES", BINDING_INSTANCES),
         ("BINDING_RGB2SPEC", BINDING_RGB2SPEC),

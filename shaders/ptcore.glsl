@@ -40,7 +40,8 @@ vec4 directLightPt(Shade s, vec3 p, vec3 ng, vec3 ns, vec3 t, vec3 b, vec3 v, ve
 // 経路の線分は maxPathLength() 本まで：最後の頂点では光源・環境光に当たった分だけを数え、直接サンプリングも散乱もしない
 // （同じ長さの経路を、直接サンプリングでも BSDF サンプリングでも作れるようにして、MIS の両方がそろうように）。
 // 返り値は放射輝度（beta をかけた後）。depth0 == 0 のときだけ、最初の交点のアルベドと法線を書く
-vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, inout vec3 normal) {
+// firstPos：depth0 == 0 のとき、最初に当たった点（ワールド座標）と 1（当たらなければ書かない）
+vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, inout vec3 normal, inout vec4 firstPos) {
     vec4 L = vec4(0.0);
     for (uint depth = depth0;; ++depth) {
         Hit hit;
@@ -88,6 +89,7 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
         if (depth == 0u) {
             albedo = shadeAlbedoRgb(s);
             normal = ns;
+            firstPos = vec4(hit.pos, 1.0);
         }
         // 最後の頂点：ここで終わる経路（光源に当たった分）だけを数えた
         if (depth + 1u >= maxPathLength()) break;

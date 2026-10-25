@@ -80,6 +80,9 @@ layout(set = 0, binding = KRBR_BINDING_BOARD_TEX) uniform sampler2DArray boardTe
 layout(set = 0, binding = KRBR_BINDING_ACCUM_COLOR, rgba32f) uniform image2D accumColor;
 layout(set = 0, binding = KRBR_BINDING_ACCUM_ALBEDO, rgba32f) uniform image2D accumAlbedo;
 layout(set = 0, binding = KRBR_BINDING_ACCUM_NORMAL, rgba32f) uniform image2D accumNormal;
+// カメラの光線が最初に当たった点（ワールド座標）の和と、当たったサンプルの数（環境光なら足さない）。
+// 動画の時間方向のノイズ除去で、画素が前のコマのどこにあったか（フロー）を求めるのに使う
+layout(set = 0, binding = KRBR_BINDING_ACCUM_POSITION, rgba32f) uniform image2D accumPosition;
 
 layout(set = 0, binding = KRBR_BINDING_FRAME, std140) uniform Frame {
     vec4 camPos;
@@ -146,16 +149,19 @@ vec3 dropNonFinite(vec3 c) {
     return c;
 }
 
-void accumulate(ivec2 ip, vec3 color, vec3 albedo, vec3 normal) {
+// position：最初に当たった点と 1（当たらなければ 0）
+void accumulate(ivec2 ip, vec3 color, vec3 albedo, vec3 normal, vec4 position) {
     color = dropNonFinite(color);
     if (pc.sampleIndex == 0u) {
         imageStore(accumColor, ip, vec4(color, 1.0));
         imageStore(accumAlbedo, ip, vec4(albedo, 1.0));
         imageStore(accumNormal, ip, vec4(normal, 1.0));
+        imageStore(accumPosition, ip, position);
     } else {
         imageStore(accumColor, ip, imageLoad(accumColor, ip) + vec4(color, 1.0));
         imageStore(accumAlbedo, ip, imageLoad(accumAlbedo, ip) + vec4(albedo, 1.0));
         imageStore(accumNormal, ip, imageLoad(accumNormal, ip) + vec4(normal, 1.0));
+        imageStore(accumPosition, ip, imageLoad(accumPosition, ip) + position);
     }
 }
 
