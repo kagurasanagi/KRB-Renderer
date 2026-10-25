@@ -950,7 +950,15 @@ struct Gpu {
     cmd: vk::CommandBuffer,
     acquired: vk::Semaphore,
     fence: vk::Fence,
+    /// サンプルを積むコマンド。表示とは別のキュー（ctx.render_queue。優先度が低い）へ流し、完了を待たずに次のフレームへ進む
+    /// （重いシーンでも画面と操作が止まらない）。終わるまでは累積の画像に触らない
+    render_cmd: vk::CommandBuffer,
+    render_fence: vk::Fence,
+    /// 流したサンプルの数と時刻（まだ終わっていない）
+    in_flight: Option<(u32, Instant)>,
+    /// サンプルを積む GPU 時間（render_cmd の最初と最後。キューが時刻を測れなければ使わない）
     timestamps: vk::QueryPool,
+    timestamps_ok: bool,
     ts_period_ms: f64,
 }
 
@@ -1061,6 +1069,10 @@ struct App {
     accum_measured: u32,
     last_change_at: Instant,
     last_frame_ms: f64,
+    /// 最後に表示した時刻と、表示の間隔の下限（画面の書き換えの間隔から。1 秒ごとに確かめ直す）
+    last_present_at: Instant,
+    frame_interval: Duration,
+    refresh_checked: Instant,
     last_gpu_ms: f64,
     /// パネルの設定：最後に見た値、最後に覚えた（<名前>.krbr に書いた）値、最後に変わった時刻。変わってから 1 秒たったら書く
     view_seen: remember::ViewValues,
@@ -1585,14 +1597,18 @@ impl App {
         let cmd = unsafe { dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(ctx.pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1)) }.map_err(|e| format!("{e:?}"))?[0];
         let acquired = unsafe { dev.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) }.map_err(|e| format!("{e:?}"))?;
         let fence = unsafe { dev.create_fence(&vk::FenceCreateInfo::default(), None) }.map_err(|e| format!("{e:?}"))?;
+        let render_cmd = unsafe { dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(ctx.render_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1)) }.map_err(|e| format!("{e:?}"))?[0];
+        let render_fence = unsafe { dev.create_fence(&vk::FenceCreateInfo::default(), None) }.map_err(|e| format!("{e:?}"))?;
         let timestamps = unsafe { dev.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(2), None) }.map_err(|e| format!("{e:?}"))?;
         let props = unsafe { ctx.instance.get_physical_device_properties(ctx.physical) };
         let ts_period_ms = props.limits.timestamp_period as f64 * 1e-6;
+        let qprops = unsafe { ctx.instance.get_physical_device_queue_family_properties(ctx.physical) };
+        let timestamps_ok = qprops.get(ctx.render_family as usize).is_some_and(|q| q.timestamp_valid_bits > 0);
         let keys: Vec<String> = KEY_BINDINGS.iter().map(|b| format!("{}={}", b.label, b.log)).collect();
         info!("viewer: {}x{}, up to {} spp. mouse: left drag=rotate, click=select a part, Ctrl+click=focus, right/middle drag=pan, wheel=zoom; keys: {}", swap.extent.width, swap.extent.height, self.st.max_spp, keys.join(", "));
         install_fonts(&self.egui_ctx, &self.language);
         self.egui_state = Some(EguiState::new(self.egui_ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, None));
-        self.gpu = Some(Gpu { ctx, gpu, swap, prog, tone, denoiser: None, tone_denoised: None, egui_renderer, cmd, acquired, fence, timestamps, ts_period_ms });
+        self.gpu = Some(Gpu { ctx, gpu, swap, prog, tone, denoiser: None, tone_denoised: None, egui_renderer, cmd, acquired, fence, render_cmd, render_fence, in_flight: None, timestamps, timestamps_ok, ts_period_ms });
         let hidden = self.vo.hidden || self.test.active();
         if let (true, false, Some(proxy)) = (self.vo.web_ui, hidden, self.proxy.clone()) {
             // WebView を作るのは最初のフレームを出してから（step_web_ui）
@@ -3874,6 +3890,8 @@ impl App {
             self.view_saved = self.view_seen.clone();
         }
         if std::mem::take(&mut self.st.changed.frame) {
+            // 流しているサンプルが読むフレームの値を書き換えるので、終わるのを待つ
+            self.settle_render();
             let (w, h) = {
                 let t = self.gpu.as_ref().unwrap().prog.targets();
                 (t.width, t.height)
@@ -3883,6 +3901,7 @@ impl App {
             self.last_change_at = Instant::now();
         }
         if std::mem::take(&mut self.st.req.auto_exposure) {
+            self.settle_render();
             let g = self.gpu.as_ref().unwrap();
             if g.prog.samples() > 0 {
                 match g.prog.readback() {
@@ -3899,8 +3918,114 @@ impl App {
         }
     }
 
-    /// サンプルを積み、（必要なら）ノイズ除去して、画像と操作パネルを表示する。スワップチェーンを作り直すときは None
-    fn record_and_present(&mut self, ui: &UiFrame, last_test_frame: bool, frame_t0: Instant) -> Result<Option<Presented>, String> {
+    /// 流したサンプルが終わっていれば（wait なら終わるまで待って）、かかった時間を数え、次に流す数を決める
+    fn poll_render(&mut self, wait: bool) {
+        let Some(g) = self.gpu.as_mut() else { return };
+        let Some((add, t0)) = g.in_flight else { return };
+        let dev = &g.ctx.device;
+        // 待てない・状態を取れない（デバイスを失ったなど）ときは、終わったことにする（次の GPU の処理がエラーを出す）
+        let done = wait || unsafe { dev.get_fence_status(g.render_fence) }.unwrap_or(true);
+        if wait {
+            let _ = unsafe { dev.wait_for_fences(&[g.render_fence], true, u64::MAX) };
+        }
+        if !done {
+            return;
+        }
+        g.in_flight = None;
+        let wall = t0.elapsed();
+        let mut ts = [0u64; 2];
+        let ts_ok = g.timestamps_ok && unsafe { dev.get_query_pool_results(g.timestamps, 0, &mut ts, vk::QueryResultFlags::TYPE_64) }.is_ok();
+        self.last_gpu_ms = if ts_ok { ts[1].saturating_sub(ts[0]) as f64 * g.ts_period_ms } else { wall.as_secs_f64() * 1000.0 };
+        // サンプルを積む GPU 時間が目標に収まるように、1 回に流す数を調整する
+        let per_sample = self.last_gpu_ms / add.max(1) as f64;
+        self.samples_per_frame = (TARGET_FRAME_MS / per_sample.max(0.05)).clamp(1.0, 64.0) as u32;
+        self.accum_wall += wall;
+        self.accum_gpu_ms += self.last_gpu_ms;
+        self.accum_measured += add;
+    }
+
+    /// 流したサンプルが終わるまで待つ（累積の画像やフレームの値を CPU から読み書きする前に）
+    fn settle_render(&mut self) {
+        self.poll_render(true);
+    }
+
+    /// add サンプルをサンプル用のキューへ流す（完了は待たない。poll_render で確かめる）
+    fn submit_render(&mut self, add: u32) -> Result<(), String> {
+        let g = self.gpu.as_mut().unwrap();
+        let dev = &g.ctx.device;
+        let cmd = g.render_cmd;
+        unsafe {
+            dev.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).map_err(|e| format!("{e:?}"))?;
+            dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(|e| format!("{e:?}"))?;
+            if g.timestamps_ok {
+                dev.cmd_reset_query_pool(cmd, g.timestamps, 0, 2);
+                dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, g.timestamps, 0);
+            }
+        }
+        g.prog.record(cmd, add);
+        unsafe {
+            if g.timestamps_ok {
+                dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, g.timestamps, 1);
+            }
+            dev.end_command_buffer(cmd).map_err(|e| format!("{e:?}"))?;
+            dev.reset_fences(&[g.render_fence]).map_err(|e| format!("{e:?}"))?;
+            let cmds = [cmd];
+            let si = vk::SubmitInfo::default().command_buffers(&cmds);
+            dev.queue_submit(g.ctx.render_queue, &[si], g.render_fence).map_err(|e| format!("vkQueueSubmit: {e:?}"))?;
+        }
+        g.in_flight = Some((add, Instant::now()));
+        Ok(())
+    }
+
+    /// 流したサンプルが終わっていれば画像を描き直し、（必要なら）ノイズ除去して、画像と操作パネルを表示してから、次のサンプルを流す。
+    /// サンプルを流している間は、前に描いた画像を見せる（累積の画像に触らない）。スワップチェーンを作り直すときは None
+    fn record_and_present(&mut self, ui: &UiFrame, last_test_frame: bool, _frame_t0: Instant) -> Result<Option<Presented>, String> {
+        self.poll_render(false);
+        let (samples, busy) = {
+            let g = self.gpu.as_ref().unwrap();
+            (g.prog.samples(), g.in_flight.is_some())
+        };
+        // 累積をやり直したら（サンプル数が減ったら）、前のノイズ除去の結果は使わない
+        if samples < self.prev_samples {
+            self.accum_epoch += 1;
+        }
+        if samples == 0 {
+            // 累積をやり直した：経過時間と平均も 0 から
+            self.accum_wall = Duration::ZERO;
+            self.accum_gpu_ms = 0.0;
+            self.accum_measured = 0;
+        }
+        let max_spp = self.st.max_spp;
+        // 次に流すサンプルの数（一時停止中は積み足さない。カメラなどを変えて累積をやり直したときだけ、表示のために 1 サンプル描く）
+        let mut add = if busy {
+            0
+        } else if self.st.paused {
+            u32::from(samples == 0)
+        } else if samples >= max_spp {
+            0
+        } else {
+            self.samples_per_frame.min(max_spp - samples)
+        };
+        // 累積をやり直した直後（新しい視点をすぐ見せる）・動画・テストは、積み終えるのを待ってから表示する
+        if add > 0 && (samples == 0 || self.video.is_some() || self.test.active()) {
+            self.submit_render(add)?;
+            self.settle_render();
+            add = 0;
+        }
+        let busy = self.gpu.as_ref().unwrap().in_flight.is_some();
+
+        // 前の表示から画面の書き換えの間隔（の 85 %）が経つまで待つ。ノイズ除去などで遅れたフレームの後に続けて表示すると、
+        // スワップチェーンの画像を使い切り、次の画像が戻るのを（サンプルを積んでいる GPU の後で）長く待つことになる
+        if self.refresh_checked.elapsed() > Duration::from_secs(1) {
+            self.refresh_checked = Instant::now();
+            let mhz = self.window.as_ref().and_then(|w| w.current_monitor()).and_then(|m| m.refresh_rate_millihertz()).unwrap_or(60_000).max(1);
+            self.frame_interval = Duration::from_secs_f64(0.85 * 1000.0 / mhz as f64);
+        }
+        // （テスト・隠した窓・動画の書き出しは待たない）
+        let paced = !self.test.active() && !self.vo.hidden && self.video.is_none();
+        if let Some(rest) = self.frame_interval.checked_sub(self.last_present_at.elapsed()).filter(|_| paced) {
+            std::thread::sleep(rest);
+        }
         let g = self.gpu.as_mut().unwrap();
         let loader = g.ctx.swapchain_loader.as_ref().unwrap();
         let (image_index, _) = match unsafe { loader.acquire_next_image(g.swap.handle, u64::MAX, g.acquired, vk::Fence::null()) } {
@@ -3911,15 +4036,6 @@ impl App {
             }
             Err(e) => return Err(format!("vkAcquireNextImageKHR: {e:?}")),
         };
-        let max_spp = self.st.max_spp;
-        // 一時停止中は積み足さない（カメラなどを変えて累積をやり直したときだけ、表示のために 1 サンプル描く）
-        let add = if self.st.paused {
-            u32::from(g.prog.samples() == 0)
-        } else if g.prog.samples() >= max_spp {
-            0
-        } else {
-            self.samples_per_frame.min(max_spp - g.prog.samples())
-        };
 
         // egui のテクスチャ
         for (id, deltas) in &ui.textures.set {
@@ -3928,49 +4044,32 @@ impl App {
             }
         }
 
-        // 累積をやり直したら（サンプル数が減ったら）、前のノイズ除去の結果は使わない
-        if g.prog.samples() < self.prev_samples {
-            self.accum_epoch += 1;
-        }
-        if g.prog.samples() == 0 {
-            // 累積をやり直した：経過時間と平均も 0 から
-            self.accum_wall = Duration::ZERO;
-            self.accum_gpu_ms = 0.0;
-            self.accum_measured = 0;
-        }
-        // このフレームでノイズ除去するか（画像の表示のときだけ）。C++ 版と同じ間隔：
+        // このフレームでノイズ除去するか（画像の表示のときだけ。サンプルを流している間はしない）。C++ 版と同じ間隔：
         // GPU：動かしている間は毎フレーム fast、止まったら 150 ms ごとに high、収束時にもう一度。
         // CPU：数秒かかり画面が止まるので、収束時（最大 spp に達したとき）と D キー／ボタンのときだけ high でかける
         let on_cpu = g.denoiser.as_ref().is_some_and(|d| d.device_name() == "CPU");
         let moving = self.last_change_at.elapsed() < Duration::from_millis(300);
-        let samples_after = g.prog.samples() + add;
-        let due = if on_cpu { samples_after >= max_spp || self.st.req.denoise_now } else { moving || samples_after >= max_spp || self.last_denoise_at.elapsed() > Duration::from_millis(150) };
+        let samples = g.prog.samples();
+        let due = if on_cpu { samples >= max_spp || self.st.req.denoise_now } else { moving || samples >= max_spp || self.last_denoise_at.elapsed() > Duration::from_millis(150) };
         let beauty = self.st.mode == DisplayMode::Beauty;
-        let want = self.st.denoise && g.denoiser.is_some() && beauty && samples_after > 0 && (self.denoised_epoch != self.accum_epoch || self.denoised_samples != samples_after) && due;
-        self.st.req.denoise_now = false;
+        let want = !busy && self.st.denoise && g.denoiser.is_some() && beauty && samples > 0 && (self.denoised_epoch != self.accum_epoch || self.denoised_samples != samples) && due;
+        if !busy {
+            self.st.req.denoise_now = false;
+        }
         let ctx = g.ctx;
-        let timestamps = g.timestamps;
         // 分光モードの累積は XYZ。OIDN にはリニア sRGB にして渡し、混ぜた結果は XYZ に戻す（トーンマッピングは XYZ として読む）
         let xyz = g.prog.xyz_output();
         if want {
-            // サンプルの追加と入力の準備を先に流して完了を待ち、OIDN で除去してから表示のコマンドを作る
+            // 入力の準備を流して完了を待ち、OIDN で除去してから表示のコマンドを作る
             let d = g.denoiser.as_mut().unwrap();
             d.set_quality(if moving && !on_cpu { DenoiseQuality::Fast } else { DenoiseQuality::High });
-            let (prog, d) = (&mut g.prog, &*d);
-            ctx.submit_and_wait(|dev, c| {
-                unsafe {
-                    dev.cmd_reset_query_pool(c, timestamps, 0, 2);
-                    dev.cmd_write_timestamp2(c, vk::PipelineStageFlags2::ALL_COMMANDS, timestamps, 0);
-                }
-                prog.record(c, add);
-                unsafe { dev.cmd_write_timestamp2(c, vk::PipelineStageFlags2::ALL_COMMANDS, timestamps, 1) };
-                d.record_prepare(c, xyz);
-            })?;
+            let d = &*d;
+            ctx.submit_and_wait(|_, c| d.record_prepare(c, xyz))?;
             match d.execute() {
                 Ok(ms) => {
                     self.last_denoise_ms = ms;
                     self.denoised_epoch = self.accum_epoch;
-                    self.denoised_samples = g.prog.samples();
+                    self.denoised_samples = samples;
                 }
                 Err(e) => warn!("{e}"),
             }
@@ -3983,23 +4082,19 @@ impl App {
             dev.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).map_err(|e| format!("{e:?}"))?;
             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(|e| format!("{e:?}"))?;
         }
-        if !want {
-            unsafe {
-                dev.cmd_reset_query_pool(cmd, timestamps, 0, 2);
-                dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, timestamps, 0);
-            }
-            g.prog.record(cmd, add);
-            unsafe { dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, timestamps, 1) };
-        }
-        self.prev_samples = g.prog.samples();
+        // サンプルを流している間は累積の画像を読まず、前に描いた画像をそのまま見せる
         let disp = if show_denoised {
-            // 結果を元の画像と強さで混ぜる（軽いので毎フレーム。強さのスライダーがすぐ効く）
-            g.denoiser.as_ref().unwrap().record_output(cmd, self.st.denoise_strength, xyz);
             let t = g.tone_denoised.as_ref().unwrap();
-            t.record(cmd, self.st.exposure, self.st.mode, xyz, &self.st.glow_params());
+            if !busy {
+                // 結果を元の画像と強さで混ぜる（軽いので毎フレーム。強さのスライダーがすぐ効く）
+                g.denoiser.as_ref().unwrap().record_output(cmd, self.st.denoise_strength, xyz);
+                t.record(cmd, self.st.exposure, self.st.mode, xyz, &self.st.glow_params());
+            }
             t.output()
         } else {
-            g.tone.record(cmd, self.st.exposure, self.st.mode, xyz, &self.st.glow_params());
+            if !busy {
+                g.tone.record(cmd, self.st.exposure, self.st.mode, xyz, &self.st.glow_params());
+            }
             g.tone.output()
         };
         let swap_img = g.swap.images[image_index as usize];
@@ -4074,22 +4169,16 @@ impl App {
             dev.wait_for_fences(&[g.fence], true, u64::MAX).map_err(|e| format!("{e:?}"))?;
         }
         self.last_frame_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        self.last_present_at = Instant::now();
         self.frames += 1;
         for id in &ui.textures.free {
             let _ = g.egui_renderer.free_texture(*id);
         }
-
-        // サンプルを積む GPU 時間が目標に収まるように、1 フレームに積む数を調整する
-        let mut ts = [0u64; 2];
-        let ts_ok = unsafe { dev.get_query_pool_results(g.timestamps, 0, &mut ts, vk::QueryResultFlags::TYPE_64) }.is_ok();
-        self.last_gpu_ms = if ts_ok { (ts[1] - ts[0]) as f64 * g.ts_period_ms } else { self.last_frame_ms };
+        // 表示が累積の画像を読み終えたので、次のサンプルを流す（完了は待たない）
         if add > 0 {
-            let per_sample = self.last_gpu_ms / add as f64;
-            self.samples_per_frame = (TARGET_FRAME_MS / per_sample.max(0.05)).clamp(1.0, 64.0) as u32;
-            self.accum_wall += frame_t0.elapsed();
-            self.accum_gpu_ms += self.last_gpu_ms;
-            self.accum_measured += add;
+            self.submit_render(add)?;
         }
+        self.prev_samples = self.gpu.as_ref().unwrap().prog.samples();
         Ok(Some(Presented { denoised: show_denoised, screenshot: shot, extent }))
     }
 
@@ -4101,6 +4190,10 @@ impl App {
                 self.last_update = fl!("save-no-board");
             }
             return;
+        }
+        if self.st.req.save || self.save_as_target.is_some() {
+            // 累積の画像を読み戻すので、流しているサンプルが終わるのを待つ
+            self.settle_render();
         }
         if std::mem::take(&mut self.st.req.save) {
             self.save_numbered(show_denoised);
@@ -4383,7 +4476,7 @@ impl App {
             el.exit();
             return;
         }
-        let idle = self.gpu.as_ref().map(|g| g.prog.samples() >= self.st.max_spp || (self.st.paused && g.prog.samples() > 0)).unwrap_or(false) && !self.st.changed.frame && self.env_job.is_none() && self.reload_job.is_none() && !self.silk_job.busy() && !self.silk_dirty && !self.test.active() && !self.editor.busy()
+        let idle = self.gpu.as_ref().map(|g| g.in_flight.is_none() && (g.prog.samples() >= self.st.max_spp || (self.st.paused && g.prog.samples() > 0))).unwrap_or(false) && !self.st.changed.frame && self.env_job.is_none() && self.reload_job.is_none() && !self.silk_job.busy() && !self.silk_dirty && !self.test.active() && !self.editor.busy()
             && self.web.as_ref().is_none_or(|w| w.moved().elapsed() > Duration::from_millis(300));
         if idle {
             // 収束したら GPU を休ませ、入力と保存を待つ
@@ -4528,6 +4621,9 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         accum_measured: 0,
         last_change_at: Instant::now(),
         last_frame_ms: 0.0,
+        last_present_at: Instant::now(),
+        frame_interval: Duration::ZERO,
+        refresh_checked: Instant::now().checked_sub(Duration::from_secs(2)).unwrap_or_else(Instant::now),
         last_gpu_ms: 0.0,
         view_seen: remember::ViewValues::new(),
         view_saved: remember::ViewValues::new(),
@@ -4588,6 +4684,7 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         ctx.wait_idle();
         unsafe {
             ctx.device.destroy_query_pool(g.timestamps, None);
+            ctx.device.destroy_fence(g.render_fence, None);
             ctx.device.destroy_fence(g.fence, None);
             ctx.device.destroy_semaphore(g.acquired, None);
         }

@@ -479,7 +479,11 @@ impl<'a> Denoiser<'a> {
         let ext_mem = ctx.external_memory_win32.as_ref().ok_or("no external memory")?;
         let mut b = SharedBuf::default();
         let mut ext = vk::ExternalMemoryBufferCreateInfo::default().handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32);
-        let bci = vk::BufferCreateInfo::default().size(size).usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST).push_next(&mut ext);
+        let families = ctx.shared_families();
+        let mut bci = vk::BufferCreateInfo::default().size(size).usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST).push_next(&mut ext);
+        if !families.is_empty() {
+            bci = bci.sharing_mode(vk::SharingMode::CONCURRENT).queue_family_indices(&families);
+        }
         b.buffer = unsafe { dev.create_buffer(&bci, None) }.map_err(|e| format!("vkCreateBuffer: {e:?}"))?;
         let req = unsafe { dev.get_buffer_memory_requirements(b.buffer) };
         let mp = unsafe { ctx.instance.get_physical_device_memory_properties(ctx.physical) };

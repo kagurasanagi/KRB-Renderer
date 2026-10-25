@@ -30,7 +30,8 @@ pub type SurfaceFactory = Box<dyn Fn(&ash::Entry, &ash::Instance) -> Result<vk::
 #[derive(Default)]
 pub struct ContextOptions {
     pub validation: bool,
-    /// VK_KHR_global_priority が使えれば LOW で作る
+    /// VK_KHR_global_priority が使えれば LOW で作る。画面表示するときは、計算専用のファミリーがあれば、サンプルを積む
+    /// キュー（render_queue）だけを LOW にして、表示のキュー（queue）は普通の優先度にする（重い描画の間も画面が滑らかに動く）
     pub low_queue_priority: bool,
     /// 画面表示する場合だけ指定する（指定しなければサーフェス・スワップチェーン系は一切有効にしない）
     pub instance_extensions: Vec<*const c_char>,
@@ -164,6 +165,11 @@ pub struct Context {
     pub device: ash::Device,
     pub queue: vk::Queue,
     pub queue_family: u32,
+    /// サンプルを積むキュー（画面表示のときに、計算専用ファミリーの LOW のキューを別に作れたら別。作れなければ queue と同じ）
+    pub render_queue: vk::Queue,
+    pub render_family: u32,
+    /// render_queue 用のコマンドプール（同じファミリーなら pool と同じ）
+    pub render_pool: vk::CommandPool,
     pub allocator: Arc<Mutex<Allocator>>,
     pub pool: vk::CommandPool,
     pub fence: vk::Fence,
@@ -250,7 +256,6 @@ impl Context {
             }
         }
         let queue_family = if surface_loader.is_some() {
-            compute_only = None;
             present.ok_or("no queue family can present to the window")?
         } else {
             compute_only.or(any_compute).ok_or("no compute queue")?
@@ -302,30 +307,36 @@ impl Context {
             f2 = f2.push_next(&mut faf);
         }
 
+        // 画面表示で LOW にできるなら、サンプルを積むキューを計算専用ファミリーに分けて、そちらだけ LOW にする
+        let split = if surface_loader.is_some() && prio_ext.is_some() { compute_only.filter(|&c| c != queue_family) } else { None };
         let prio = [0.5f32];
         let mut gp = vk::DeviceQueueGlobalPriorityCreateInfoKHR::default().global_priority(vk::QueueGlobalPriorityKHR::LOW);
-        let mut make_device = |with_prio: bool| -> Result<ash::Device, vk::Result> {
+        let mut make_device = |with_prio: bool, split: Option<u32>| -> Result<ash::Device, vk::Result> {
             let mut e = dev_exts.clone();
-            let mut qci = vk::DeviceQueueCreateInfo::default().queue_family_index(queue_family).queue_priorities(&prio);
+            let mut qcis = vec![vk::DeviceQueueCreateInfo::default().queue_family_index(queue_family).queue_priorities(&prio)];
             if with_prio {
                 if let Some(pe) = prio_ext {
                     e.push(pe.as_ptr());
-                    qci = qci.push_next(&mut gp);
+                    match split {
+                        Some(c) => qcis.push(vk::DeviceQueueCreateInfo::default().queue_family_index(c).queue_priorities(&prio).push_next(&mut gp)),
+                        None => qcis[0] = qcis[0].push_next(&mut gp),
+                    }
                 }
             }
-            let qcis = [qci];
             let dci = vk::DeviceCreateInfo::default().queue_create_infos(&qcis).enabled_extension_names(&e).push_next(&mut f2);
             unsafe { instance.create_device(physical, &dci, None) }
         };
-        let (device, low_prio) = match make_device(prio_ext.is_some()) {
-            Ok(d) => (d, prio_ext.is_some()),
+        let (device, low_prio, split) = match make_device(prio_ext.is_some(), split) {
+            Ok(d) => (d, prio_ext.is_some(), split),
             Err(e) if prio_ext.is_some() => {
                 krbr_core::debug!("device creation with low global priority failed ({:?}), retrying", e);
-                (make_device(false).map_err(|e| format!("vkCreateDevice failed ({e:?})"))?, false)
+                (make_device(false, None).map_err(|e| format!("vkCreateDevice failed ({e:?})"))?, false, None)
             }
             Err(e) => return Err(format!("vkCreateDevice failed ({e:?})")),
         };
         let queue = unsafe { device.get_device_queue(queue_family, 0) };
+        let render_family = split.unwrap_or(queue_family);
+        let render_queue = unsafe { device.get_device_queue(render_family, 0) };
 
         let mut as_props = vk::PhysicalDeviceAccelerationStructurePropertiesKHR::default();
         let mut rt_props = vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default();
@@ -351,6 +362,11 @@ impl Context {
         .map_err(|e| format!("allocator: {e}"))?;
 
         let pool = unsafe { device.create_command_pool(&vk::CommandPoolCreateInfo::default().flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER).queue_family_index(queue_family), None) }.map_err(|e| format!("{e:?}"))?;
+        let render_pool = if render_family == queue_family {
+            pool
+        } else {
+            unsafe { device.create_command_pool(&vk::CommandPoolCreateInfo::default().flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER).queue_family_index(render_family), None) }.map_err(|e| format!("{e:?}"))?
+        };
         let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default(), None) }.map_err(|e| format!("{e:?}"))?;
         let as_device = khr::acceleration_structure::Device::new(&instance, &device);
         let rt_device = use_rt_pipeline.then(|| khr::ray_tracing_pipeline::Device::new(&instance, &device));
@@ -364,11 +380,19 @@ impl Context {
             vk::api_version_minor(info.api_version),
             vk::api_version_patch(info.api_version),
             queue_family,
-            if compute_only.is_some() { " (compute-only)" } else { "" },
-            if low_prio { ", low global priority" } else { "" },
+            match split {
+                Some(c) => format!(" (display) + {c} (compute-only, rendering)"),
+                None if compute_only == Some(queue_family) => " (compute-only)".to_string(),
+                None => String::new(),
+            },
+            match (low_prio, split) {
+                (true, Some(_)) => ", low global priority for rendering",
+                (true, None) => ", low global priority",
+                _ => "",
+            },
             if use_rt_pipeline { "ray tracing pipeline (no ray_query)" } else { "ray query" }
         );
-        Ok(Self { entry, instance, physical, device, queue, queue_family, allocator: Arc::new(Mutex::new(allocator)), pool, fence, info, as_props, rt_props, as_device, rt_device, use_rt_pipeline, surface, surface_loader, swapchain_loader, external_memory_win32, debug })
+        Ok(Self { entry, instance, physical, device, queue, queue_family, render_queue, render_family, render_pool, allocator: Arc::new(Mutex::new(allocator)), pool, fence, info, as_props, rt_props, as_device, rt_device, use_rt_pipeline, surface, surface_loader, swapchain_loader, external_memory_win32, debug })
     }
 
     /// レイを飛ばすシェーダの段階（バリア用）
@@ -380,9 +404,22 @@ impl Context {
         }
     }
 
+    /// 表示とサンプルを積むキューのファミリーが違えば、その 2 つ（資源を両方のキューで使えるように共有する）。同じなら空
+    pub fn shared_families(&self) -> Vec<u32> {
+        if self.render_family == self.queue_family {
+            Vec::new()
+        } else {
+            vec![self.queue_family, self.render_family]
+        }
+    }
+
     /// バッファを作る。VRAM が足りないなどで作れなければ Err（作りかけの資源は解放する）
     pub fn create_buffer(&self, size: u64, usage: vk::BufferUsageFlags, host_visible: bool, host_readback: bool) -> Result<Buffer, String> {
-        let ci = vk::BufferCreateInfo::default().size(size.max(16)).usage(usage | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
+        let families = self.shared_families();
+        let mut ci = vk::BufferCreateInfo::default().size(size.max(16)).usage(usage | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
+        if !families.is_empty() {
+            ci = ci.sharing_mode(vk::SharingMode::CONCURRENT).queue_family_indices(&families);
+        }
         let buffer = unsafe { self.device.create_buffer(&ci, None) }.map_err(|e| format!("vkCreateBuffer ({}): {e:?}", mib(size)))?;
         let req = unsafe { self.device.get_buffer_memory_requirements(buffer) };
         let location = if host_readback {
@@ -458,7 +495,8 @@ impl Context {
 
     /// 2D の画像（layers > 1 なら配列）とビューを作る。失敗したら Err（作りかけの資源は解放する）
     pub fn create_image_2d(&self, w: u32, h: u32, layers: u32, format: vk::Format, usage: vk::ImageUsageFlags) -> Result<Image, String> {
-        let ici = vk::ImageCreateInfo::default()
+        let families = self.shared_families();
+        let mut ici = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
             .extent(vk::Extent3D { width: w, height: h, depth: 1 })
@@ -468,6 +506,9 @@ impl Context {
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(usage)
             .initial_layout(vk::ImageLayout::UNDEFINED);
+        if !families.is_empty() {
+            ici = ici.sharing_mode(vk::SharingMode::CONCURRENT).queue_family_indices(&families);
+        }
         let image = unsafe { self.device.create_image(&ici, None) }.map_err(|e| format!("vkCreateImage ({w}x{h}x{layers} {format:?}): {e:?}"))?;
         let req = unsafe { self.device.get_image_memory_requirements(image) };
         let mut img = Image { image, allocation: None, view: vk::ImageView::null(), format, width: w, height: h, layers };
@@ -594,6 +635,9 @@ impl Drop for Context {
         unsafe {
             let _ = self.device.device_wait_idle();
             self.device.destroy_fence(self.fence, None);
+            if self.render_pool != self.pool {
+                self.device.destroy_command_pool(self.render_pool, None);
+            }
             self.device.destroy_command_pool(self.pool, None);
             self.release_allocator();
             self.device.destroy_device(None);
