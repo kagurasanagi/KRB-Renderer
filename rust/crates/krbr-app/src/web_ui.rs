@@ -27,6 +27,7 @@ const TOOLTIP_HTML: &str = include_str!("../web/tooltip.html");
 const EDITOR_HTML: &str = include_str!("../web/editor.html");
 const ABOUT_HTML: &str = include_str!("../web/about.html");
 const VIDEO_HTML: &str = include_str!("../web/video.html");
+const KPLUG_HTML: &str = include_str!("../web/kicad_plugin.html");
 /// どのページにも入れる、説明の吹き出しの仕掛け
 const TIP_JS: &str = include_str!("../web/tip.js");
 
@@ -52,8 +53,8 @@ pub enum Msg {
     Resize(f32),
     /// メニューの見出しを押した（開いているときは、見出しに載せただけでも）。x・y はボタン列の中の、プルダウンを出す位置（CSS の px）
     Menu { id: String, x: f32, y: f32 },
-    /// プルダウンの中身の大きさ（CSS の px。サブメニューを開くと変わる）
-    MenuSize(f32, f32),
+    /// プルダウンの中身の大きさ（CSS の px）：見せているところ（サブメニューを開くと変わる）と、どのサブメニューを開いても収まる大きさ
+    MenuSize { shown: (f32, f32), full: (f32, f32) },
     /// 説明の吹き出しを出す（text が空なら消す）。rect は説明のある要素の位置（そのページの中の CSS の px：左・上・右・下）。
     /// pane はどのページからか（受け取ったところで入れる）
     Tip { pane: Pane, text: String, rect: [f32; 4] },
@@ -79,7 +80,10 @@ fn parse(body: &str) -> Option<Msg> {
         "key" => s("code").map(Msg::Key),
         "resize" => v.get("width").and_then(|w| w.as_f64()).filter(|w| w.is_finite()).map(|w| Msg::Resize(w as f32)),
         "menu" => Some(Msg::Menu { id: s("id")?, x: f("x")?, y: f("y")? }),
-        "size" => Some(Msg::MenuSize(f("width")?, f("height")?)),
+        "size" => {
+            let shown = (f("width")?, f("height")?);
+            Some(Msg::MenuSize { shown, full: (f("fullWidth").unwrap_or(shown.0).max(shown.0), f("fullHeight").unwrap_or(shown.1).max(shown.1)) })
+        }
         "tip" => Some(Msg::Tip { pane: Pane::Toolbar, text: s("text")?, rect: [f("left").unwrap_or(0.0), f("top").unwrap_or(0.0), f("right").unwrap_or(0.0), f("bottom").unwrap_or(0.0)] }),
         "tipsize" => Some(Msg::TipSize(f("width")?, f("height")?)),
         "painted" => Some(Msg::Painted(Pane::Toolbar)),
@@ -109,6 +113,8 @@ pub enum Pane {
     About,
     /// 「動画を書き出す」の窓（真ん中に重ねる）
     Video,
+    /// 「KiCad プラグイン」の窓（真ん中に重ねる）
+    Plugin,
     /// メニューのプルダウン（3D 表示などの上に重ねる）
     Menu,
     /// 説明の吹き出し（いちばん上に重ねる）
@@ -117,7 +123,7 @@ pub enum Pane {
 
 impl Pane {
     /// 作る順（後のものほど上に重なる）
-    pub const ALL: [Pane; 9] = [Pane::Toolbar, Pane::Status, Pane::Panel, Pane::Banner, Pane::Editor, Pane::About, Pane::Video, Pane::Menu, Pane::Tooltip];
+    pub const ALL: [Pane; 10] = [Pane::Toolbar, Pane::Status, Pane::Panel, Pane::Banner, Pane::Editor, Pane::About, Pane::Video, Pane::Plugin, Pane::Menu, Pane::Tooltip];
 
     /// ページの window.krbr の関数の名前
     fn func(self) -> &'static str {
@@ -129,6 +135,7 @@ impl Pane {
             Pane::Editor => "editor",
             Pane::About => "about",
             Pane::Video => "video",
+            Pane::Plugin => "kplug",
             Pane::Menu => "menu",
             Pane::Tooltip => "tooltip",
         }
@@ -149,6 +156,7 @@ impl Pane {
             Pane::Editor => EDITOR_HTML,
             Pane::About => ABOUT_HTML,
             Pane::Video => VIDEO_HTML,
+            Pane::Plugin => KPLUG_HTML,
             Pane::Menu => MENU_HTML,
             Pane::Tooltip => TOOLTIP_HTML,
         }
@@ -165,6 +173,8 @@ struct View {
     shown: bool,
     size: (u32, u32),
     pending: Option<(PxRect, Instant)>,
+    /// 見せるところ（左上からの幅・高さの物理ピクセル。外は切り抜く）。None なら全体
+    clip: Option<(u32, u32)>,
 }
 
 /// ページの WebView。1 つ作るのに 0.1〜0.6 秒かかり、その間ウィンドウが止まるので、フレームの合間に 1 つずつ作る（step）。
@@ -266,7 +276,7 @@ impl WebUi {
             })
             .build_as_child(window)
             .map_err(|e| format!("WebView: {e}"))?;
-        self.views.push(View { view, bounds: None, sent: String::new(), shown: false, size: (1, 1), pending: None });
+        self.views.push(View { view, bounds: None, sent: String::new(), shown: false, size: (1, 1), pending: None, clip: None });
         krbr_core::debug!("web UI: {pane:?} in {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0);
         Ok(self.complete())
     }
@@ -360,6 +370,30 @@ impl WebUi {
         let _ = v.view.evaluate_script("requestAnimationFrame(() => requestAnimationFrame(() => window.ipc.postMessage('{\"type\":\"painted\"}')))");
     }
 
+    /// 見せるところを左上からの幅・高さ（物理ピクセル）に切り抜く（None なら全体）。WebView の大きさを変えると、新しい大きさで
+    /// 描き終えるまで見えなくなるので、大きさの変わる中身（メニューのサブメニュー）は、大きな WebView のまま見せるところだけを変える
+    pub fn clip(&mut self, pane: Pane, c: Option<(u32, u32)>) {
+        let Some(v) = self.view(pane) else { return };
+        if v.clip == c {
+            return;
+        }
+        v.clip = c;
+        #[cfg(windows)]
+        {
+            use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn, HRGN};
+            use wry::WebViewExtWindows;
+            // 安全性：WebView の窓に、作った領域を渡す（渡した領域は窓のものになるので消さない）
+            unsafe {
+                let rgn = match c {
+                    Some((w, h)) => CreateRectRgn(0, 0, w as i32, h as i32),
+                    None => HRGN::default(),
+                };
+                SetWindowRgn(v.view.hwnd(), Some(rgn), true);
+            }
+        }
+        self.moved = Instant::now();
+    }
+
     /// 画面の外で描き終えた：待っていた場所に置く
     fn painted(&mut self, pane: Pane) {
         let Some(v) = self.view(pane) else { return };
@@ -440,7 +474,8 @@ mod tests {
         assert_eq!(parse(r#"{"type":"key","code":"KeyP"}"#), Some(Msg::Key("KeyP".into())));
         assert_eq!(parse(r#"{"type":"resize","width":360}"#), Some(Msg::Resize(360.0)));
         assert_eq!(parse(r#"{"type":"menu","id":"file","x":4,"y":28}"#), Some(Msg::Menu { id: "file".into(), x: 4.0, y: 28.0 }));
-        assert_eq!(parse(r#"{"type":"size","width":240,"height":300.5}"#), Some(Msg::MenuSize(240.0, 300.5)));
+        assert_eq!(parse(r#"{"type":"size","width":240,"height":300.5}"#), Some(Msg::MenuSize { shown: (240.0, 300.5), full: (240.0, 300.5) }));
+        assert_eq!(parse(r#"{"type":"size","width":240,"height":300,"fullWidth":480,"fullHeight":320}"#), Some(Msg::MenuSize { shown: (240.0, 300.0), full: (480.0, 320.0) }));
         assert_eq!(parse(r#"{"type":"tip","text":"a","left":1,"top":2,"right":3,"bottom":4}"#), Some(Msg::Tip { pane: Pane::Toolbar, text: "a".into(), rect: [1.0, 2.0, 3.0, 4.0] }));
         assert_eq!(parse(r#"{"type":"tipsize","width":100,"height":20}"#), Some(Msg::TipSize(100.0, 20.0)));
         assert_eq!(parse(r#"{"type":"open","url":"https://example.com/"}"#), Some(Msg::Open("https://example.com/".into())));

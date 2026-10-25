@@ -78,8 +78,8 @@ impl App {
         v
     }
 
-    /// 開いたメニューの項目（web/menu.html の krbr.menu に渡す JSON）
-    pub(super) fn menu_json(&self, menu: &str) -> String {
+    /// 開いたメニューの項目（web/menu.html の krbr.menu に渡す JSON）。max_height はプルダウンの入る高さ（CSS の px。超える分は中でスクロールする）
+    pub(super) fn menu_json(&self, menu: &str, max_height: f32) -> String {
         let st = &self.st;
         let board = self.has_board();
         let items = match menu {
@@ -152,7 +152,7 @@ impl App {
             }
             _ => Vec::new(),
         };
-        json!({ "key": menu, "items": items }).to_string()
+        json!({ "key": menu, "items": items, "maxHeight": max_height.floor() }).to_string()
     }
 
     /// メニューで選んだ項目を反映する（egui のメニューと同じ要求にする）

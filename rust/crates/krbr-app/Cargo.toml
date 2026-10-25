@@ -36,4 +36,4 @@ wry = { version = "0.57", default-features = false, features = ["os-webview"] }
 
 # 動画の書き出し（Media Foundation の H.264 エンコーダー）。版は wry が使うものと同じ
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_Foundation"] }
+windows = { version = "0.62", features = ["Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_Foundation", "Win32_Graphics_Gdi"] }

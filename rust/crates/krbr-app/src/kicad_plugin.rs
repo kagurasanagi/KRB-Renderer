@@ -337,6 +337,100 @@ impl PluginWindow {
             .collect();
     }
 
+    /// 行 i の版に登録する（install）か、解除する
+    fn run(&mut self, i: usize, install: bool) {
+        let Some((v, _)) = self.rows.get(i) else { return };
+        let name = v.name.clone();
+        self.message = if install {
+            match v.install(&self.exe) {
+                Ok(d) => {
+                    info!("KiCad {name}: installed the plugin into {} (krbr: {})", d.display(), self.exe.display());
+                    fl!("kplug-installed", version = name)
+                }
+                Err(e) => {
+                    warn!("KiCad {name}: cannot install the plugin: {e}");
+                    fl!("kplug-failed", error = e.to_string())
+                }
+            }
+        } else {
+            match v.uninstall() {
+                Ok(_) => {
+                    info!("KiCad {name}: removed {}", v.plugin_dir().display());
+                    fl!("kplug-uninstalled", version = name)
+                }
+                Err(e) => {
+                    warn!("KiCad {name}: cannot remove the plugin: {e}");
+                    fl!("kplug-failed", error = e.to_string())
+                }
+            }
+        };
+        self.rescan();
+    }
+
+    /// WebView の窓（web/kicad_plugin.html）に渡す JSON。ボタンは "kplug.install.<行>" などのクリックで返ってくる
+    pub fn json(&self) -> String {
+        let rows: Vec<serde_json::Value> = self
+            .rows
+            .iter()
+            .map(|(v, state)| {
+                let support = v.support();
+                let (text, install) = match state {
+                    State::NotInstalled => (fl!("kplug-state-not-installed"), Some(fl!("kplug-install"))),
+                    State::Installed => (fl!("kplug-state-installed"), None),
+                    State::Outdated => (fl!("kplug-state-outdated"), Some(fl!("kplug-update"))),
+                    State::OtherExe(p) => (fl!("kplug-state-other-exe", path = p.display().to_string()), Some(fl!("kplug-switch"))),
+                    State::MissingExe(p) if p.as_os_str().is_empty() => (fl!("kplug-state-no-path"), Some(fl!("kplug-switch"))),
+                    State::MissingExe(p) => (fl!("kplug-state-missing-exe", path = p.display().to_string()), Some(fl!("kplug-switch"))),
+                };
+                let too_old = support == Support::TooOld;
+                serde_json::json!({
+                    "name": format!("KiCad {}", v.name),
+                    "dir": v.plugin_dir().display().to_string(),
+                    "tooOld": too_old,
+                    "state": if too_old { fl!("kplug-too-old") } else { text },
+                    "installed": *state == State::Installed,
+                    "install": install.filter(|_| !too_old),
+                    "removable": !too_old && *state != State::NotInstalled,
+                    "noProgram": v.program.is_none().then(|| fl!("kplug-no-program")),
+                    "mayBreak": (support == Support::MayBreak).then(|| fl!("kplug-may-break")),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "text": {
+                "title": fl!("kplug-title"), "intro": fl!("kplug-intro"), "none": fl!("kplug-none"), "uninstall": fl!("kplug-uninstall"),
+                "openFolder": fl!("kplug-open-folder"), "rescan": fl!("kplug-rescan"), "restart": fl!("kplug-restart-hint"),
+                "exe": fl!("kplug-this-exe", path = self.exe.display().to_string()), "close": fl!("kplug-close"),
+            },
+            "rows": rows,
+            "message": self.message,
+        })
+        .to_string()
+    }
+
+    /// WebView の窓からの操作（"kplug.<操作>[.<行>]"）
+    pub fn click(&mut self, id: &str) {
+        let (op, row) = match id.strip_prefix("kplug.").and_then(|r| r.rsplit_once('.')) {
+            Some((op, n)) if n.parse::<usize>().is_ok() => (op, n.parse::<usize>().ok()),
+            _ => (id.strip_prefix("kplug.").unwrap_or(id), None),
+        };
+        match (op, row) {
+            ("close", _) => self.open = false,
+            ("rescan", _) => {
+                self.message.clear();
+                self.rescan();
+            }
+            ("install", Some(i)) => self.run(i, true),
+            ("uninstall", Some(i)) => self.run(i, false),
+            ("folder", Some(i)) => {
+                if let Some((v, _)) = self.rows.get(i) {
+                    krbr_core::platform::reveal_in_file_manager(&v.plugin_dir().join(PATH_FILE));
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn ui(&mut self, ctx: &egui::Context) {
         if !self.open {
             return;
@@ -414,32 +508,7 @@ impl PluginWindow {
             }
         });
         if let Some((i, install)) = action {
-            let v = &self.rows[i].0;
-            let name = v.name.clone();
-            self.message = if install {
-                match v.install(&self.exe) {
-                    Ok(d) => {
-                        info!("KiCad {name}: installed the plugin into {} (krbr: {})", d.display(), self.exe.display());
-                        fl!("kplug-installed", version = name)
-                    }
-                    Err(e) => {
-                        warn!("KiCad {name}: cannot install the plugin: {e}");
-                        fl!("kplug-failed", error = e.to_string())
-                    }
-                }
-            } else {
-                match v.uninstall() {
-                    Ok(_) => {
-                        info!("KiCad {name}: removed {}", v.plugin_dir().display());
-                        fl!("kplug-uninstalled", version = name)
-                    }
-                    Err(e) => {
-                        warn!("KiCad {name}: cannot remove the plugin: {e}");
-                        fl!("kplug-failed", error = e.to_string())
-                    }
-                }
-            };
-            self.rescan();
+            self.run(i, install);
         }
         self.open &= open;
     }

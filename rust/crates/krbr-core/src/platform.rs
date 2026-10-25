@@ -243,8 +243,8 @@ pub fn relaunch_without_console(args: &[String], env: (&str, &str)) -> std::io::
     cmd.spawn().map(|_| ())
 }
 
-/// 描画の用意ができるまでの間、窓（HWND）を暗い色で塗って、真ん中に文字を出す（白い窓を見せない）
-pub fn paint_placeholder(hwnd: isize, text: &str) {
+/// 描画の用意ができるまでの間、窓（HWND）を暗い色で塗る（白い窓を見せない）
+pub fn paint_placeholder(hwnd: isize) {
     #[cfg(windows)]
     {
         #[repr(C)]
@@ -260,20 +260,13 @@ pub fn paint_placeholder(hwnd: isize, text: &str) {
             fn ReleaseDC(hwnd: isize, dc: isize) -> i32;
             fn GetClientRect(hwnd: isize, r: *mut Rect) -> i32;
             fn FillRect(dc: isize, r: *const Rect, brush: isize) -> i32;
-            fn DrawTextW(dc: isize, text: *const u16, len: i32, r: *mut Rect, format: u32) -> i32;
-            fn GetDpiForWindow(hwnd: isize) -> u32;
         }
         #[link(name = "gdi32")]
         extern "system" {
             fn CreateSolidBrush(color: u32) -> isize;
             fn DeleteObject(obj: isize) -> i32;
-            fn SetTextColor(dc: isize, color: u32) -> u32;
-            fn SetBkMode(dc: isize, mode: i32) -> i32;
-            fn CreateFontW(h: i32, w: i32, esc: i32, orient: i32, weight: i32, italic: u32, underline: u32, strike: u32, charset: u32, out: u32, clip: u32, quality: u32, pitch: u32, face: *const u16) -> isize;
-            fn SelectObject(dc: isize, obj: isize) -> isize;
         }
-        let rgb = |r: u32, g: u32, b: u32| r | (g << 8) | (b << 16);
-        // 安全性：窓の DC を取って返し、作ったブラシ・フォントは消す
+        // 安全性：窓の DC を取って返し、作ったブラシは消す
         unsafe {
             let dc = GetDC(hwnd);
             if dc == 0 {
@@ -281,24 +274,14 @@ pub fn paint_placeholder(hwnd: isize, text: &str) {
             }
             let mut r = Rect { l: 0, t: 0, r: 0, b: 0 };
             GetClientRect(hwnd, &mut r);
-            let brush = CreateSolidBrush(rgb(17, 19, 22));
+            let brush = CreateSolidBrush(17 | (19 << 8) | (22 << 16));
             FillRect(dc, &r, brush);
             DeleteObject(brush);
-            let dpi = GetDpiForWindow(hwnd).max(96) as i32;
-            let face: Vec<u16> = "Yu Gothic UI\0".encode_utf16().collect();
-            let font = CreateFontW(-(15 * dpi / 72), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, face.as_ptr());
-            let old = SelectObject(dc, font);
-            SetBkMode(dc, 1); // TRANSPARENT
-            SetTextColor(dc, rgb(164, 168, 176));
-            let w: Vec<u16> = text.encode_utf16().collect();
-            DrawTextW(dc, w.as_ptr(), w.len() as i32, &mut r, 0x1 | 0x4 | 0x20); // DT_CENTER | DT_VCENTER | DT_SINGLELINE
-            SelectObject(dc, old);
-            DeleteObject(font);
             ReleaseDC(hwnd, dc);
         }
     }
     #[cfg(not(windows))]
-    let _ = (hwnd, text);
+    let _ = hwnd;
 }
 
 /// URL を既定のブラウザで開く（http・https だけ）

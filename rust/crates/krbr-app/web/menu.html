@@ -6,8 +6,11 @@
 </head>
 <body class="menu">
   <div class="lists" id="lists"></div>
+  <div class="lists measure" id="measure"></div>
 <script>
-// プルダウンのメニュー：Rust が組み立てた項目（JSON）を描く。サブメニューは右に列を足し、その分の大きさを Rust に頼む
+// プルダウンのメニュー：Rust が組み立てた項目（JSON）を描く。サブメニューは右に列を足す。WebView はどのサブメニューを
+// 開いても収まる大きさにしてもらい、見せるところ（今開いている列）だけを Rust に切り抜いてもらう（WebView の大きさを
+// 変えると、描き直す間メニュー全体が消えてちらつくので）
 const post = (m) => window.ipc.postMessage(JSON.stringify(m));
 document.addEventListener("contextmenu", (e) => e.preventDefault());
 document.addEventListener("keydown", (e) => {
@@ -64,8 +67,29 @@ function list(items, depth) {
   return ul;
 }
 
+// 開いているサブメニュー（前に描いたとき）。同じ列はスクロールの位置を残す
+let drawn = [];
+
+// どのサブメニューを開いても収まる大きさ（列を 1 つずつ測る）
+function fullSize(items, depth) {
+  const box = document.getElementById("measure");
+  box.replaceChildren(list(items, depth));
+  const r = box.firstChild.getBoundingClientRect();
+  let w = 0;
+  let h = r.height;
+  for (const it of items) {
+    if (!it.sub) continue;
+    const s = fullSize(it.sub, depth + 1);
+    w = Math.max(w, s.width);
+    h = Math.max(h, s.height);
+  }
+  box.replaceChildren();
+  return { width: r.width + w, height: h };
+}
+
 function render() {
   const lists = document.getElementById("lists");
+  const scroll = [...lists.children].map((c) => c.scrollTop);
   const parts = [];
   let items = model.items;
   parts.push(list(items, 0));
@@ -76,15 +100,29 @@ function render() {
     parts.push(list(items, d + 1));
   }
   lists.replaceChildren(...parts);
-  // 中身の大きさを Rust に知らせる（その大きさに WebView を合わせてもらう。隠している間も測れる）
-  const r = lists.getBoundingClientRect();
-  post({ type: "size", width: Math.ceil(r.width), height: Math.ceil(r.height) });
+  // 開いているものが前と同じ列は、スクロールの位置を残す
+  for (let d = 0; d < parts.length && d < scroll.length; d++) {
+    if (d > 0 && drawn[d - 1] !== open[d - 1]) break;
+    parts[d].scrollTop = scroll[d];
+  }
+  drawn = open.slice();
+  // 中身の大きさを Rust に知らせる（隠している間も測れる）。見せるところを広げるのは、新しい列を描き終えてから
+  const full = fullSize(model.items, 0);
+  const send = () => {
+    const r = lists.getBoundingClientRect();
+    post({ type: "size", width: Math.ceil(r.width), height: Math.ceil(r.height), fullWidth: Math.ceil(full.width), fullHeight: Math.ceil(full.height) });
+  };
+  // 隠している間は描かれない（requestAnimationFrame が来ない）ので、すぐ知らせる
+  if (document.visibilityState === "hidden") send();
+  else requestAnimationFrame(() => requestAnimationFrame(send));
 }
 
 window.krbr = {
   menu(m) {
     if (!model || m.key !== model.key) open = [];
     model = m;
+    // 入る高さ（超える分は列の中でスクロールする）
+    document.documentElement.style.setProperty("--menu-max-h", m.maxHeight ? m.maxHeight + "px" : "none");
     render();
   },
 };

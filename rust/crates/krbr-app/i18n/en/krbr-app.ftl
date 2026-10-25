@@ -66,6 +66,7 @@ kplug-installed = Installed for KiCad { $version }
 kplug-uninstalled = Removed from KiCad { $version }
 kplug-failed = Failed: { $error }
 kplug-rescan = Search again
+kplug-close = Close
 
 ## Menu: Help
 menu-help = Help
@@ -600,13 +601,9 @@ about-env-trace = Ray tracing
 about-env-webview = WebView2
 
 ## Startup screen, recent boards, drag and drop
-startup-starting = Starting KRB Renderer…
-startup-step-gpu = Preparing the GPU
 startup-step-ui = Preparing the user interface ({ $done } / { $total })
 startup-step-board = Loading the board: { $name }
-startup-step-no-board = No board (open one with File → Open)
-startup-step-first = First image
-startup-log = Log
+startup-step-first = Drawing the first image
 menu-recent = Recent boards
 menu-recent-empty = (none yet)
 menu-recent-clear = Clear the list

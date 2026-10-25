@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>/*STYLE*/</style>
+</head>
+<body class="kplug">
+  <header>
+    <span id="title"></span>
+    <button class="icon-btn" id="close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </header>
+  <main class="scroll" id="main"></main>
+  <footer id="foot"></footer>
+<script>
+// 「設定 → KiCad プラグイン」：見つかった KiCad の版ごとに、状態と登録・解除のボタン。
+// ボタンは "kplug.<操作>.<行>" のクリックで Rust に送る（登録・解除・フォルダを開く）
+const post = (m) => window.ipc.postMessage(JSON.stringify(m));
+const click = (id) => post({ type: "click", id: "kplug." + id });
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+};
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    click("close");
+    e.preventDefault();
+  }
+});
+$("close").addEventListener("click", () => click("close"));
+
+function button(cls, label, id, tip) {
+  const b = el("button", cls, label);
+  if (tip) b.title = tip;
+  b.addEventListener("click", () => click(id));
+  return b;
+}
+
+function render(m) {
+  const t = m.text;
+  $("title").textContent = t.title;
+  $("close").title = t.close;
+  const main = $("main");
+  main.replaceChildren(el("p", "intro", t.intro));
+  if (!m.rows.length) main.append(el("div", "note-text muted", t.none));
+  m.rows.forEach((r, i) => {
+    const card = el("div", "kver" + (r.tooOld ? " old" : ""));
+    const head = el("div", "khead");
+    const name = el("span", "kname", r.name);
+    name.title = r.dir;
+    head.append(name, el("span", "kstate" + (r.installed ? " ok" : ""), r.state), el("span", "spacer"));
+    if (r.removable) {
+      head.append(button("btn small", t.openFolder, "folder." + i, r.dir), button("btn small", t.uninstall, "uninstall." + i));
+    }
+    if (r.install) head.append(button("btn small primary", r.install, "install." + i));
+    card.append(head);
+    if (r.noProgram) card.append(el("div", "note-text muted", r.noProgram));
+    if (r.mayBreak) card.append(el("div", "note-text warn", r.mayBreak));
+    main.append(card);
+  });
+  main.append(el("div", "note-text muted mono", t.exe), el("div", "note-text muted", t.restart));
+  if (m.message) main.append(el("div", "note-text accent", m.message));
+  const foot = $("foot");
+  foot.replaceChildren(button("btn", t.rescan, "rescan"), el("span", "spacer"), button("btn primary", t.close, "close"));
+}
+
+window.krbr = { kplug: render };
+post({ type: "ready" });
+</script>
+</body>
+</html>

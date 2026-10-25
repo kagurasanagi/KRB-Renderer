@@ -503,8 +503,9 @@ struct WebMenu {
     id: String,
     /// プルダウンの左上（ボタン列の中の位置。egui のポイント = CSS の px）
     at: egui::Pos2,
-    /// 中身の大きさ（ページが測って知らせてくる。それまでは隠しておく）
-    size: Option<egui::Vec2>,
+    /// 中身の大きさ（ページが測って知らせてくる。それまでは隠しておく）：見せているところと、どのサブメニューを開いても収まる大きさ。
+    /// WebView は後者の大きさにして、前者だけを見せる（サブメニューを開くたびに WebView の大きさを変えると、描き直す間ちらつく）
+    size: Option<(egui::Vec2, egui::Vec2)>,
     /// キーボードの入力をプルダウンへ渡したか（見せたときに一度だけ）
     focused: bool,
 }
@@ -974,9 +975,8 @@ struct App {
     web_started: Option<Instant>,
     /// WebView を作れなかった回数と、次に試す時刻（前に開いていた krbr の WebView2 が終わりきる前だと、作れないことがある）
     web_failures: (u32, Option<Instant>),
-    /// 起動中の画面（GPU・画面・基板の用意ができるまで、ウィンドウ全体に進み具合とログを出す）を出している
+    /// 起動中の画面（GPU・画面・基板の用意ができるまで、ウィンドウ全体に進み具合のバーと今の段階を出す）を出している
     splash: bool,
-    splash_icon: Option<egui::TextureHandle>,
     /// 最近使った基板（メニューを開いたときに読み直す）
     recent_boards: Vec<PathBuf>,
     /// 動画の書き出し（している間）
@@ -986,7 +986,7 @@ struct App {
     video_test_exit: bool,
     proxy: Option<EventLoopProxy<crate::web_ui::Wake>>,
     /// ボタン列・ステータスバー・設定パネル・警告の帯の置き場所（egui のポイント。NOTHING なら出さない）
-    web_rects: [egui::Rect; 7],
+    web_rects: [egui::Rect; 8],
     /// 「KRB Renderer について」を開いている。中身（JSON。開くたびに作り直す。ライセンスのファイルを読むので毎フレームは作らない）
     about_open: bool,
     about_json: Option<String>,
@@ -1564,7 +1564,7 @@ impl App {
         // GPU の準備ができて最初のフレームを出すまで（1 秒ほど）、白い窓を見せない
         if !hidden {
             if let Ok(raw_window_handle::RawWindowHandle::Win32(h)) = window.window_handle().map(|h| h.as_raw()) {
-                krbr_core::platform::paint_placeholder(h.hwnd.get(), &fl!("startup-starting"));
+                krbr_core::platform::paint_placeholder(h.hwnd.get());
             }
         }
         let display = window.display_handle().map_err(|e| format!("{e}"))?.as_raw();
@@ -2606,7 +2606,6 @@ impl App {
         fresh.web = self.web.take();
         fresh.web_started = self.web_started.take();
         fresh.splash = self.splash;
-        fresh.splash_icon = self.splash_icon.take();
         fresh.editor_rect = self.editor_rect;
         fresh.proxy = self.proxy.clone();
         fresh.web_rects = self.web_rects;
@@ -3159,14 +3158,15 @@ impl App {
                         t.size = Some(egui::vec2(w, h));
                     }
                 }
-                crate::web_ui::Msg::MenuSize(w, h) => {
+                crate::web_ui::Msg::MenuSize { shown, full } => {
                     if let Some(m) = &mut self.web_menu {
-                        m.size = Some(egui::vec2(w, h));
+                        m.size = Some((egui::vec2(shown.0, shown.1), egui::vec2(full.0, full.1)));
                     }
                 }
                 crate::web_ui::Msg::Click(id) if id == "menu.close" => self.close_web_menu(),
                 crate::web_ui::Msg::Click(id) if id.starts_with("about.") => self.apply_about_click(&id),
                 crate::web_ui::Msg::Click(id) if id.starts_with("video.") => self.apply_video_click(&id),
+                crate::web_ui::Msg::Click(id) if id.starts_with("kplug.") => self.plugin_window.click(&id),
                 crate::web_ui::Msg::Set(id, v) if id.starts_with("video.") => self.apply_video_set(&id, &v),
                 // 書き出しの間は、ほかの操作（パネル・ボタン列・メニューの項目・材質エディタ）を受けない
                 crate::web_ui::Msg::Click(id) if self.video.is_some() && id.starts_with("menu:") && id != "menu:video" && id != "menu:about" && id != "menu:quit" => self.close_web_menu(),
@@ -3326,64 +3326,32 @@ impl App {
         }
     }
 
-    /// 起動中の画面：アイコン・名前・進み具合のバーと段階・最近のログ
+    /// 起動中の画面：進み具合のバーと、今している段階（1 行）
     fn draw_splash(&mut self, ctx: &egui::Context) {
         let screen = ctx.content_rect();
         ctx.layer_painter(egui::LayerId::background()).rect_filled(screen, 0.0, egui::Color32::from_rgb(17, 19, 22));
-        let icon = self
-            .splash_icon
-            .get_or_insert_with(|| {
-                let img = image::load_from_memory(web_about::ICON_PNG).map(|i| i.to_rgba8()).unwrap_or_else(|_| image::RgbaImage::new(1, 1));
-                ctx.load_texture("splash_icon", egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], &img), egui::TextureOptions::LINEAR)
-            })
-            .clone();
         let (made, total) = self.web.as_ref().map(|w| w.core_progress()).unwrap_or((1, 1));
         let board_loading = self.board_job.as_ref().filter(|(_, _, startup)| *startup).map(|(p, _, _)| p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default());
-        let board_name = board_loading.clone().or_else(|| self.has_board().then(|| self.prep.board.project_name.clone()));
-        let first = !self.has_board() || self.gpu.as_ref().is_some_and(|g| g.prog.samples() > 0);
-        let ui_done = made >= total;
         let board_done = board_loading.is_none();
+        let first = !self.has_board() || self.gpu.as_ref().is_some_and(|g| g.prog.samples() > 0);
         let frac = 0.15 + 0.45 * made as f32 / total.max(1) as f32 + if board_done { 0.25 } else { 0.0 } + if first && board_done { 0.15 } else { 0.0 };
-        let steps = [
-            (fl!("startup-step-gpu"), true),
-            (fl!("startup-step-ui", done = made.to_string(), total = total.to_string()), ui_done),
-            (match &board_name {
-                Some(n) => fl!("startup-step-board", name = n.as_str()),
-                None => fl!("startup-step-no-board"),
-            }, board_done),
-            (fl!("startup-step-first"), first && board_done),
-        ];
-        let current = steps.iter().find(|(_, done)| !done).map(|(t, _)| t.clone()).unwrap_or_default();
-        let width = 560.0f32.min(screen.width() - 40.0);
-        egui::Area::new(egui::Id::new("splash")).order(egui::Order::Foreground).fixed_pos(egui::pos2(screen.center().x - width / 2.0, screen.top() + (screen.height() * 0.18).max(20.0))).show(ctx, |ui| {
-            ui.set_width(width);
-            ui.vertical_centered(|ui| {
-                ui.add(egui::Image::new((icon.id(), egui::vec2(96.0, 96.0))));
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("KRB Renderer").size(28.0).strong().color(egui::Color32::from_rgb(235, 232, 228)));
-                ui.label(egui::RichText::new(fl!("about-version", version = env!("CARGO_PKG_VERSION"))).color(egui::Color32::from_rgb(108, 113, 122)));
-                ui.add_space(18.0);
-                ui.add(egui::ProgressBar::new(frac.min(1.0)).desired_width(width).desired_height(8.0).fill(egui::Color32::from_rgb(232, 148, 90)));
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(current).color(egui::Color32::from_rgb(164, 168, 176)));
-            });
-            ui.add_space(14.0);
-            for (text, done) in &steps {
-                ui.horizontal(|ui| {
-                    let (mark, color) = if *done { ("●", egui::Color32::from_rgb(127, 212, 154)) } else { ("○", egui::Color32::from_rgb(108, 113, 122)) };
-                    ui.label(egui::RichText::new(mark).color(color));
-                    ui.label(egui::RichText::new(text).color(if *done { egui::Color32::from_rgb(164, 168, 176) } else { egui::Color32::from_rgb(235, 232, 228) }));
-                });
-            }
-            ui.add_space(14.0);
-            ui.label(egui::RichText::new(fl!("startup-log")).small().color(egui::Color32::from_rgb(108, 113, 122)));
-            egui::Frame::new().fill(egui::Color32::from_rgb(11, 12, 14)).corner_radius(6.0).inner_margin(8.0).show(ui, |ui| {
-                ui.set_width(width - 16.0);
-                for line in krbr_core::log::recent(10) {
-                    ui.add(egui::Label::new(egui::RichText::new(line).monospace().size(11.0).color(egui::Color32::from_rgb(120, 125, 134))).truncate());
-                }
-            });
-        });
+        let step = if made < total {
+            fl!("startup-step-ui", done = made.to_string(), total = total.to_string())
+        } else if let Some(name) = &board_loading {
+            fl!("startup-step-board", name = name.as_str())
+        } else {
+            fl!("startup-step-first")
+        };
+        let width = 360.0f32.min(screen.width() - 40.0);
+        let bar = egui::Rect::from_center_size(screen.center(), egui::vec2(width, 6.0));
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("splash")));
+        painter.rect_filled(bar, 3.0, egui::Color32::from_rgb(38, 41, 46));
+        painter.rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(width * frac.min(1.0), bar.height())), 3.0, egui::Color32::from_rgb(232, 148, 90));
+        // 長い基板の名前は 1 行に収まるよう末尾を切る
+        let mut job = egui::text::LayoutJob::simple_singleline(step, egui::FontId::proportional(13.0), egui::Color32::from_rgb(164, 168, 176));
+        job.wrap = egui::text::TextWrapping::truncate_at_width(width);
+        let galley = ctx.fonts_mut(|f| f.layout_job(job));
+        painter.galley(egui::pos2(screen.center().x - galley.size().x / 2.0, bar.bottom() + 12.0), galley, egui::Color32::from_rgb(164, 168, 176));
     }
 
     /// メニューのプルダウンを閉じる（キーボードの入力はビューアに戻す）
@@ -3408,14 +3376,17 @@ impl App {
             (r.is_positive()).then(|| ((r.min.x * ppp).round() as i32, (r.min.y * ppp).round() as i32, (r.width() * ppp).round() as u32, (r.height() * ppp).round() as u32))
         };
         let mut rects = self.web_rects.map(px).to_vec();
-        // メニューのプルダウン：見出しの下に、中身の大きさで（ウィンドウからはみ出す分は切る）
+        // メニューのプルダウン：見出しの下に、どのサブメニューを開いても収まる大きさで（右にはみ出すなら左へずらす。
+        // 縦はページが入る高さに収め、入らない分は中でスクロールする）。見せるのは、今開いているところだけ
         let screen = self.egui_ctx.content_rect();
+        let menu_top = self.web_menu.as_ref().map(|m| self.web_rects[0].min.y + m.at.y);
         let menu_rect = self.web_menu.as_ref().and_then(|m| {
-            let size = m.size?;
-            let min = self.web_rects[0].min + m.at.to_vec2();
-            let r = egui::Rect::from_min_size(min, size).intersect(screen);
+            let (_, full) = m.size?;
+            let x = (self.web_rects[0].min.x + m.at.x).min(screen.right() - full.x).max(screen.left());
+            let r = egui::Rect::from_min_size(egui::pos2(x, menu_top?), full).intersect(screen);
             r.is_positive().then_some(r)
         });
+        let menu_clip = self.web_menu.as_ref().and_then(|m| m.size).map(|(shown, _)| ((shown.x * ppp).ceil() as u32, (shown.y * ppp).ceil() as u32));
         rects.push(menu_rect.and_then(px));
         // 説明の吹き出し：要素の下の中央に（下に入らなければ上に。左右はウィンドウの中に収める）
         let tip_rect = self.web_tip.as_ref().and_then(|t| {
@@ -3428,6 +3399,7 @@ impl App {
                 Pane::Editor => self.web_rects[4],
                 Pane::About => self.web_rects[5],
                 Pane::Video => self.web_rects[6],
+                Pane::Plugin => self.web_rects[7],
                 Pane::Menu => menu_rect?,
                 Pane::Tooltip => return None,
             };
@@ -3442,12 +3414,13 @@ impl App {
         });
         rects.push(tip_rect.and_then(px));
         let tip = self.web_tip.as_ref().map(|t| serde_json::json!({ "text": t.text }).to_string());
-        let menu = self.web_menu.as_ref().map(|m| self.menu_json(&m.id));
+        let menu = self.web_menu.as_ref().map(|m| self.menu_json(&m.id, (screen.bottom() - menu_top.unwrap_or(0.0) - 6.0).max(80.0)));
         if rects[5].is_some() && self.about_json.is_none() {
             self.about_json = Some(self.about_json());
         }
         let about = rects[5].is_some().then(|| self.about_json.clone().unwrap_or_default());
         let video = rects[6].is_some().then(|| self.video_json());
+        let plugin = rects[7].is_some().then(|| self.plugin_window.json());
         let editor = rects[4].is_some().then(|| {
             let info = self.part_info();
             let scope = self.scope_json();
@@ -3468,6 +3441,7 @@ impl App {
             serde_json::json!({ "text": text, "action": fl!("camera-fit"), "actionId": "fit" }).to_string()
         });
         let web = self.web.as_mut().unwrap();
+        web.clip(Pane::Menu, menu_clip);
         for (pane, r) in Pane::ALL.into_iter().zip(rects) {
             web.layout(pane, r);
         }
@@ -3490,6 +3464,9 @@ impl App {
         }
         if let Some(j) = video {
             web.send(Pane::Video, &j);
+        }
+        if let Some(j) = plugin {
+            web.send(Pane::Plugin, &j);
         }
         if let Some(j) = tip {
             web.send(Pane::Tooltip, &j);
@@ -3538,9 +3515,9 @@ impl App {
         let mut central = egui::Rect::NOTHING;
         let full = egui_ctx.run_ui(raw, |root| {
             if self.splash {
-                // 起動中：メニュー・パネルは出さず（WebView もまだ隠す）、進み具合とログだけ
+                // 起動中：メニュー・パネルは出さず（WebView もまだ隠す）、進み具合のバーと今の段階だけ
                 central = root.available_rect_before_wrap();
-                self.web_rects = [egui::Rect::NOTHING; 7];
+                self.web_rects = [egui::Rect::NOTHING; 8];
                 self.draw_splash(root.ctx());
                 return;
             }
@@ -3616,13 +3593,20 @@ impl App {
                 } else {
                     egui::Rect::NOTHING
                 };
+                // 「KiCad プラグイン」：ウィンドウの真ん中
+                self.web_rects[7] = if self.plugin_window.open {
+                    let size = egui::vec2(620.0f32.min(screen.width() - 40.0), 520.0f32.min(screen.height() - 40.0)).max(egui::vec2(200.0, 200.0));
+                    egui::Rect::from_center_size(screen.center(), size)
+                } else {
+                    egui::Rect::NOTHING
+                };
             } else {
                 let scope = &mut self.assign_scope;
                 let actions = self.editor.ui(root.ctx(), &self.library, info.as_ref(), &mut |ui| scope_radios(ui, scope));
                 self.editor_actions.extend(actions);
             }
-            self.plugin_window.ui(root.ctx());
             if self.web.is_none() {
+                self.plugin_window.ui(root.ctx());
                 self.about_egui(root.ctx());
             }
         });
@@ -4556,7 +4540,7 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
     let silk_job = SilkJob::new(prep.kicad_cli.clone(), &prep.board.file, &prep.board.project_name);
     let test = TestHooks { o: std::mem::take(&mut vo.test), ..Default::default() };
     let mut app = App {
-        base_title: if prep.board.file.as_os_str().is_empty() { "krbr".to_string() } else { format!("krbr - {}", prep.board.project_name) },
+        base_title: if prep.board.file.as_os_str().is_empty() { "KRB Renderer".to_string() } else { format!("KRB Renderer - {}", prep.board.project_name) },
         scene_as_configured: prep.configured.scene.clone(),
         vo,
         prep,
@@ -4566,13 +4550,12 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         web_started: None,
         web_failures: (0, None),
         splash,
-        splash_icon: None,
         recent_boards: Vec::new(),
         video: None,
         video_dialog: video_job::VideoDialog::default(),
         video_test_exit: false,
         proxy: None,
-        web_rects: [egui::Rect::NOTHING; 7],
+        web_rects: [egui::Rect::NOTHING; 8],
         about_open: false,
         about_json: None,
         editor_rect: None,

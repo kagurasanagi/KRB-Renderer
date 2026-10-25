@@ -66,6 +66,7 @@ kplug-installed = KiCad { $version } に登録した
 kplug-uninstalled = KiCad { $version } から解除した
 kplug-failed = 失敗した：{ $error }
 kplug-rescan = 探し直す
+kplug-close = 閉じる
 
 ## メニュー：ヘルプ
 menu-help = ヘルプ
@@ -600,13 +601,9 @@ about-env-trace = レイトレーシング
 about-env-webview = WebView2
 
 ## 起動中の画面・最近使った基板・ドラッグ＆ドロップ
-startup-starting = KRB Renderer を起動しています…
-startup-step-gpu = GPU の準備
 startup-step-ui = 画面の準備（{ $done } / { $total }）
 startup-step-board = 基板の読み込み：{ $name }
-startup-step-no-board = 基板なし（「ファイル → 開く」で開けます）
 startup-step-first = 最初の描画
-startup-log = ログ
 menu-recent = 最近使った基板
 menu-recent-empty = （まだありません）
 menu-recent-clear = 一覧を消す

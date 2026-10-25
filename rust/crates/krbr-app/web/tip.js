@@ -59,3 +59,19 @@
   document.addEventListener("wheel", hide, { passive: true, capture: true });
   window.addEventListener("blur", hide);
 })();
+
+// どのページにも入れる：色の欄を押したとき、下に開く色選びの窓（WebView の中に描かれ、外は切れる。高さは CSS の 250 px ほど）の
+// 入る場所が無ければ、先に欄を上へスクロールしておく（窓は click で開くので、その前に）
+document.addEventListener("click", (e) => {
+  const c = e.target;
+  if (!(c instanceof HTMLInputElement) || c.type !== "color") return;
+  const need = 262 - (window.innerHeight - c.getBoundingClientRect().bottom);
+  if (need <= 0) return;
+  for (let p = c.parentElement; p; p = p.parentElement) {
+    const y = getComputedStyle(p).overflowY;
+    if ((y === "auto" || y === "scroll") && p.scrollHeight > p.clientHeight) {
+      p.scrollTop += need;
+      return;
+    }
+  }
+}, true);

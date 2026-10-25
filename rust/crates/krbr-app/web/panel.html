@@ -55,7 +55,7 @@ document.addEventListener("focusout", () => setTimeout(flush, 0));
 function interacting() {
   const a = document.activeElement;
   if (busy > 0) return true;
-  return a && (a.tagName === "SELECT" || (a.tagName === "INPUT" && a.type === "number"));
+  return a && (a.tagName === "SELECT" || (a.tagName === "INPUT" && (a.type === "number" || a.type === "color")));
 }
 
 function flush() {
@@ -181,9 +181,38 @@ function buttons(it) {
 }
 
 function note(it) {
-  const e = el("div", "note-text " + (it.tone || "muted") + (it.strong ? " strong" : ""), it.text);
-  if (it.tip) e.title = it.tip;
+  const e = el("div", null);
+  setNote(e, it);
+  notes.set(it, e);
   return e;
+}
+
+function setNote(e, it) {
+  e.className = "note-text " + (it.tone || "muted") + (it.strong ? " strong" : "");
+  e.textContent = it.text;
+  e.title = it.tip || "";
+}
+
+// ---------------------------------------------------------------- 文字だけの書き換え
+// レンダリング中はノイズ除去の時間などの注記が何度も変わる。そのたびに全体を描き直すと、開いているカラーピッカーなどが
+// 閉じてしまい、重くもなるので、注記の文字のほかが同じなら、注記だけを書き換える
+let shown = null;
+let shownKey = null;
+// 描いた注記（項目 → 要素）
+let notes = new Map();
+const skeleton = (m) => JSON.stringify(m, (k, v) => (v && v.t === "note" ? { t: "note" } : v));
+function patchNotes(a, b) {
+  if (!a || typeof a !== "object") return;
+  if (a.t === "note") {
+    const e = notes.get(a);
+    if (e) {
+      setNote(e, b);
+      notes.delete(a);
+      notes.set(b, e);
+    }
+    return;
+  }
+  for (const k of Object.keys(a)) patchNotes(a[k], b[k]);
 }
 
 function kv(it) {
@@ -286,6 +315,9 @@ const KINDS = { slider, check, radio, select, buttons, note, kv, row, parts };
 const item = (it) => KINDS[it.t](it);
 
 function render(m) {
+  shown = m;
+  shownKey = skeleton(m);
+  notes = new Map();
   document.getElementById("title").textContent = m.title;
   document.getElementById("close").title = m.closeTip;
   document.getElementById("resize").title = m.resizeTip;
@@ -305,6 +337,12 @@ function render(m) {
 // Rust から呼ぶ
 window.krbr = {
   panel(m) {
+    if (shown && skeleton(m) === shownKey) {
+      pending = null;
+      patchNotes(shown, m);
+      shown = m;
+      return;
+    }
     pending = m;
     flush();
   },

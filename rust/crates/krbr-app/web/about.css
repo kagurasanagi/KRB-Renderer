@@ -331,3 +331,91 @@ body.video footer .spacer {
 .progress-box .progress {
   width: 100%;
 }
+
+/* ---------------------------------------------------------------- KiCad プラグイン */
+body.kplug {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  box-shadow: inset 0 0 0 1px var(--line-3);
+  border-radius: 10px;
+}
+
+body.kplug header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 40px;
+  padding: 0 10px 0 16px;
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+  flex: none;
+}
+
+body.kplug main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+}
+
+body.kplug .intro {
+  margin: 0 0 4px;
+  color: var(--text-2);
+  line-height: 1.6;
+}
+
+.kver {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.kver.old {
+  opacity: 0.6;
+}
+
+.khead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+}
+
+.khead .spacer {
+  flex: 1;
+}
+
+.kname {
+  font-weight: 600;
+  flex: none;
+}
+
+.kstate {
+  color: var(--text-2);
+  font-size: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.kstate.ok {
+  color: var(--ok);
+}
+
+body.kplug footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  flex: none;
+}
+
+body.kplug footer .spacer {
+  flex: 1;
+}
