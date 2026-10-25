@@ -7,7 +7,7 @@ use krbr_core::{to_hex, xxh64};
 use crate::board::*;
 use crate::curves::{arc_points, rounded_rect_points, ARC_TOL};
 use crate::sexpr::{self, Node};
-use crate::stroke_silk::needs_kicad_cli;
+use crate::stroke_text::needs_kicad_cli;
 
 fn xy(n: Option<&Node>) -> Vec2 {
     match n {
@@ -499,8 +499,8 @@ fn add_item(n: &Node, hash: u64, m: &ItemMark, b: &mut Board) {
         bb.add_box(&z.bbox());
     }
     for s in &b.stroke_texts[m.s..] {
-        if is_silk_layer(&s.layer) {
-            item.stroke_silk = true;
+        if is_plotted_text_layer(&s.layer) {
+            item.stroke_text = true;
             bb.add_box(&s.bbox);
         }
     }
@@ -702,7 +702,7 @@ mod tests {
         assert_eq!(b.items[0].key, "u1");
         assert!(b.items[0].holes);
         assert!(b.items[2].holes); // via
-        assert!(b.items[4].stroke_silk);
+        assert!(b.items[4].stroke_text);
         let d = diff_boards(&b, &b);
         assert_eq!((d.added, d.removed, d.changed), (0, 0, 0));
         assert!(!d.full && d.dirty.is_empty());

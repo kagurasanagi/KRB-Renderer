@@ -34,7 +34,7 @@ mod web_about;
 mod web_menu;
 mod web_panel;
 use crate::i18n;
-use crate::kicad_cli::SilkJob;
+use crate::kicad_cli::StrokeTextJob;
 use crate::kicad_plugin::{self, PluginWindow};
 use crate::material_cmd::{clear_material, set_material, MaterialSetOptions};
 use crate::selection::{unproject, Outline, Selected};
@@ -330,8 +330,8 @@ struct ReloadDone {
     result: Result<(Option<Board>, Scene, ReloadStats), String>,
     /// 保存したファイルの更新時刻（保存から画面の更新までの時間を測る）
     saved_at: Option<SystemTime>,
-    /// kicad-cli で書き出し直したシルクを反映した
-    silk: bool,
+    /// kicad-cli で書き出し直した線フォントの文字を反映した
+    text: bool,
     /// 材質の設定を読み直した
     materials: bool,
 }
@@ -1024,9 +1024,9 @@ struct App {
     /// 前回シーンを組み立てたときの、裏で分割し終えた 3D モデルの数（増えたら組み直す）
     models_seen: usize,
     /// 線フォントの文字の書き出し（kicad-cli、裏のスレッド）
-    silk_job: SilkJob,
-    /// 新しいシルクを受け取った（凹凸タイルを全部作り直す）
-    silk_dirty: bool,
+    text_job: StrokeTextJob,
+    /// 新しい線フォントの文字を受け取った（凹凸タイルを全部作り直す）
+    text_dirty: bool,
     /// クリックで選んだ部品と、その輪郭線
     selected: Option<Selected>,
     outline: Option<Outline>,
@@ -1908,13 +1908,13 @@ impl App {
         // 保存を待たずに読み直す要求（テスト）も、保存と同じに扱う
         let saved = self.watcher.as_mut().is_some_and(|w| w.poll()) | std::mem::take(&mut self.st.req.reload);
         let models_done = src.library.completed();
-        let silk = self.silk_dirty;
+        let text = self.text_dirty;
         let materials = self.materials_dirty_files;
-        if !saved && !silk && !materials && models_done == self.models_seen {
+        if !saved && !text && !materials && models_done == self.models_seen {
             return;
         }
         self.models_seen = models_done;
-        self.silk_dirty = false;
+        self.text_dirty = false;
         self.materials_dirty_files = false;
         let mut source = self.prep.source.take().unwrap();
         let old = self.prep.board.clone();
@@ -1923,14 +1923,14 @@ impl App {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             krbr_core::platform::lower_thread_priority(); // 読み直しは低優先度（ウィンドウのスレッドは通常のまま）
-            if silk {
+            if text {
                 source.tiles.invalidate_all(); // シルクが変わったので、どのタイルも作り直す
             }
             if materials {
                 source.materials = load_material_setup(&old.file); // 材質の割り当て（<名前>.krbr / model_map.toml）を書き換えた
             }
             let result = if saved { source.reload(&old, &options).map(|(b, s, st)| (Some(b), s, st)) } else { Ok((None, source.build(&old, &options, true), ReloadStats::default())) };
-            let _ = tx.send(ReloadDone { source, saved, result, saved_at, silk, materials });
+            let _ = tx.send(ReloadDone { source, saved, result, saved_at, text, materials });
         });
         self.reload_job = Some(rx);
     }
@@ -2404,9 +2404,9 @@ impl App {
 
     /// 書き出しが終わっていれば、新しいシルクを設定に入れる（次の組み立てでタイルを全部作り直す）
     fn poll_silk(&mut self) {
-        if let Some(silk) = self.silk_job.poll() {
-            self.prep.cfg.scene.layer_art.extra_silk = silk.side;
-            self.silk_dirty = true;
+        if let Some(plot) = self.text_job.poll() {
+            self.prep.cfg.scene.layer_art.stroke_text = plot.side;
+            self.text_dirty = true;
         }
     }
 
@@ -2440,8 +2440,8 @@ impl App {
                 if let Some(b) = board {
                     self.prep.board = b;
                 }
-                if stats.diff.stroke_silk_changed {
-                    self.silk_job.request(); // 書き出し中なら、終わった後にもう一度
+                if stats.diff.stroke_text_changed {
+                    self.text_job.request(); // 書き出し中なら、終わった後にもう一度
                 }
                 // 読み直しの間に変えたレジストの色も反映する
                 update_mask_material(&mut scene, &self.prep.board, &self.prep.cfg.scene);
@@ -2476,7 +2476,7 @@ impl App {
                     info!("reload: {} changed, {} added, {} removed{}, {} tile(s) rebuilt; parse {:.0} ms, build {:.0} ms, GPU {:.0} ms{}", df.changed, df.added, df.removed, if df.full { " (full)" } else { "" }, stats.tiles_rebuilt, stats.parse_ms, stats.build_ms, gpu_ms, meshing);
                 } else if d.materials {
                     info!("material assignment updated; scene rebuilt");
-                } else if d.silk {
+                } else if d.text {
                     self.last_update = fl!("silk-applied");
                     info!("stroke-font silkscreen updated; scene rebuilt");
                 } else {
@@ -2827,7 +2827,7 @@ impl App {
         if self.reload_job.is_some() {
             notes.push((fl!("status-reloading"), true));
         }
-        if self.silk_job.busy() {
+        if self.text_job.busy() {
             notes.push((fl!("status-silk"), true));
         }
         if self.prep.scene.pending_models > 0 {
@@ -3244,7 +3244,7 @@ impl App {
     /// 描画ロック中に、解除したら反映するもの（保存された基板・変えた設定）があるか
     fn lock_pending(&self) -> bool {
         let c = &self.st.changed;
-        c.frame || c.materials || c.mask || c.integrator || c.visibility || self.st.req.reload || self.silk_dirty || self.materials_dirty_files || !self.editor_actions.is_empty() || self.env_job.is_some() || self.board_dialog.is_some() || self.st.req.open_path.is_some() || self.reload_job.is_some()
+        c.frame || c.materials || c.mask || c.integrator || c.visibility || self.st.req.reload || self.text_dirty || self.materials_dirty_files || !self.editor_actions.is_empty() || self.env_job.is_some() || self.board_dialog.is_some() || self.st.req.open_path.is_some() || self.reload_job.is_some()
     }
 
     /// 描画ロック中に基板が保存された：読み直しは解除してから（そのときに読み直すよう覚えておく）
@@ -4466,7 +4466,7 @@ impl App {
             el.exit();
             return;
         }
-        let idle = self.gpu.as_ref().map(|g| g.in_flight.is_none() && (g.prog.samples() >= self.st.max_spp || (self.st.paused && g.prog.samples() > 0))).unwrap_or(false) && !self.st.changed.frame && self.env_job.is_none() && self.reload_job.is_none() && !self.silk_job.busy() && !self.silk_dirty && !self.test.active() && !self.editor.busy()
+        let idle = self.gpu.as_ref().map(|g| g.in_flight.is_none() && (g.prog.samples() >= self.st.max_spp || (self.st.paused && g.prog.samples() > 0))).unwrap_or(false) && !self.st.changed.frame && self.env_job.is_none() && self.reload_job.is_none() && !self.text_job.busy() && !self.text_dirty && !self.test.active() && !self.editor.busy()
             && self.web.as_ref().is_none_or(|w| w.moved().elapsed() > Duration::from_millis(300));
         if idle {
             // 収束したら GPU を休ませ、入力と保存を待つ
@@ -4537,7 +4537,7 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
     }
     let models_seen = prep.source.as_ref().map(|s| s.library.completed()).unwrap_or(0);
     let library = prep.source.as_ref().map(|s| s.materials.library.clone()).unwrap_or_else(MaterialLibrary::builtin);
-    let silk_job = SilkJob::new(prep.kicad_cli.clone(), &prep.board.file, &prep.board.project_name);
+    let text_job = StrokeTextJob::new(prep.kicad_cli.clone(), &prep.board.file, &prep.board.project_name);
     let test = TestHooks { o: std::mem::take(&mut vo.test), ..Default::default() };
     let mut app = App {
         base_title: if prep.board.file.as_os_str().is_empty() { "KRB Renderer".to_string() } else { format!("KRB Renderer - {}", prep.board.project_name) },
@@ -4578,8 +4578,8 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         reload_job: None,
         saved_reloads: 0,
         models_seen,
-        silk_job,
-        silk_dirty: false,
+        text_job,
+        text_dirty: false,
         selected: None,
         outline: None,
         materials_dirty_files: false,

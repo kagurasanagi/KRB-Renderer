@@ -1,6 +1,6 @@
-//! KiCad の線フォントの文字（シルク）を kicad-cli で SVG に書き出して取り込む（C++ 版 app/kicad_cli）。
-//! kicad-cli に渡すのは、シルク層に線フォントの文字だけを残した基板のコピー（krbr_kicad::stroke_silk_only_board）。
-//! TrueType の文字・線・図形は krbr が自分で描くので、そちらには影響しない
+//! KiCad の線フォントの文字（銅箔・ソルダーマスク・シルク）を kicad-cli で SVG に書き出して取り込む（C++ 版 app/kicad_cli）。
+//! kicad-cli に渡すのは、それらの層に線フォントの文字と文字の枠だけを残した基板のコピー（krbr_kicad::stroke_text_only_board）。
+//! TrueType の文字・線・図形・パッドは krbr が自分で描くので、そちらには影響しない
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -11,51 +11,51 @@ use std::time::{Duration, Instant};
 use krbr_core::{debug, warn};
 use krbr_geom::shapes::unite;
 use krbr_geom::svg_reader::read_kicad_svg;
-use krbr_geom::{FillRule, Paths};
-use krbr_kicad::{stroke_silk_only_board, Board};
+use krbr_geom::{FillRule, SidePaths};
+use krbr_kicad::{stroke_text_only_board, Board, PLOT_LAYERS};
 
 /// kicad-cli 1 回の上限（固まったときに止める）
 const TIMEOUT: Duration = Duration::from_secs(120);
 
-/// 表・裏のシルク（基板座標の多角形）
+/// 表・裏の線フォントの文字（基板座標の多角形。銅箔・マスクの開口・シルク）
 #[derive(Debug, Clone, Default)]
-pub struct SilkPlot {
-    pub side: [Option<Arc<Paths>>; 2],
+pub struct StrokeTextPlot {
+    pub side: [Option<Arc<SidePaths>>; 2],
     pub from_cache: bool,
 }
 
-/// 線フォントの文字（シルク）の書き出しに使う kicad-cli と、そのキャッシュ
+/// 線フォントの文字の書き出しに使う kicad-cli と、そのキャッシュ
 #[derive(Debug, Clone)]
-pub struct KicadCliSilk {
+pub struct KicadCliText {
     pub cli: PathBuf,
     pub cache_dir: PathBuf,
     pub use_cache: bool,
 }
 
-impl KicadCliSilk {
-    pub fn plot(&self, board: &Board) -> SilkPlot {
+impl KicadCliText {
+    pub fn plot(&self, board: &Board) -> StrokeTextPlot {
         self.plot_file(&board.file, &board.project_name)
     }
 
     /// 基板のファイルとプロジェクトの名前から（裏のスレッドへ Board 全体を渡さずに済む）
-    pub fn plot_file(&self, board_file: &Path, project_name: &str) -> SilkPlot {
-        plot_stroke_silk(&self.cli, board_file, project_name, &self.cache_dir, self.use_cache)
+    pub fn plot_file(&self, board_file: &Path, project_name: &str) -> StrokeTextPlot {
+        plot_stroke_text(&self.cli, board_file, project_name, &self.cache_dir, self.use_cache)
     }
 }
 
 /// 線フォントの文字の書き出しを裏のスレッドで行う（ビューアと watch で共有）。
 /// 書き出し中にまた頼まれたら、終わった後にもう一度書き出す（途中の版の文字を最後の結果にしない）
-pub struct SilkJob {
+pub struct StrokeTextJob {
     /// kicad-cli を使わないなら None（request は何もしない）
-    kicad: Option<KicadCliSilk>,
+    kicad: Option<KicadCliText>,
     board_file: PathBuf,
     project_name: String,
-    running: Option<mpsc::Receiver<SilkPlot>>,
+    running: Option<mpsc::Receiver<StrokeTextPlot>>,
     rerun: bool,
 }
 
-impl SilkJob {
-    pub fn new(kicad: Option<KicadCliSilk>, board_file: &Path, project_name: &str) -> Self {
+impl StrokeTextJob {
+    pub fn new(kicad: Option<KicadCliText>, board_file: &Path, project_name: &str) -> Self {
         Self { kicad, board_file: board_file.to_path_buf(), project_name: project_name.to_string(), running: None, rerun: false }
     }
 
@@ -82,13 +82,13 @@ impl SilkJob {
     }
 
     /// 書き出しが終わっていれば、その結果（頼まれていた次の書き出しは、ここで始める）
-    pub fn poll(&mut self) -> Option<SilkPlot> {
+    pub fn poll(&mut self) -> Option<StrokeTextPlot> {
         let rx = self.running.as_ref()?;
         let r = match rx.try_recv() {
             Ok(plot) => Some(plot),
             Err(mpsc::TryRecvError::Empty) => return None,
             Err(mpsc::TryRecvError::Disconnected) => {
-                warn!("kicad-cli silk: the export thread stopped");
+                warn!("kicad-cli text: the export thread stopped");
                 None
             }
         };
@@ -166,13 +166,13 @@ fn work_dir() -> PathBuf {
     std::env::temp_dir().join(format!("krbr_kicad_{}_{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)))
 }
 
-/// 基板の線フォントの文字（シルク）を kicad-cli で書き出して多角形にする。結果は cache_dir/silk にキャッシュする
-pub fn plot_stroke_silk(cli: &Path, board_file: &Path, project_name: &str, cache_dir: &Path, use_cache: bool) -> SilkPlot {
-    let mut out = SilkPlot::default();
+/// 基板の線フォントの文字（銅箔・マスク・シルク）を kicad-cli で書き出して多角形にする。結果は cache_dir/silk にキャッシュする
+pub fn plot_stroke_text(cli: &Path, board_file: &Path, project_name: &str, cache_dir: &Path, use_cache: bool) -> StrokeTextPlot {
+    let mut out = StrokeTextPlot::default();
     let board_text = match std::fs::read_to_string(board_file) {
         Ok(t) => t,
         Err(e) => {
-            warn!("kicad-cli silk: {}: {e}", board_file.display());
+            warn!("kicad-cli text: {}: {e}", board_file.display());
             return out;
         }
     };
@@ -181,33 +181,32 @@ pub fn plot_stroke_silk(cli: &Path, board_file: &Path, project_name: &str, cache
     let pro_text = std::fs::read_to_string(&pro).ok();
     let cdir = cache_dir.join("silk");
 
-    // キャッシュのキー：渡す基板のコピー（シルクの線フォントの文字だけを残したもの）、プロジェクト（文字の変数）、kicad-cli の場所。
-    // 中身が C++ 版（シルク層全体）と違うので、名前を変えて C++ 版のキャッシュとは分ける。
+    // キャッシュのキー：渡す基板のコピー（線フォントの文字だけを残したもの）、プロジェクト（文字の変数）、kicad-cli の場所。
     // コピーを作るには基板全体を解析し直す（大きな基板で 0.5 秒前後）ので、元の基板の中身から引ける索引（<元のキー>.key）も残し、
     // 基板が前と同じなら解析を省く
     let tail = format!("{}{}", pro_text.as_deref().unwrap_or(""), cli.to_string_lossy());
-    let raw_key = krbr_core::to_hex(krbr_core::xxh64(format!("krbr-stroke-silk-raw-v1\n{board_text}{tail}").as_bytes()));
+    let raw_key = krbr_core::to_hex(krbr_core::xxh64(format!("krbr-stroke-text-raw-v2\n{board_text}{tail}").as_bytes()));
     let index = cdir.join(format!("{raw_key}.key"));
     let mut filtered: Option<String> = None;
     let key = match std::fs::read_to_string(&index).ok().filter(|k| use_cache && k.len() == 16) {
         Some(k) => k,
         None => {
-            let f = match stroke_silk_only_board(&board_text) {
+            let f = match stroke_text_only_board(&board_text) {
                 Ok(t) => t,
                 Err(e) => {
-                    warn!("kicad-cli silk: {}: {e}", board_file.display());
+                    warn!("kicad-cli text: {}: {e}", board_file.display());
                     return out;
                 }
             };
-            let k = krbr_core::to_hex(krbr_core::xxh64(format!("krbr-stroke-silk-v1\n{f}{tail}").as_bytes()));
+            let k = krbr_core::to_hex(krbr_core::xxh64(format!("krbr-stroke-text-v2\n{f}{tail}").as_bytes()));
             filtered = Some(f);
             k
         }
     };
-    let cached = [cdir.join(format!("{key}-stroke-F.svg")), cdir.join(format!("{key}-stroke-B.svg"))];
-    let mut svg: [Option<String>; 2] = [None, None];
+    let cached: Vec<PathBuf> = PLOT_LAYERS.iter().map(|(_, shown)| cdir.join(format!("{key}-{shown}.svg"))).collect();
+    let mut svg: Vec<Option<String>> = vec![None; PLOT_LAYERS.len()];
     if use_cache && cached.iter().all(|c| c.is_file()) {
-        svg = [std::fs::read_to_string(&cached[0]).ok(), std::fs::read_to_string(&cached[1]).ok()];
+        svg = cached.iter().map(|c| std::fs::read_to_string(c).ok()).collect();
         out.from_cache = svg.iter().all(Option::is_some);
     }
     if out.from_cache && filtered.is_some() {
@@ -215,56 +214,169 @@ pub fn plot_stroke_silk(cli: &Path, board_file: &Path, project_name: &str, cache
         let _ = std::fs::write(&index, &key);
     }
     if !out.from_cache {
-        let filtered = match filtered.map(Ok).unwrap_or_else(|| stroke_silk_only_board(&board_text)) {
+        let filtered = match filtered.map(Ok).unwrap_or_else(|| stroke_text_only_board(&board_text)) {
             Ok(t) => t,
             Err(e) => {
-                warn!("kicad-cli silk: {}: {e}", board_file.display());
+                warn!("kicad-cli text: {}: {e}", board_file.display());
                 return out;
             }
         };
-        let work = work_dir();
-        if let Err(e) = std::fs::create_dir_all(&work) {
-            warn!("kicad-cli silk: {}: {e}", work.display());
-            return out;
-        }
-        // kicad-cli は基板の横に .kicad_prl を書くので、コピーに対して実行する
-        let pcb_copy = work.join(board_file.file_name().unwrap_or_default());
-        let ok = std::fs::write(&pcb_copy, &filtered).is_ok();
-        if let Some(t) = &pro_text {
-            let _ = std::fs::write(work.join(pro.file_name().unwrap_or_default()), t);
-        }
-        let log = work.join("kicad-cli.log");
-        for (s, layer) in ["F.SilkS", "B.SilkS"].iter().enumerate().filter(|_| ok) {
-            let svg_path = work.join(format!("{}_silk.svg", if s == 0 { "F" } else { "B" }));
-            let args = ["pcb", "export", "svg", "--layers", layer, "--mode-single", "--exclude-drawing-sheet", "--page-size-mode", "0", "-o", &svg_path.to_string_lossy(), &pcb_copy.to_string_lossy()];
-            let args: Vec<&str> = args.iter().map(|a| a.as_ref()).collect();
-            match run_hidden(cli, &args, &work, &log) {
-                Ok(0) => {}
-                Ok(rc) => {
-                    let msg = std::fs::read_to_string(&log).unwrap_or_default();
-                    warn!("kicad-cli failed for {} (exit {}): {}", layer, rc, msg.trim());
-                    continue;
-                }
-                Err(e) => {
-                    warn!("kicad-cli failed for {}: {}", layer, e);
-                    continue;
-                }
+        svg = export_layers(cli, board_file, &pro, pro_text.as_deref(), &filtered);
+        if use_cache && svg.iter().all(Option::is_some) {
+            let _ = std::fs::create_dir_all(&cdir);
+            for (path, text) in cached.iter().zip(&svg) {
+                let _ = std::fs::write(path, text.as_deref().unwrap_or(""));
             }
-            svg[s] = std::fs::read_to_string(&svg_path).ok();
-            if let (Some(text), true) = (&svg[s], use_cache) {
-                let _ = std::fs::create_dir_all(&cdir);
-                let _ = std::fs::write(&cached[s], text);
-                let _ = std::fs::write(&index, &key);
-            }
+            let _ = std::fs::write(&index, &key);
         }
-        let _ = std::fs::remove_dir_all(&work);
     }
-    for (s, text) in svg.iter().enumerate() {
+    let mut sides = [SidePaths::default(), SidePaths::default()];
+    let mut got = [false; 2];
+    for ((layer, _), text) in PLOT_LAYERS.iter().zip(&svg) {
         let Some(text) = text else { continue };
+        let s = usize::from(layer.starts_with("B."));
         let r = read_kicad_svg(text);
         let paths = unite(&r.paths, FillRule::NonZero);
-        debug!("kicad-cli silk {}: {} elements -> {} paths", if s == 0 { "front" } else { "back" }, r.elements, paths.len());
-        out.side[s] = Some(Arc::new(paths));
+        debug!("kicad-cli text {layer}: {} elements -> {} paths", r.elements, paths.len());
+        let to = if layer.ends_with(".Cu") {
+            &mut sides[s].copper
+        } else if layer.ends_with(".Mask") {
+            &mut sides[s].mask_open
+        } else {
+            &mut sides[s].silk
+        };
+        *to = paths;
+        got[s] = true;
+    }
+    for (s, sp) in sides.into_iter().enumerate() {
+        if got[s] {
+            out.side[s] = Some(Arc::new(sp));
+        }
     }
     out
+}
+
+/// 線フォントの文字だけを残した基板のコピー（filtered）を、PLOT_LAYERS の層ごとに SVG に書き出す（並びは PLOT_LAYERS と同じ。
+/// 書き出せなかった層は None）。1 回の --mode-multi でまとめて書き出し（kicad-cli の起動と基板の読み込みが時間の大半なので）、
+/// それで出なかった層（--mode-multi の無い古い kicad-cli など）は層ごとに --mode-single で書き出す
+fn export_layers(cli: &Path, board_file: &Path, pro: &Path, pro_text: Option<&str>, filtered: &str) -> Vec<Option<String>> {
+    let mut svg: Vec<Option<String>> = vec![None; PLOT_LAYERS.len()];
+    let work = work_dir();
+    if let Err(e) = std::fs::create_dir_all(&work) {
+        warn!("kicad-cli text: {}: {e}", work.display());
+        return svg;
+    }
+    // kicad-cli は基板の横に .kicad_prl を書くので、コピーに対して実行する
+    let pcb_copy = work.join(board_file.file_name().unwrap_or_default());
+    if let Err(e) = std::fs::write(&pcb_copy, filtered) {
+        warn!("kicad-cli text: {}: {e}", pcb_copy.display());
+        let _ = std::fs::remove_dir_all(&work);
+        return svg;
+    }
+    if let Some(t) = pro_text {
+        let _ = std::fs::write(work.join(pro.file_name().unwrap_or_default()), t);
+    }
+    let log = work.join("kicad-cli.log");
+    let pcb = pcb_copy.to_string_lossy().to_string();
+    let run = |args: &[&str], what: &str| -> bool {
+        match run_hidden(cli, args, &work, &log) {
+            Ok(0) => true,
+            Ok(rc) => {
+                let msg = std::fs::read_to_string(&log).unwrap_or_default();
+                warn!("kicad-cli failed for {what} (exit {rc}): {}", msg.trim());
+                false
+            }
+            Err(e) => {
+                warn!("kicad-cli failed for {what}: {e}");
+                false
+            }
+        }
+    };
+    // --mode-multi は「<基板名>-<層の表示名>.svg」に書く。コピーでは表示名を PLOT_LAYERS の名前にしてある
+    let multi = work.join("svg");
+    let multi_s = multi.to_string_lossy().to_string();
+    let layers = PLOT_LAYERS.map(|(l, _)| l).join(",");
+    if run(&["pcb", "export", "svg", "--layers", &layers, "--mode-multi", "--exclude-drawing-sheet", "--page-size-mode", "0", "-o", &multi_s, &pcb], "all layers") {
+        let files: Vec<PathBuf> = std::fs::read_dir(&multi).map(|rd| rd.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+        for (i, (_, shown)) in PLOT_LAYERS.iter().enumerate() {
+            let suffix = format!("-{shown}.svg");
+            svg[i] = files.iter().find(|f| f.file_name().is_some_and(|n| n.to_string_lossy().ends_with(&suffix))).and_then(|f| std::fs::read_to_string(f).ok());
+        }
+    }
+    for (i, (layer, _)) in PLOT_LAYERS.iter().enumerate() {
+        if svg[i].is_some() {
+            continue;
+        }
+        let path = work.join(format!("{}.svg", layer.replace('.', "_")));
+        let path_s = path.to_string_lossy().to_string();
+        if run(&["pcb", "export", "svg", "--layers", layer, "--mode-single", "--exclude-drawing-sheet", "--page-size-mode", "0", "-o", &path_s, &pcb], layer) {
+            svg[i] = std::fs::read_to_string(&path).ok();
+        }
+    }
+    let _ = std::fs::remove_dir_all(&work);
+    svg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use krbr_geom::shapes::{path_points, signed_area};
+    use krbr_kicad::{Box2, Vec2};
+
+    /// 銅箔（表・裏）・表のマスク・裏のシルクに線フォントの文字を 1 つずつ置いた基板
+    const BOARD: &str = r#"(kicad_pcb (version 20260206) (generator "pcbnew") (generator_version "10.0")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (1 "F.Mask" user) (3 "B.Mask" user) (5 "F.SilkS" user "F.Silkscreen") (7 "B.SilkS" user "B.Silkscreen") (25 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (gr_text "CU" (at 20 20) (layer "F.Cu") (uuid "00000000-0000-0000-0000-000000000001") (effects (font (size 2 2) (thickness 0.3))))
+  (gr_text "BCU" (at 60 20) (layer "B.Cu") (uuid "00000000-0000-0000-0000-000000000002") (effects (font (size 2 2) (thickness 0.3)) (justify mirror)))
+  (gr_text "MASK" (at 20 50) (layer "F.Mask") (uuid "00000000-0000-0000-0000-000000000003") (effects (font (size 2 2) (thickness 0.3))))
+  (gr_text "SILK" (at 60 50) (layer "B.SilkS") (uuid "00000000-0000-0000-0000-000000000004") (effects (font (size 2 2) (thickness 0.3)) (justify mirror)))
+)
+"#;
+
+    /// 面積と範囲（基板座標）
+    fn extent(p: &krbr_geom::Paths) -> (f64, Box2) {
+        let mut b = Box2::default();
+        for q in p.iter() {
+            for v in path_points(q) {
+                b.add(v);
+            }
+        }
+        (p.iter().map(signed_area).sum::<f64>().abs(), b)
+    }
+
+    /// 文字の層ごとに、置いた位置（基準点の周り 6 mm）に面積のある多角形ができる。文字の無い層は空
+    #[test]
+    #[ignore = "needs kicad-cli (KiCad 9 or later)"]
+    fn plots_stroke_texts_on_copper_mask_and_silk() {
+        let cli = find_kicad_cli("").expect("kicad-cli not found");
+        let dir = std::env::temp_dir().join(format!("krbr_rust_stroke_text_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("small.kicad_pcb");
+        std::fs::write(&file, BOARD).unwrap();
+        let t0 = Instant::now();
+        let plot = plot_stroke_text(&cli, &file, "small", &dir.join("cache"), true);
+        println!("kicad-cli: {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0);
+        let again = plot_stroke_text(&cli, &file, "small", &dir.join("cache"), true);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!plot.from_cache && again.from_cache);
+
+        let [Some(front), Some(back)] = &plot.side else { panic!("missing side") };
+        let at = |p: &krbr_geom::Paths, x: f64, y: f64, what: &str| {
+            let (area, b) = extent(p);
+            assert!(area > 0.5, "{what}: area {area}");
+            assert!(b.lo.x > x - 6.0 && b.hi.x < x + 6.0 && b.lo.y > y - 6.0 && b.hi.y < y + 6.0, "{what}: {b:?}");
+            assert!(b.intersects(&Box2 { lo: Vec2::new(x - 0.5, y - 0.5), hi: Vec2::new(x + 0.5, y + 0.5) }), "{what}: {b:?}");
+        };
+        at(&front.copper, 20.0, 20.0, "F.Cu");
+        at(&back.copper, 60.0, 20.0, "B.Cu");
+        at(&front.mask_open, 20.0, 50.0, "F.Mask");
+        at(&back.silk, 60.0, 50.0, "B.SilkS");
+        assert!(front.silk.is_empty() && back.mask_open.is_empty());
+        // キャッシュから読んでも同じ
+        let [Some(f2), Some(_)] = &again.side else { panic!("missing side") };
+        assert_eq!(extent(&f2.copper).0, extent(&front.copper).0);
+    }
 }

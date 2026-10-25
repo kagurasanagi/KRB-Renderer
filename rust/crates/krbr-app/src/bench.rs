@@ -263,7 +263,7 @@ mod tests {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../bench");
         let board = krbr_kicad::load_board(&dir.join(BUNDLED_BOARD)).expect("bench board");
         assert!(board.footprints.len() > 100 && board.vias.len() > 100);
-        assert_eq!(board.stroke_silk_count(), 0);
+        assert_eq!(board.stroke_text_count(), 0);
         assert_eq!(board.unfilled_zones, 0);
         let resolver = krbr_kicad::ModelResolver::new(&board.project_dir, &Default::default(), &[]);
         let models_dir = std::fs::canonicalize(dir.join("3dmodels")).unwrap();

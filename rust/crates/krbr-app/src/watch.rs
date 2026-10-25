@@ -10,7 +10,7 @@ use krbr_render::vk::memory_barrier;
 use krbr_render::{image_io, Context, DenoiseQuality, Denoiser, FrameParams, GpuScene};
 use krbr_scene::IntegratorKind;
 
-use crate::kicad_cli::SilkJob;
+use crate::kicad_cli::StrokeTextJob;
 use crate::prepare::{frame_params, initial_camera, prepare_scene_and_context, progressive_or_pt, ReloadStats, RenderOptions};
 
 #[derive(Debug, Clone, Default)]
@@ -26,8 +26,8 @@ pub struct WatchOptions {
 pub struct WatchUpdate {
     /// 保存による更新か（false：裏で分割していた 3D モデルが揃った、または線フォントの文字を書き出し直した）
     pub saved: bool,
-    /// kicad-cli で書き出し直した線フォントの文字（シルク）を反映した
-    pub silk: bool,
+    /// kicad-cli で書き出し直した線フォントの文字を反映した
+    pub stroke_text: bool,
     /// ファイルの更新時刻から、画像を書き終えるまで
     pub since_save_ms: f64,
     pub reload_ms: f64,
@@ -83,17 +83,17 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
     let mut models_seen = prep.source.as_ref().map(|s| s.library.completed()).unwrap_or(0);
     let mut idle_since = Instant::now();
     // 線フォントの文字の書き出し（kicad-cli、裏のスレッド）
-    let mut silk_job = SilkJob::new(prep.kicad_cli.clone(), &prep.board.file, &prep.board.project_name);
+    let mut text_job = StrokeTextJob::new(prep.kicad_cli.clone(), &prep.board.file, &prep.board.project_name);
     loop {
-        let mut silk = false;
-        if let Some(plot) = silk_job.poll() {
-            prep.cfg.scene.layer_art.extra_silk = plot.side;
-            silk = true;
+        let mut stroke_text = false;
+        if let Some(plot) = text_job.poll() {
+            prep.cfg.scene.layer_art.stroke_text = plot.side;
+            stroke_text = true;
         }
         let source = prep.source.as_mut().unwrap();
         let saved = watcher.poll();
         let models_done = source.library.completed() != models_seen;
-        if !saved && !models_done && !silk {
+        if !saved && !models_done && !stroke_text {
             if idle_since.elapsed() >= poll {
                 if !on_event(WatchEvent::Idle) {
                     return Ok(());
@@ -103,17 +103,17 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
             std::thread::sleep(Duration::from_millis(20));
             continue;
         }
-        let mut u = WatchUpdate { saved, silk, ..Default::default() };
+        let mut u = WatchUpdate { saved, stroke_text, ..Default::default() };
         let t0 = Instant::now();
-        if silk {
+        if stroke_text {
             source.tiles.invalidate_all(); // シルクが変わったので、どのタイルも作り直す
         }
         let scene = if saved {
             match source.reload(&prep.board, &prep.cfg.scene) {
                 Ok((board, scene, stats)) => {
                     prep.board = board;
-                    if stats.diff.stroke_silk_changed {
-                        silk_job.request(); // 書き出しの間にまた変わったら、終わった後にもう一度書き出す
+                    if stats.diff.stroke_text_changed {
+                        text_job.request(); // 書き出しの間にまた変わったら、終わった後にもう一度書き出す
                     }
                     u.stats = stats;
                     scene
@@ -145,8 +145,8 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
                 "watch: updated {:.0} ms after save (reload {:.0} [parse {:.0}, {} tiles], gpu {:.0}, render {:.0} [denoise {:.0}], write {:.0}); {} added, {} changed, {} removed{}",
                 u.since_save_ms, u.reload_ms, s.parse_ms, s.tiles_rebuilt, u.gpu_ms, u.render_ms, u.denoise_ms, u.write_ms, s.diff.added, s.diff.changed, s.diff.removed, meshing
             );
-        } else if silk {
-            info!("watch: updated (background silkscreen plot finished)");
+        } else if stroke_text {
+            info!("watch: updated (background stroke-font text plot finished)");
         } else {
             info!("watch: updated (background model meshing finished, {} pending)", u.pending_models);
         }

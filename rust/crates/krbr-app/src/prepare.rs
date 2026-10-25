@@ -15,7 +15,7 @@ use krbr_scene::scene::{build_scene, load_material_setup, MaterialSetup, SceneCo
 use krbr_scene::{frame_camera, orbit_camera, Camera, CameraParams, IntegratorKind, LensModel, MaterialResolver, Scene, SceneOptions};
 
 use crate::kicad_cli::find_kicad_cli;
-pub use crate::kicad_cli::KicadCliSilk;
+pub use crate::kicad_cli::KicadCliText;
 use crate::remember;
 
 /// 環境マップの重点サンプリングの分布の幅（画素）。これより大きい環境マップは縮小して分布を作る（放射輝度は元の解像度のまま）。
@@ -91,32 +91,32 @@ pub struct PreparedScene {
     /// この基板で覚えていたパネルの設定（設定ファイルが変わった項目を除く。ビューアだけの項目も入っている）
     pub remembered_view: remember::ViewValues,
     /// 線フォントの文字の書き出しに使う kicad-cli（無効・見つからなければ None）
-    pub kicad_cli: Option<KicadCliSilk>,
+    pub kicad_cli: Option<KicadCliText>,
     /// シーンを組み立て直すための状態。裏のスレッドで読み直している間は None（スレッドが持っている）
     pub source: Option<SceneSource>,
 }
 
-/// kicad-cli を探し、線フォントの文字・文字の枠があれば書き出して cfg.scene.layer_art.extra_silk に入れる
-fn setup_stroke_silk(board: &Board, cfg: &mut ProjectConfig, o: &RenderOptions, cache_dir: &Path) -> Option<KicadCliSilk> {
-    let n = board.stroke_silk_count();
+/// kicad-cli を探し、線フォントの文字・文字の枠（銅箔・マスク・シルク）があれば書き出して cfg.scene.layer_art.stroke_text に入れる
+fn setup_stroke_text(board: &Board, cfg: &mut ProjectConfig, o: &RenderOptions, cache_dir: &Path) -> Option<KicadCliText> {
+    let n = board.stroke_text_count();
     if !cfg.use_kicad_cli_text || o.no_kicad_cli {
         if n > 0 {
-            warn!("{} stroke-font text(s) / text box(es) on the silkscreen will be missing (kicad-cli disabled)", n);
+            warn!("{} stroke-font text(s) / text box(es) on copper, mask and silkscreen will be missing (kicad-cli disabled)", n);
         }
         return None;
     }
     let Some(cli) = find_kicad_cli(&cfg.kicad_cli) else {
         if n > 0 {
-            warn!("kicad-cli not found; {} stroke-font text(s) / text box(es) on the silkscreen will be missing (set [kicad_cli] path in <name>.krbr)", n);
+            warn!("kicad-cli not found; {} stroke-font text(s) / text box(es) on copper, mask and silkscreen will be missing (set [kicad_cli] path in <name>.krbr)", n);
         }
         return None;
     };
-    let k = KicadCliSilk { cli, cache_dir: cache_dir.to_path_buf(), use_cache: !o.no_cache };
+    let k = KicadCliText { cli, cache_dir: cache_dir.to_path_buf(), use_cache: !o.no_cache };
     if n > 0 {
         let t0 = Instant::now();
-        let silk = k.plot(board);
-        info!("kicad-cli silk: {} stroke-font text(s) / text box(es), {:.0} ms{} ({})", n, t0.elapsed().as_secs_f64() * 1000.0, if silk.from_cache { ", from cache" } else { "" }, k.cli.display());
-        cfg.scene.layer_art.extra_silk = silk.side;
+        let plot = k.plot(board);
+        info!("kicad-cli text: {} stroke-font text(s) / text box(es), {:.0} ms{} ({})", n, t0.elapsed().as_secs_f64() * 1000.0, if plot.from_cache { ", from cache" } else { "" }, k.cli.display());
+        cfg.scene.layer_art.stroke_text = plot.side;
     }
     Some(k)
 }
@@ -344,7 +344,7 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
             krbr_core::platform::lower_thread_priority();
             prefetch_models(board, resolver, library, include_dnp);
         });
-        let kicad_cli = setup_stroke_silk(board, &mut cfg, o, &cache_dir);
+        let kicad_cli = setup_stroke_text(board, &mut cfg, o, &cache_dir);
         let mut tiles = ReliefTileCache::default();
         // 凹凸のタイルのディスクのキャッシュ（基板のパスごと。変えていない基板を開き直すときに作り直さない）
         if !o.no_cache {

@@ -541,7 +541,7 @@ fn cmd_info(pcb: &PathBuf, models: bool) -> anyhow::Result<()> {
         "stackup: thickness {:.3} mm, finish '{}', mask '{}'",
         board.stackup.thickness, board.stackup.copper_finish, board.stackup.mask_color_front
     );
-    info!("stroke-font texts / text boxes on the silkscreen (need kicad-cli): {}", board.stroke_silk_count());
+    info!("stroke-font texts / text boxes on copper, mask and silkscreen (need kicad-cli): {}", board.stroke_text_count());
     if !models {
         return Ok(());
     }

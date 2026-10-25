@@ -6,9 +6,9 @@ pub mod parser;
 pub mod resolver;
 pub mod settings;
 pub mod sexpr;
-pub mod stroke_silk;
+pub mod stroke_text;
 
 pub use board::*;
 pub use parser::load_board;
 pub use resolver::{ModelResolver, ResolvedModel};
-pub use stroke_silk::stroke_silk_only_board;
+pub use stroke_text::{stroke_text_only_board, PLOT_LAYERS};

@@ -196,9 +196,12 @@ pub fn tile_keys(cache: &ReliefTileCache, board: &Board, geo: &BoardGeometry, rp
     g.push(layer_art.clip_silk_by_mask as u8);
     g.extend_from_slice(&board.setup_hash.to_le_bytes());
     hash_paths(&mut g, &geo.region);
-    for side in &layer_art.extra_silk {
-        if let Some(p) = side {
-            hash_paths(&mut g, p);
+    for side in &layer_art.stroke_text {
+        if let Some(sp) = side {
+            for p in [&sp.copper, &sp.mask_open, &sp.silk] {
+                hash_paths(&mut g, p);
+                g.push(0xFD);
+            }
         }
         g.push(0xFE);
     }

@@ -18,11 +18,11 @@ fn save_with_replace(pcb: &Path, from: &str, to: &str, start: usize) {
     std::fs::write(pcb, text).unwrap();
 }
 
-/// 書き換える線フォントの文字：シルクにある、render_cache の無い基板の文字（gr_text）の最初のもの。(元の "(gr_text \"…\"", 書き換えたもの)
-fn find_stroke_silk_text(pcb: &Path) -> Option<(String, String)> {
+/// 書き換える線フォントの文字：銅箔・マスク・シルクにある、render_cache の無い基板の文字（gr_text）の最初のもの。(元の "(gr_text \"…\"", 書き換えたもの)
+fn find_stroke_text(pcb: &Path) -> Option<(String, String)> {
     let text = std::fs::read_to_string(pcb).unwrap();
     let root = krbr_kicad::sexpr::parse(&text).ok()?;
-    let t = root.items.iter().find(|n| n.is_list && n.tag() == "gr_text" && !n.has("render_cache") && n.child_str("layer").is_some_and(|l| l.ends_with(".SilkS")) && !n.str(1).is_empty())?;
+    let t = root.items.iter().find(|n| n.is_list && n.tag() == "gr_text" && !n.has("render_cache") && n.child_str("layer").is_some_and(krbr_kicad::is_plotted_text_layer) && !n.str(1).is_empty())?;
     let from = format!("(gr_text {:?}", t.str(1));
     // 同じ文字の gr_text が複数あるときは、最初のものだけを替える（save_with_replace）
     text.contains(&from).then(|| (from.clone(), format!("(gr_text {:?}", format!("{}~", t.str(1)))))
@@ -81,11 +81,11 @@ fn save_updates_the_image_and_rebuilds_only_nearby_tiles() {
     };
     let (fp, at_from, at_to) = find_target(&pcb);
     let model_to = unused_capacitor_model(&pcb);
-    // 線フォントの文字（kicad-cli で描く）の書き換えは、kicad-cli があり、基板に線フォントのシルクの文字があるときだけ確かめる
-    let stroke_text = find_stroke_silk_text(&pcb);
+    // 線フォントの文字（kicad-cli で描く）の書き換えは、kicad-cli があり、基板に線フォントの文字があるときだけ確かめる
+    let stroke_text = find_stroke_text(&pcb);
     let with_cli = krbr_app::kicad_cli::find_kicad_cli("").is_some() && stroke_text.is_some();
     if stroke_text.is_none() {
-        println!("no stroke-font silk text (gr_text) on the board: skipping the kicad-cli steps");
+        println!("no stroke-font text (gr_text) on copper, mask or silkscreen: skipping the kicad-cli steps");
     }
     let total = if with_cli { 6 } else { 4 };
 
@@ -171,12 +171,12 @@ fn save_updates_the_image_and_rebuilds_only_nearby_tiles() {
     assert!(!u.saved);
     assert_eq!(u.pending_models, 0);
 
-    // 5. 線フォントの文字を書き換えた：まず読み直し（文字はまだ前のもの）、6. 書き出し直したシルクで全部のタイルを作り直す
+    // 5. 線フォントの文字を書き換えた：まず読み直し（文字はまだ前のもの）、6. 書き出し直した文字で全部のタイルを作り直す
     if with_cli {
         let u = &updates[4];
-        assert!(u.saved && u.stats.diff.stroke_silk_changed);
+        assert!(u.saved && u.stats.diff.stroke_text_changed);
         let u = &updates[5];
-        assert!(!u.saved && u.silk);
+        assert!(!u.saved && u.stroke_text);
         assert!(u.stats.tiles_rebuilt == 0); // 統計は保存のときだけ（作り直しは invalidate_all で全部）
     }
     let _ = std::fs::remove_dir_all(&ws);

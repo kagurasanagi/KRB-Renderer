@@ -12,13 +12,13 @@ pub struct LayerArtOptions {
     /// 20 µm/px
     pub px_per_mm: f64,
     pub clip_silk_by_mask: bool,
-    /// kicad-cli から得たシルク（線フォントの文字など）。設定ごと複製されるので共有にしてある
-    pub extra_silk: [Option<std::sync::Arc<Paths>>; 2],
+    /// kicad-cli から得た面ごとの線フォントの文字・文字の枠（銅箔・マスクの開口・シルク）。設定ごと複製されるので共有にしてある
+    pub stroke_text: [Option<std::sync::Arc<SidePaths>>; 2],
 }
 
 impl Default for LayerArtOptions {
     fn default() -> Self {
-        Self { px_per_mm: 50.0, clip_silk_by_mask: true, extra_silk: [None, None] }
+        Self { px_per_mm: 50.0, clip_silk_by_mask: true, stroke_text: [None, None] }
     }
 }
 
@@ -120,10 +120,12 @@ pub fn collect_side_paths(board: &Board, side: Side, opts: &LayerArtOptions, cli
             append(&mut sp.silk, paths);
         }
     }
-    if let Some(extra) = &opts.extra_silk[side as usize] {
-        for p in extra.iter() {
-            if clip.is_none() || near(&path_box(p)) {
-                sp.silk.push(p.clone());
+    if let Some(extra) = &opts.stroke_text[side as usize] {
+        for (to, from) in [(&mut sp.copper, &extra.copper), (&mut sp.mask_open, &extra.mask_open), (&mut sp.silk, &extra.silk)] {
+            for p in from.iter() {
+                if clip.is_none() || near(&path_box(p)) {
+                    to.push(p.clone());
+                }
             }
         }
     }
@@ -433,6 +435,25 @@ mod tests {
         let tile = collect_side_paths(&board, Side::Front, &opts, Some(&clip));
         let expect = intersect(&all.copper, &rect_path(clip.lo, clip.hi));
         assert!((area(&tile.copper) - area(&expect)).abs() < 1e-6 && (area(&expect) - 1.75).abs() < 1e-6, "{} {}", area(&tile.copper), area(&expect));
+    }
+
+    /// kicad-cli から得た線フォントの文字は、銅箔・マスクの開口・シルクのそれぞれに足され、マスクの開口はシルクを削る
+    #[test]
+    fn stroke_texts_join_their_layers() {
+        let board = Board::default();
+        let sq = |x0: f64, y0: f64, x1: f64, y1: f64| rect_path(Vec2::new(x0, y0), Vec2::new(x1, y1));
+        let mut opts = LayerArtOptions::default();
+        let text = SidePaths { copper: sq(0.0, 0.0, 1.0, 1.0), mask_open: sq(10.0, 0.0, 12.0, 1.0), silk: sq(11.0, 0.0, 14.0, 1.0) };
+        opts.stroke_text[Side::Back as usize] = Some(std::sync::Arc::new(text));
+        let back = collect_side_paths(&board, Side::Back, &opts, None);
+        assert!((area(&back.copper).abs() - 1.0).abs() < 1e-6);
+        assert!((area(&back.mask_open).abs() - 2.0).abs() < 1e-6);
+        assert!((area(&back.silk).abs() - 2.0).abs() < 1e-6, "{}", area(&back.silk));
+        // 表には足さない。タイルの範囲の外の文字は集めない
+        let front = collect_side_paths(&board, Side::Front, &opts, None);
+        assert!(front.copper.is_empty() && front.mask_open.is_empty() && front.silk.is_empty());
+        let far = Box2 { lo: Vec2::new(50.0, 50.0), hi: Vec2::new(60.0, 60.0) };
+        assert!(collect_side_paths(&board, Side::Back, &opts, Some(&far)).copper.is_empty());
     }
 
     #[test]

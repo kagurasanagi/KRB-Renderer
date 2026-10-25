@@ -125,7 +125,7 @@ krbr render board.kicad_pcb --hdr studio.exr --spp 256 --width 1920 --height 108
 - 読み直しは裏のスレッドで行います。読み直し中と、変更の件数・作り直したタイルの数・かかった時間は、設定パネルの上に出ます。読み直しの間に変えたレジストの色は、差し替えのときに反映します。
 - GPU の形状（BLAS/TLAS）はまとめて作り直します（数十 ms）。環境マップは送り直しません。
 - キャッシュにない 3D モデルは、まず箱で表示し、裏の 1 本のスレッドで分割し終えたら差し替えます。
-- 線フォントのシルクの文字が変わったときは、kicad-cli による描き直しを裏で行い、それまでは前の文字のままです。
+- 線フォントの文字（シルク・銅箔・マスク）が変わったときは、kicad-cli による描き直しを裏で行い、それまでは前の文字のままです。
 - `krbr watch` はウィンドウを開かずに、保存のたびに `--out`（既定 `out\watch.png`）を書き直します（1 回の更新で積むのは `--spp`、既定 32。`--max-updates` 回で終わる。ノイズ除去は既定で有効、`--no-denoise` で無効）。トーンマッピングを GPU で行い、軽く圧縮した PNG（zlib の最も速い設定と Sub フィルタ。圧縮率より書き出しの速さを優先する）を一時ファイル経由で置き換えます。分光モードでもノイズ除去は正しい色でかかります（下記）。
 
 計測（RTX 3080 Ti、1920x1080、32 spp）：0603 のコンデンサを 1.5 mm 動かす保存から画像の更新まで約 0.5 秒（監視の待ち 0.2〜0.3、読み直し 0.15（解析 0.05、タイル 4 枚）、GPU 0.04、描画 0.12、書き出し 0.02）。
@@ -166,7 +166,7 @@ krbr render board.kicad_pcb --hdr studio.exr --spp 256 --width 1920 --height 108
 | Visual Studio 2022/2026 の C++ ツール | VS 2026 Build Tools 18.10（MSVC 14.51） | Rust のリンカと、STEP 変換器 DLL。`scripts\build.cmd` が vswhere で探す。Community でも Build Tools でもよい |
 | CMake 3.25 以上、Ninja | 4.2、1.13（`winget install Ninja-build.Ninja`） | STEP 変換器 DLL だけ。Ninja は VS 同梱 → PATH → winget の順で探す（Build Tools には同梱されない） |
 | vcpkg | `VCPKG_ROOT`（無ければ `%USERPROFILE%\vcpkg`） | STEP 変換器 DLL の OpenCASCADE と glm。マニフェストの baseline のコミットがローカルの vcpkg にあること（無ければ `git -C %VCPKG_ROOT% pull`） |
-| KiCad 10 | `C:\Program Files\KiCad\10.0` | 3D モデルの既定フォルダと kicad-cli（シルクの線フォント）。実行時に使う |
+| KiCad 10 | `C:\Program Files\KiCad\10.0` | 3D モデルの既定フォルダと kicad-cli（線フォントの文字）。実行時に使う |
 
 ```
 cd rust
@@ -288,7 +288,7 @@ STEP の読み込み・三角形分割だけが OpenCASCADE（C++ のライブ�
 | `%APPDATA%\krbr\materials\*.toml` | 名前付きの材質（OpenPBR）。組み込みの材質に、書いた項目だけ重ねる。ビューアの材質エディタで作った材質は `user.toml` に書く |
 | `%APPDATA%\krbr\model_map.toml` | 3D モデルごとの材質（他のプロジェクトと共有）と、色・名前の規則 |
 | `%LOCALAPPDATA%\krbr\cache\meshes\` | STEP の分割結果のキャッシュ（キーはファイル内容の XXH64 ＋分割パラメータ） |
-| `%LOCALAPPDATA%\krbr\cache\silk\` | kicad-cli によるシルク SVG のキャッシュ |
+| `%LOCALAPPDATA%\krbr\cache\silk\` | kicad-cli による線フォントの文字の SVG のキャッシュ |
 | `%LOCALAPPDATA%\krbr\cache\relief\` | 凹凸のタイル（メッシュと距離場）のキャッシュ。基板ごとに 1 つ（数十 MB）、最近の 8 枚分。タイルごとに、その範囲にかかる基板の項目と設定・krbr.exe から作ったキーで引くので、少し直した基板でも変わったタイルだけを作り直す |
 
 ファイルが無ければ既定値を使います。優先順位は「コマンドライン ＞ ビューアで覚えた設定 ＞ 設定ファイル ＞ 既定値」です。
@@ -448,7 +448,7 @@ bump_scale = 0.1
 
 最後に使ったものは、基板ごとに `<名前>.krbr` の `[remembered]` に、最近使った一覧は `state.toml` に覚えます。覚えた後に `[environment] hdr` を書き換えたときは、そちらを使います。覚えたファイルが無くなっていたら 3・4 に戻ります。設定ファイルで指定したファイルが読めないときは、内蔵のスタジオで代えて続けます（`--hdr` で指定したものが読めないときはエラー）。ビューアの「環境マップ」の一覧には、内蔵のスタジオ、最近使ったもの、今のものと同じフォルダの `.hdr` / `.exr` が出ます。「開く...」でファイルを選ぶか、`.hdr` / `.exr` をウィンドウへドラッグ＆ドロップしても切り替えられます。
 
-**線フォントの文字**：KiCad の線フォント（ストロークフォント）の文字は形の情報を持たないので、kicad-cli でシルクを SVG に書き出して取り込みます（`[kicad_cli] use_for_text` / `path`、`--no-kicad-cli`）。kicad-cli に渡すのは**シルク層に線フォントの文字（と文字の枠）だけを残した基板のコピー**です。TrueType の文字（`render_cache` を持つもの）はシルク層から部品図の層へ移し、線・図形・パッドなどは取り除きます。TrueType の文字・線・図形は krbr が自分で描くので、kicad-cli の形が重なって太ったり二重になったりしません（この基板で、kicad-cli の有無で変わるのは線フォントの文字の画素だけであることを確かめています）。書き出しは `%LOCALAPPDATA%\krbr\cache\silk\<キー>-stroke-F.svg` / `-B.svg` にキャッシュします（キーは渡す基板のコピーの内容から作るので、TrueType の文字を動かしただけでは書き出し直しません。コピーを作るには基板全体を解析し直すので、元の基板の中身から引ける索引 `<元のキー>.key` も残し、同じ基板なら解析を省きます）。作業フォルダはプロセスごとに分け、kicad-cli は 120 秒で打ち切ります。保存で線フォントの文字が変わったときは、ビューアと `krbr watch` が裏で書き出し直し、終わったら凹凸タイルを全部作り直します（それまでは前の文字のまま。書き出し中にまた変わったら、終わった後にもう一度書き出します）。
+**線フォントの文字**：KiCad の線フォント（ストロークフォント）の文字は形の情報を持たないので、kicad-cli で SVG に書き出して取り込みます（`[kicad_cli] use_for_text` / `path`、`--no-kicad-cli`）。対象は krbr が描く外側の層（シルク・銅箔・ソルダーマスクの表裏）で、銅箔の文字は銅箔（凹凸と材質）に、マスクの文字はマスクの開口になります。内層と部品図の層などの文字は描きません。kicad-cli に渡すのは**それらの層に線フォントの文字（と文字の枠）だけを残した基板のコピー**です。TrueType の文字（`render_cache` を持つもの）はそれらの層から部品図の層へ移し、線・図形・パッドなどは取り除きます。TrueType の文字・線・図形は krbr が自分で描くので、kicad-cli の形が重なって太ったり二重になったりしません（この基板で、kicad-cli の有無で変わるのは線フォントの文字の画素だけであることを確かめています）。6 層は 1 回の `--mode-multi` でまとめて書き出します（kicad-cli の起動と基板の読み込みが時間の大半なので）。書き出すファイルの名前は層の表示名から決まり、表示名は基板や言語で変わるので、コピーの中で表示名を `KRBR_F_Cu` などに書き換えておきます。`--mode-multi` で出なかった層（古い kicad-cli）は、層ごとに `--mode-single` で書き出します。書き出しは `%LOCALAPPDATA%\krbr\cache\silk\<キー>-KRBR_F_Cu.svg` などにキャッシュします（キーは渡す基板のコピーの内容から作るので、TrueType の文字を動かしただけでは書き出し直しません。コピーを作るには基板全体を解析し直すので、元の基板の中身から引ける索引 `<元のキー>.key` も残し、同じ基板なら解析を省きます）。作業フォルダはプロセスごとに分け、kicad-cli は 120 秒で打ち切ります。保存で線フォントの文字が変わったときは、ビューアと `krbr watch` が裏で書き出し直し、終わったら凹凸タイルを全部作り直します（それまでは前の文字のまま。書き出し中にまた変わったら、終わった後にもう一度書き出します）。
 
 **TrueType の文字の白抜き・角の丸い四角形**：`knockout` の文字（`(layer "F.Mask" knockout)` など）は、文字の向きにそろえた字の範囲に余白 max(線幅 / 2, 高さ / 9) を足した四角形を塗り、そこから字の形を抜きます（KiCad と同じ）。`gr_rect` / `fp_rect` の `radius` は角の丸みとして形にします。
 
@@ -510,6 +510,7 @@ cargo test --release -p krbr-render -- --ignored --nocapture                 # G
 cargo test --release -p krbr-app --test watch -- --ignored --nocapture       # 保存の監視（GPU と KiCad の 3D モデルが要る）
 cargo test --release -p krbr-app --test material -- --ignored --nocapture    # 材質の CLI（KiCad の 3D モデルが要る）
 cargo test --release -p krbr-app --test denoise -- --ignored --nocapture     # ノイズ除去（GPU と OIDN の DLL が要る）
+cargo test -p krbr-app --lib kicad_cli -- --ignored --nocapture             # 線フォントの文字の書き出し（kicad-cli が要る）
 cargo test --release -p krbr-app --lib preview -- --ignored --nocapture      # 材質の見本を out/material_swatches.png に描く（目で確かめる）
 cargo run --release -- material bake-swatches                                # 組み込みの材質の見本を焼き直す（下記）
 ```
@@ -571,7 +572,7 @@ HDR ─────────────────────────�
 | crate | ファイル | 役割 |
 |---|---|---|
 | krbr-core | `log`, `platform`, `mesh`, `file_watcher` | ログ、OS 依存部（キャッシュ・設定の場所、DLL の探し先、ウィンドウを出さない子プロセス）、XXH64、三角形メッシュ、保存の検出 |
-| krbr-kicad | `sexpr`, `parser`, `board`, `resolver`, `stroke_silk` | S 式パーサ → `Board`（外形・層構成・配線・パッド・ビア・ベタ・シルク・穴・部品・3D モデル指定）。座標はすべて基板座標に変換済み。差分（`diff_boards`）。パス解決（`${KIPRJMOD}`, `${KICADn_3DMODEL_DIR}`, `${KISYS3DMOD}`、`kicad_common.json`、`.wrl`→`.step` の差し替え、追加検索フォルダ）。kicad-cli に渡す線フォントだけの基板のコピー |
+| krbr-kicad | `sexpr`, `parser`, `board`, `resolver`, `stroke_text` | S 式パーサ → `Board`（外形・層構成・配線・パッド・ビア・ベタ・シルク・穴・部品・3D モデル指定）。座標はすべて基板座標に変換済み。差分（`diff_boards`）。パス解決（`${KIPRJMOD}`, `${KICADn_3DMODEL_DIR}`, `${KISYS3DMOD}`、`kicad_common.json`、`.wrl`→`.step` の差し替え、追加検索フォルダ）。kicad-cli に渡す線フォントだけの基板のコピー |
 | krbr-geom | `shapes`, `board_mesh`, `relief`, `tiles`, `raster`, `svg_reader` | パッド・配線・図形の多角形化（Clipper2、10 nm 単位の整数座標）。Edge.Cuts の輪郭の連結、穴あけ、上下面の三角形分割、側面・穴の内壁（メッキ穴は別材質）。凹凸の形状とタイル、被覆率のラスタライズと距離場。kicad-cli の SVG の読み込み |
 | krbr-model | `library`, `mesh_file`, `part` | 3D モデルの読み込み（メッシュキャッシュ、無ければ STEP 変換器 DLL）、`.krbm`、部位（名前と色） |
 | krbr-scene | `scene`, `config`, `material`, `material_library`, `conductor`, `model_map`, `camera`, `lens`, `spectrum`, `mask_presets` | 設定ファイル、材質（OpenPBR）と割り当て、組み込みの材質（`builtin_materials.toml`）、金属の測定値、部品の配置（KiCad 3D ビューアと同じ変換の順序）、代替の箱、カメラの自動調整・レンズ、等色関数と RGB → スペクトルの表 |
@@ -748,7 +749,7 @@ VCM（1024 回）の集光点のまわりの平均は 0.2023 で、PT（16384 sp
 
 - 3D モデルは STEP のみ読み込みます。`.wrl` の指定は、同名の `.step` があれば差し替えます。無ければ代替の箱になります。
 - パッドの `padstack`（層ごとに形が違うパッド）は既定の形だけを使います。内層は描きません。
-- 線フォント（KiCad 標準のストロークフォント）の文字は `render_cache` を持たないため、kicad-cli の SVG 出力から取り込みます。kicad-cli が無ければ、その文字は描かれません（警告を出します）。
+- 線フォント（KiCad 標準のストロークフォント）の文字は `render_cache` を持たないため、kicad-cli の SVG 出力から取り込みます（シルク・銅箔・マスク）。kicad-cli が無ければ、その文字は描かれません（警告を出します）。
 - レジストの縁の丸みは法線（見え方）だけで表し、形状は垂直な段差のままです。
 - PT では、透明な物体は光源の直接サンプリングの光をさえぎります。透明な物体越しの光（集光模様、ガラスの下の明るさ）は収束が遅いので、サンプルを多めに積むか、VCM を使ってください（多重散乱の補償と同じく、MNEE やパスガイディングは今後の予定。`plan.md`）。
 - 透明な物体は、閉じた形状で三角形の巻き方が外向き（表から見て反時計回り）であることを前提にしています。

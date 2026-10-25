@@ -35,11 +35,23 @@ impl Side {
             Side::Back => "B.SilkS",
         }
     }
+    /// 部品図の層（krbr は描かない）
+    pub fn fab_layer(self) -> &'static str {
+        match self {
+            Side::Front => "F.Fab",
+            Side::Back => "B.Fab",
+        }
+    }
 }
 
 /// シルク層（F.SilkS / B.SilkS）か
 pub fn is_silk_layer(layer: &str) -> bool {
     Side::BOTH.iter().any(|s| s.silk_layer() == layer)
+}
+
+/// krbr が描く外側の層（銅箔・ソルダーマスク・シルク）か。これらの層の線フォントの文字と文字の枠は kicad-cli に描かせる
+pub fn is_plotted_text_layer(layer: &str) -> bool {
+    Side::BOTH.iter().any(|s| s.copper_layer() == layer || s.mask_layer() == layer || s.silk_layer() == layer)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,8 +127,8 @@ pub struct BoardItem {
     pub bbox: Box2,
     pub edge_cuts: bool,
     pub holes: bool,
-    /// 線フォントのシルクの文字を含む（kicad-cli で描き直しが要る）
-    pub stroke_silk: bool,
+    /// 銅箔・マスク・シルクの線フォントの文字（か文字の枠）を含む（kicad-cli で描き直しが要る）
+    pub stroke_text: bool,
 }
 
 /// 図形（基板直下の gr_* と、部品内の fp_*、文字の render_cache）
@@ -370,7 +382,7 @@ impl ZoneFill {
 }
 
 /// krbr が自前では形を作れない文字：線フォントの文字（render_cache が無い）と、文字の枠（text_box）。
-/// シルク層のものは kicad-cli に描かせる（stroke_silk.rs。判定は stroke_silk::needs_kicad_cli にまとめてある）
+/// 銅箔・マスク・シルクの層のものは kicad-cli に描かせる（stroke_text.rs。判定は stroke_text::needs_kicad_cli にまとめてある）
 #[derive(Debug, Clone)]
 pub struct StrokeText {
     pub text: String,
@@ -473,9 +485,9 @@ pub struct Board {
 }
 
 impl Board {
-    /// シルク層の、kicad-cli に描かせる文字（線フォントの文字と文字の枠）の数。0 なら kicad-cli を呼ばなくてよい
-    pub fn stroke_silk_count(&self) -> usize {
-        self.stroke_texts.iter().filter(|t| is_silk_layer(&t.layer)).count()
+    /// 銅箔・マスク・シルクの層の、kicad-cli に描かせる文字（線フォントの文字と文字の枠）の数。0 なら kicad-cli を呼ばなくてよい
+    pub fn stroke_text_count(&self) -> usize {
+        self.stroke_texts.iter().filter(|t| is_plotted_text_layer(&t.layer)).count()
     }
 
     /// 塗りつぶしのデータが無いゾーンがあるときの警告の文（無ければ None）
@@ -491,7 +503,7 @@ pub struct BoardDiff {
     pub full: bool,
     /// 穴が変わった（基材の側面・穴の内壁を作り直す）
     pub holes_changed: bool,
-    pub stroke_silk_changed: bool,
+    pub stroke_text_changed: bool,
     /// 作り直しが要る範囲
     pub dirty: Vec<Box2>,
     pub added: usize,
@@ -513,8 +525,8 @@ pub fn diff_boards(before: &Board, after: &Board) -> BoardDiff {
         if it.holes {
             d.holes_changed = true;
         }
-        if it.stroke_silk {
-            d.stroke_silk_changed = true;
+        if it.stroke_text {
+            d.stroke_text_changed = true;
         }
         if it.bbox.valid() {
             d.dirty.push(it.bbox);
