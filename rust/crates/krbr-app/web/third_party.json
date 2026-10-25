@@ -618,6 +618,18 @@
 "url": "https://github.com/paritytech/nohash-hasher"
 },
 {
+"name": "notify",
+"version": "8.2.1",
+"license": "CC0-1.0",
+"url": "https://github.com/notify-rs/notify.git"
+},
+{
+"name": "notify-types",
+"version": "2.1.0",
+"license": "MIT OR Apache-2.0",
+"url": "https://github.com/notify-rs/notify.git"
+},
+{
 "name": "num-complex",
 "version": "0.4.6",
 "license": "MIT OR Apache-2.0",

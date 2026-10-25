@@ -984,6 +984,7 @@ struct App {
     video_dialog: video_job::VideoDialog,
     /// --test-video：書き出しを終えたら閉じる
     video_test_exit: bool,
+    /// WebView の操作と基板の保存の通知で、眠っているイベントループを起こす
     proxy: Option<EventLoopProxy<crate::web_ui::Wake>>,
     /// ボタン列・ステータスバー・設定パネル・警告の帯の置き場所（egui のポイント。NOTHING なら出さない）
     web_rects: [egui::Rect; 8],
@@ -4414,10 +4415,19 @@ impl ApplicationHandler<crate::web_ui::Wake> for App {
     }
 
     fn user_event(&mut self, _el: &ActiveEventLoop, _wake: crate::web_ui::Wake) {
-        // WebView の操作で起きた。描画は about_to_wait で行う（そこで操作を受け取る）
+        // WebView の操作か基板の保存の通知で起きた。描画は about_to_wait で行う（そこで操作・保存を受け取る）
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        // 保存の通知が届いたら、待っている間でもすぐ起きる（開き直した基板の見張りにも付ける）
+        if let (Some(w), Some(p)) = (self.watcher.as_mut(), self.proxy.as_ref()) {
+            if w.uses_events() && !w.has_waker() {
+                let p = p.clone();
+                w.set_waker(move || {
+                    let _ = p.send_event(crate::web_ui::Wake);
+                });
+            }
+        }
         self.about_to_wait_impl(el);
     }
 }
@@ -4469,8 +4479,8 @@ impl App {
         let idle = self.gpu.as_ref().map(|g| g.in_flight.is_none() && (g.prog.samples() >= self.st.max_spp || (self.st.paused && g.prog.samples() > 0))).unwrap_or(false) && !self.st.changed.frame && self.env_job.is_none() && self.reload_job.is_none() && !self.text_job.busy() && !self.text_dirty && !self.test.active() && !self.editor.busy()
             && self.web.as_ref().is_none_or(|w| w.moved().elapsed() > Duration::from_millis(300));
         if idle {
-            // 収束したら GPU を休ませ、入力と保存を待つ
-            let wait = if self.watcher.is_some() || self.prep.scene.pending_models > 0 { 100 } else { 250 };
+            // 収束したら GPU を休ませ、入力と保存を待つ（保存の通知で起きられなければ、100 ms ごとに起きて調べる）
+            let wait = if self.watcher.as_ref().is_some_and(|w| !w.has_waker()) || self.prep.scene.pending_models > 0 { 100 } else { 250 };
             el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(wait)));
         } else {
             el.set_control_flow(ControlFlow::Poll);
@@ -4663,9 +4673,8 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         app.start_board_load(pcb, true);
     }
     let event_loop = EventLoop::<crate::web_ui::Wake>::with_user_event().build().map_err(|e| anyhow::anyhow!("event loop: {e}"))?;
-    if app.vo.web_ui {
-        app.proxy = Some(event_loop.create_proxy());
-    }
+    // WebView の操作と、基板の保存の通知で、眠っているイベントループを起こす
+    app.proxy = Some(event_loop.create_proxy());
     event_loop.run_app(&mut app).map_err(|e| anyhow::anyhow!("event loop: {e}"))?;
     // GPU の資源はコンテキストより先に捨てる
     if let Some(g) = app.gpu.take() {

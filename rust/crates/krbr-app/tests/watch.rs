@@ -10,12 +10,19 @@ use std::time::{Duration, Instant};
 use krbr_app::{run_watch, RenderOptions, WatchEvent, WatchOptions, WatchUpdate};
 
 
-/// 保存をまねる（KiCad と同じく、ファイル全体を書き直す）。start 以降で最初の from を to に替える
+/// 保存をまねる（KiCad 10 と同じく、同じフォルダの一時ファイルに書いてから名前を変えて置き換える）
+fn save_file(pcb: &Path, text: &str) {
+    let tmp = pcb.with_extension("kicad_pcb.tmp");
+    std::fs::write(&tmp, text).unwrap();
+    std::fs::rename(&tmp, pcb).unwrap();
+}
+
+/// start 以降で最初の from を to に替えて保存する
 fn save_with_replace(pcb: &Path, from: &str, to: &str, start: usize) {
     let mut text = std::fs::read_to_string(pcb).unwrap();
     let pos = start + text[start..].find(from).unwrap_or_else(|| panic!("'{from}' not found"));
     text.replace_range(pos..pos + from.len(), to);
-    std::fs::write(pcb, text).unwrap();
+    save_file(pcb, &text);
 }
 
 /// 書き換える線フォントの文字：銅箔・マスク・シルクにある、render_cache の無い基板の文字（gr_text）の最初のもの。(元の "(gr_text \"…\"", 書き換えたもの)
@@ -100,7 +107,7 @@ fn save_updates_the_image_and_rebuilds_only_nearby_tiles() {
             0 => save_with_replace(&pcb, &at_from, &at_to, fp),
             1 => {
                 let text = std::fs::read_to_string(&pcb).unwrap();
-                std::fs::write(&pcb, text + "\n").unwrap();
+                save_file(&pcb, &(text + "\n"));
             }
             2 => save_with_replace(&pcb, "Capacitor_SMD.3dshapes/C_0603_1608Metric.step", &format!("Capacitor_SMD.3dshapes/{model_to}.step"), fp),
             _ => {

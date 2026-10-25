@@ -8,3 +8,5 @@ license.workspace = true
 [dependencies]
 xxhash-rust.workspace = true
 glam.workspace = true
+# 保存の検出（フォルダの変更通知。Windows は ReadDirectoryChangesW、Linux は inotify）
+notify = { version = "8.2", default-features = false }
