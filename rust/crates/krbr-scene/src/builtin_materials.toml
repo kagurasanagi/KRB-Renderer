@@ -5,7 +5,8 @@
 # [krbr] conductor は測定値の複素屈折率の金属（krbr-scene の conductor.rs。出典は scripts/gen_conductors.py）。
 # 屈折率は、分散式があるものは Sellmeier の係数（λ は µm、C は µm²。refractiveindex.info の値）、無いものは
 # nd（587.6 nm）の代表値。表示名は krbr-app の i18n（material-<名前>）
-# [krbr] swatch_color は、3D モデルの色を使う材質の見本の色（材質の一覧で見分けるための代表の色。描画には使わない）
+# 材質はどれも自分の色を持つ。3D モデルの面の色は、組み込みの規則（krbr-scene の model_map.rs。model_color）が
+# 部位の色の調整（材質名の +color=）として付ける
 
 # ---------------------------------------------------------------- 金属（測定値）
 
@@ -211,37 +212,37 @@ bump_strength = 0.015
 bump_scale = 0.1
 roughness_variation = 0.05
 
-# 錫は可視域の測定値が見つからない（refractiveindex.info は 0.73 µm から）ので、3D モデルの面の色の金属にする
+# 錫は可視域の測定値が見つからない（refractiveindex.info は 0.73 µm から）ので、F0 の色で決めた金属にする
 [material.metal_tin]           # 錫めっきのリード・端子
+base_color = [0.6445, 0.6445, 0.6038]  # #d2d2cc（錫めっき）
 base_metalness = 1.0
 specular_roughness = 0.28
 [material.metal_tin.krbr]
 category = "metal"
-swatch_color = [0.6445, 0.6445, 0.6038]  # 見本の色（#d2d2cc、錫めっき）
 bump_pattern = "noise"
 bump_strength = 0.012
 bump_scale = 0.08
 roughness_variation = 0.03
 
-# ---------------------------------------------------------------- 樹脂（色は 3D モデルの面の色。部位ごとに +color= で変えられる）
+# ---------------------------------------------------------------- 樹脂（部位ごとに +color= で色を変えられる）
 
 [material.plastic]             # 樹脂のボディ
+base_color = [0.2159, 0.2159, 0.2159]  # #808080（灰色）
 specular_roughness = 0.45
 specular_ior = 1.5
 [material.plastic.krbr]
 category = "plastic"
-swatch_color = [0.2159, 0.2159, 0.2159]  # 見本の色（#808080、灰色）
 bump_pattern = "noise"
 bump_strength = 0.012
 bump_scale = 0.3
 roughness_variation = 0.02
 
 [material.glossy_plastic]      # 白い樹脂など、つやのあるもの
+base_color = [0.8714, 0.8714, 0.8388]  # #f0f0ec（白）
 specular_roughness = 0.3
 specular_ior = 1.5
 [material.glossy_plastic.krbr]
 category = "plastic"
-swatch_color = [0.8714, 0.8714, 0.8388]  # 見本の色（#f0f0ec、白）
 bump_pattern = "noise"
 bump_strength = 0.01
 bump_scale = 0.3
@@ -259,22 +260,22 @@ bump_scale = 0.1
 roughness_variation = 0.03
 
 [material.plastic_abs]         # ABS（nd 1.53：データシートの代表値）
+base_color = [0.0802, 0.0802, 0.0844]  # #505052（濃い灰色の筐体）
 specular_roughness = 0.4
 specular_ior = 1.53
 [material.plastic_abs.krbr]
 category = "plastic"
-swatch_color = [0.0802, 0.0802, 0.0844]  # 見本の色（#505052、濃い灰色の筐体）
 bump_pattern = "noise"
 bump_strength = 0.012
 bump_scale = 0.3
 roughness_variation = 0.02
 
 [material.plastic_pc]          # ポリカーボネート（不透明。Sultanova et al. 2009）
+base_color = [0.2747, 0.3663, 0.4793]  # #8fa3b8（青みの灰色）
 specular_roughness = 0.3
 specular_ior = 1.5848
 [material.plastic_pc.krbr]
 category = "plastic"
-swatch_color = [0.2747, 0.3663, 0.4793]  # 見本の色（#8fa3b8、青みの灰色）
 sellmeier_b = [1.4182, 0.0, 0.0]
 sellmeier_c = [0.021304, 0.0, 0.0]
 bump_pattern = "noise"
@@ -283,66 +284,66 @@ bump_scale = 0.3
 roughness_variation = 0.02
 
 [material.plastic_pbt]         # PBT（コネクタのハウジングなど。nd 1.57：データシートの代表値）
+base_color = [0.0232, 0.0232, 0.0232]  # #2a2a2a（黒いコネクタのハウジング）
 specular_roughness = 0.45
 specular_ior = 1.57
 [material.plastic_pbt.krbr]
 category = "plastic"
-swatch_color = [0.0232, 0.0232, 0.0232]  # 見本の色（#2a2a2a、黒いコネクタのハウジング）
 bump_pattern = "noise"
 bump_strength = 0.012
 bump_scale = 0.3
 roughness_variation = 0.02
 
 [material.plastic_pa66]        # ナイロン（PA66。nd 1.53：データシートの代表値）
+base_color = [0.7913, 0.7157, 0.5271]  # #e6dcc0（アイボリー：ナチュラルの PA66 のコネクタ）
 specular_roughness = 0.45
 specular_ior = 1.53
 [material.plastic_pa66.krbr]
 category = "plastic"
-swatch_color = [0.7913, 0.7157, 0.5271]  # 見本の色（#e6dcc0、アイボリー：ナチュラルの PA66 のコネクタ）
 bump_pattern = "noise"
 bump_strength = 0.012
 bump_scale = 0.3
 roughness_variation = 0.02
 
 [material.plastic_pom]         # ポリアセタール（POM。nd 1.48：データシートの代表値）
+base_color = [0.6584, 0.6584, 0.6240]  # #d4d4cf（ナチュラルの白）
 specular_roughness = 0.35
 specular_ior = 1.48
 [material.plastic_pom.krbr]
 category = "plastic"
-swatch_color = [0.6584, 0.6584, 0.6240]  # 見本の色（#d4d4cf、ナチュラルの白）
 bump_pattern = "noise"
 bump_strength = 0.01
 bump_scale = 0.3
 roughness_variation = 0.02
 
 [material.plastic_pp]          # ポリプロピレン（PP。nd 1.49：データシートの代表値）
+base_color = [0.8070, 0.8308, 0.7157]  # #e8ebdc（乳白色のナチュラル）
 specular_roughness = 0.45
 specular_ior = 1.49
 [material.plastic_pp.krbr]
 category = "plastic"
-swatch_color = [0.8070, 0.8308, 0.7157]  # 見本の色（#e8ebdc、乳白色のナチュラル）
 bump_pattern = "noise"
 bump_strength = 0.012
 bump_scale = 0.3
 roughness_variation = 0.02
 
 [material.plastic_pvc]         # 塩化ビニル（PVC。電線の被覆など。nd 1.542：Zhang et al. 2020）
+base_color = [0.0467, 0.1590, 0.4508]  # #3d6fb3（青い電線の被覆）
 specular_roughness = 0.4
 specular_ior = 1.542
 [material.plastic_pvc.krbr]
 category = "plastic"
-swatch_color = [0.0467, 0.1590, 0.4508]  # 見本の色（#3d6fb3、青い電線の被覆）
 bump_pattern = "noise"
 bump_strength = 0.012
 bump_scale = 0.3
 roughness_variation = 0.02
 
 [material.plastic_pet]         # PET（nd 1.569：Zhang et al. 2020）
+base_color = [0.0273, 0.2051, 0.0782]  # #2e7d4f（緑）
 specular_roughness = 0.3
 specular_ior = 1.569
 [material.plastic_pet.krbr]
 category = "plastic"
-swatch_color = [0.0273, 0.2051, 0.0782]  # 見本の色（#2e7d4f、緑）
 bump_pattern = "noise"
 bump_strength = 0.01
 bump_scale = 0.3
@@ -362,11 +363,11 @@ roughness_variation = 0.02
 # ---------------------------------------------------------------- ゴム
 
 [material.rubber_silicone]     # シリコーンゴム（PDMS：Schneider et al. 2009、Sylgard 184）
+base_color = [0.5271, 0.0630, 0.0284]  # #c0472f（赤いシリコーンゴム）
 specular_roughness = 0.55
 specular_ior = 1.4316
 [material.rubber_silicone.krbr]
 category = "rubber"
-swatch_color = [0.5271, 0.0630, 0.0284]  # 見本の色（#c0472f、赤いシリコーンゴム）
 sellmeier_b = [1.0093, 0.0, 0.0]
 sellmeier_c = [0.013185, 0.0, 0.0]
 bump_pattern = "noise"
@@ -388,11 +389,11 @@ roughness_variation = 0.04
 # ---------------------------------------------------------------- セラミック
 
 [material.ceramic]             # チップ部品のセラミック
+base_color = [0.4508, 0.3278, 0.1946]  # #b39b7a（積層セラミックコンデンサの地の色）
 specular_roughness = 0.4
 specular_ior = 1.6
 [material.ceramic.krbr]
 category = "ceramic"
-swatch_color = [0.4508, 0.3278, 0.1946]  # 見本の色（#b39b7a、積層セラミックコンデンサの地の色）
 bump_pattern = "noise"
 bump_strength = 0.015
 bump_scale = 0.05

@@ -132,7 +132,6 @@ impl Variant {
                 m.transmission_color = c;
             } else {
                 m.base_color = c;
-                m.base_color_from_model = false;
                 if m.conductor.take().is_some() {
                     m.specular_color = Vec3::ONE; // 色を決めた金属は Schlick（F82-tint なし）
                 }
@@ -147,7 +146,6 @@ impl Variant {
             // 光っている部位の地の色は発光の色にする（色のついた拡散レンズ）。白い地のままだと、周りの光を白く返して発光の色を薄める
             let c = m.emission_color;
             m.base_color = c / c.max_element().max(1e-6) * EMISSIVE_BASE_ALBEDO;
-            m.base_color_from_model = false;
         }
     }
 }
@@ -192,7 +190,7 @@ pub fn with_base(name: &str, base: &str) -> String {
     Variant::parse(name).1.name(base)
 }
 
-/// krbr 組み込みの材質（OpenPBR Surface）。色はリニア。base_color を書かなければ 3D モデルの面の色を使う
+/// krbr 組み込みの材質（OpenPBR Surface）。色はリニア
 pub const BUILTIN_MATERIALS: &str = include_str!("builtin_materials.toml");
 
 /// ビューアの材質エディタで作った材質を書くファイル（全体設定の materials/ の中）
@@ -216,13 +214,31 @@ pub fn builtin_order() -> &'static Vec<String> {
     })
 }
 
-/// 材質の名前として使えるか（空でなく、変種の区切りの '+' と、TOML のキーで困る文字を含まない）
-pub fn valid_material_name(name: &str) -> bool {
-    !name.trim().is_empty() && name.trim() == name && !name.contains(['+', '.', '"', '\\', '\n', '[', ']', '#'])
+/// 自分の材質の ID の頭（ID は "user_" と 16 桁の 16 進。表示名は [krbr] label）
+pub const USER_ID_PREFIX: &str = "user_";
+
+/// 新しい自分の材質の ID（ライブラリのどの材質とも重ならないもの）。割り当て（設定ファイル）は ID で書くので、
+/// 表示名は後から変えられる
+pub fn new_user_material_id(lib: &MaterialLibrary) -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    loop {
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = format!("{USER_ID_PREFIX}{}", krbr_core::to_hex(krbr_core::xxh64(format!("{now} {} {seq}", std::process::id()).as_bytes())));
+        if lib.find(&id).is_none() {
+            return id;
+        }
+    }
 }
 
-/// materials/user.toml に材質を書く（同じ名前があれば置き換え、ほかの材質とコメントは残す）。None なら消す
-pub fn save_user_material(config_dir: &Path, name: &str, m: Option<&Material>) -> Result<std::path::PathBuf, String> {
+/// 材質の表示名として使えるか（空でなく、前後に空白が無く、改行などの制御文字を含まない）
+pub fn valid_material_label(label: &str) -> bool {
+    !label.trim().is_empty() && label.trim() == label && !label.contains(char::is_control)
+}
+
+/// materials/user.toml に材質を書く（同じ ID があれば置き換え、ほかの材質とコメントは残す）。label は表示名
+/// （[krbr] label）。None なら消す
+pub fn save_user_material(config_dir: &Path, name: &str, m: Option<(&Material, &str)>) -> Result<std::path::PathBuf, String> {
     let dir = config_dir.join("materials");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let file = dir.join(USER_MATERIALS_FILE);
@@ -240,8 +256,12 @@ pub fn save_user_material(config_dir: &Path, name: &str, m: Option<&Material>) -
     }
     let mats = doc["material"].as_table_mut().ok_or_else(|| format!("{}: 'material' is not a table", file.display()))?;
     match m {
-        Some(m) => {
-            let text = toml::to_string(&toml::Value::Table(crate::material_io::write_material(m))).map_err(|e| e.to_string())?;
+        Some((m, label)) => {
+            let mut t = crate::material_io::write_material(m);
+            if let toml::Value::Table(k) = t.entry("krbr").or_insert_with(|| toml::Value::Table(Default::default())) {
+                k.insert(LABEL_KEY.into(), toml::Value::String(label.to_string()));
+            }
+            let text = toml::to_string(&toml::Value::Table(t)).map_err(|e| e.to_string())?;
             let parsed: toml_edit::DocumentMut = text.parse().map_err(|e| format!("{e}"))?;
             let mut t = parsed.as_table().clone();
             t.set_implicit(false);
@@ -255,10 +275,16 @@ pub fn save_user_material(config_dir: &Path, name: &str, m: Option<&Material>) -
     Ok(file)
 }
 
+/// 材質の表示名を書く [krbr] の項目（材質の値ではないので Material には入れず、ライブラリが持つ）
+const LABEL_KEY: &str = "label";
+
+/// 材質の一覧。キーは材質の ID（組み込みは "plastic_abs" などの名前、材質エディタで作った材質は "user_…"）
 #[derive(Debug, Clone, Default)]
 pub struct MaterialLibrary {
     materials: BTreeMap<String, Material>,
     sources: BTreeMap<String, String>,
+    /// 表示名（[krbr] label。無ければ、組み込みは訳、それ以外は ID を表示する）
+    labels: BTreeMap<String, String>,
 }
 
 impl MaterialLibrary {
@@ -296,11 +322,22 @@ impl MaterialLibrary {
         let Some(toml::Value::Table(mats)) = root.get("material") else { return Ok(()) };
         for (name, node) in mats {
             let toml::Value::Table(t) = node else { continue };
+            // 表示名は材質の値ではないので外してから読む
+            let mut t = t.clone();
+            if let Some(toml::Value::Table(k)) = t.get_mut("krbr") {
+                match k.remove(LABEL_KEY) {
+                    Some(toml::Value::String(l)) if valid_material_label(l.trim()) => {
+                        self.labels.insert(name.clone(), l.trim().to_string());
+                    }
+                    Some(_) => krbr_core::warn!("{}: material '{}': [krbr] label must be a non-empty string", source, name),
+                    None => {}
+                }
+            }
+            let t = &t;
             let mut m = match self.materials.get(name) {
                 Some(existing) => existing.clone(),
-                None => Material { name: name.clone(), base_color_from_model: true, ..Default::default() }, // base_color が無ければモデルの色
+                None => Material { name: name.clone(), ..Default::default() },
             };
-            // base_color を書いたかどうかと [krbr] base_color_from_model の扱いは read_material の中で決める
             let mut problems = Vec::new();
             read_material(t, &mut m, &mut problems);
             for p in problems {
@@ -335,6 +372,16 @@ impl MaterialLibrary {
     pub fn remove(&mut self, name: &str) {
         self.materials.remove(name);
         self.sources.remove(name);
+        self.labels.remove(name);
+    }
+
+    /// 材質の表示名（[krbr] label に書いたもの。無ければ None）
+    pub fn label(&self, name: &str) -> Option<&str> {
+        self.labels.get(name).map(|s| s.as_str())
+    }
+
+    pub fn set_label(&mut self, name: &str, label: &str) {
+        self.labels.insert(name.to_string(), label.to_string());
     }
 
     pub fn names(&self) -> Vec<String> {
@@ -373,8 +420,7 @@ mod tests {
         assert!((m.emission_color - Vec3::new(1.0, srgb_to_linear(Vec3::splat(128.0 / 255.0)).x, 0.0)).abs().max_element() < 1e-6);
         assert_eq!(m.specular_roughness, lib.find("plastic").unwrap().specular_roughness); // 発光以外はそのまま
         assert_eq!(lib.find("plastic").unwrap().emission_luminance, 0.0);
-        // 地の色は発光の色（モデルの色は使わない）
-        assert!(!m.base_color_from_model);
+        // 地の色は発光の色
         assert!((m.base_color.x - EMISSIVE_BASE_ALBEDO).abs() < 1e-6 && m.base_color.z == 0.0);
         // # は省略可。模様なしと組み合わせられる（どちらの順でも）
         for name in ["plastic+smooth+emit=ff8000,5000", "plastic+emit=#FF8000,5000+smooth"] {
@@ -401,9 +447,9 @@ mod tests {
     #[test]
     fn color_and_roughness_variants() {
         let lib = MaterialLibrary::builtin();
-        // 誘電体：地の色（モデルの色は使わない）と粗さ
+        // 誘電体：地の色と粗さ
         let m = lib.find_variant("plastic_abs+color=#ff0000+rough=0.2").unwrap();
-        assert_eq!((m.base_color, m.base_color_from_model, m.specular_roughness), (Vec3::new(1.0, 0.0, 0.0), false, 0.2));
+        assert_eq!((m.base_color, m.specular_roughness), (Vec3::new(1.0, 0.0, 0.0), 0.2));
         // 透明な材質：透過の色
         let g = lib.find_variant("acrylic+color=#00ff00").unwrap();
         assert_eq!((g.transmission_color, g.base_color), (Vec3::new(0.0, 1.0, 0.0), Vec3::ONE));
@@ -440,9 +486,9 @@ mod tests {
             }
         }
         assert!(builtin_names().len() >= 40);
-        assert!(valid_material_name("my red ABS") && valid_material_name("赤い樹脂"));
-        for bad in ["", " x", "a+b", "a.b", "a\"b"] {
-            assert!(!valid_material_name(bad), "{bad}");
+        assert!(valid_material_label("my red ABS") && valid_material_label("赤い樹脂") && valid_material_label("a+b.c \"#1\""));
+        for bad in ["", " x", "x ", "a\nb"] {
+            assert!(!valid_material_label(bad), "{bad}");
         }
     }
 
@@ -453,18 +499,22 @@ mod tests {
         let mut lib = MaterialLibrary::builtin();
         let mut m = lib.find_variant("plastic_abs+color=#c03020").unwrap();
         m.category = Some(crate::material::Category::Plastic);
-        let file = save_user_material(&dir, "赤い ABS", Some(&m)).unwrap();
-        save_user_material(&dir, "other", Some(&lib.find("metal_nickel").unwrap().clone())).unwrap();
-        save_user_material(&dir, "赤い ABS", Some(&m)).unwrap(); // 置き換え
+        let id = new_user_material_id(&lib);
+        assert!(id.starts_with(USER_ID_PREFIX) && id != new_user_material_id(&lib));
+        let file = save_user_material(&dir, &id, Some((&m, "赤い ABS"))).unwrap();
+        save_user_material(&dir, "other", Some((&lib.find("metal_nickel").unwrap().clone(), "ニッケル"))).unwrap();
+        save_user_material(&dir, &id, Some((&m, "赤い ABS+つや"))).unwrap(); // 置き換え（表示名を変える）
         let loaded = MaterialLibrary::load(&dir);
-        let r = loaded.find("赤い ABS").unwrap();
+        let r = loaded.find(&id).unwrap();
         assert_eq!((r.base_color, r.specular_ior, r.category), (m.base_color, m.specular_ior, m.category));
+        assert_eq!(loaded.label(&id), Some("赤い ABS+つや"));
         assert_eq!(loaded.find("other").unwrap().conductor, lib.find("metal_nickel").unwrap().conductor);
+        assert_eq!(loaded.label("plastic"), None);
         save_user_material(&dir, "other", None).unwrap();
         assert!(MaterialLibrary::load(&dir).find("other").is_none());
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.starts_with("# krbr") && text.contains("specular_ior = 1.53
-"), "{text}");
+") && text.contains("label = \"赤い ABS+つや\""), "{text}");
         lib.insert("x", m.clone(), "test");
         assert_eq!(lib.find("x").unwrap().name, "x");
         lib.remove("x");
@@ -477,12 +527,11 @@ mod tests {
         let mut lib = MaterialLibrary::builtin();
         assert!(lib.find("metal_tin").unwrap().base_metalness == 1.0);
         let bump = lib.find("plastic").unwrap().bump_strength;
-        assert!(lib.find("plastic").unwrap().base_color_from_model);
-        assert!(!lib.find("epoxy_black").unwrap().base_color_from_model);
+        let color = lib.find("plastic").unwrap().base_color;
         lib.load_text("[material.plastic]\nspecular_roughness = 0.9\n[material.mine]\nbase_color = [1, 0, 0]\n", "test").unwrap();
         let p = lib.find("plastic").unwrap();
         assert_eq!(p.specular_roughness, 0.9);
-        assert!(p.base_color_from_model); // 書いた項目だけ上書き
+        assert_eq!(p.base_color, color); // 書いた項目だけ上書き
         assert_eq!(p.bump_strength, bump);
         assert_eq!(lib.source_of("mine"), "test");
         assert_eq!(lib.find("mine").unwrap().base_color.x, 1.0);

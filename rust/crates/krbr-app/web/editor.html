@@ -197,7 +197,10 @@ function item(m, it) {
       { label: m.menu.assign, enabled: m.menu.canAssign, run: () => set("assign_menu", it.name) },
       { label: m.menu.duplicate, run: () => set("duplicate", it.name) },
     ];
-    if (it.user) items.push({ label: m.menu.delete, run: () => set("delete.ask", it.name) });
+    if (it.user) {
+      items.push({ label: m.menu.rename, run: () => set("rename", it.name) });
+      items.push({ label: m.menu.delete, run: () => set("delete.ask", it.name) });
+    }
     showMenu(ev.clientX, ev.clientY, items);
   });
   return e;
@@ -311,6 +314,7 @@ function partView(m) {
   const a = p.adjust;
   if (a) {
     sec.append(el("div", "sub-title", a.title));
+    if (a.note) sec.append(el("div", "note-text muted", a.note));
     if (a.unknown) {
       sec.append(el("div", "note-text muted", a.unknown));
     } else {
@@ -537,6 +541,12 @@ function details(m) {
   dup.title = d.duplicate.tip;
   dup.addEventListener("click", () => set("duplicate", d.name));
   b.append(assign, dup);
+  if (d.rename) {
+    const ren = el("button", "btn", d.rename.label);
+    ren.title = d.rename.tip;
+    ren.addEventListener("click", () => set("rename", d.name));
+    b.append(ren);
+  }
   if (d.delete) {
     const del = el("button", "btn", d.delete);
     del.addEventListener("click", () => set("delete.ask", ""));
@@ -555,6 +565,19 @@ function details(m) {
   }
   if (d.notice) sec.append(el("div", "note-text accent", d.notice));
   if (d.error) sec.append(el("div", "note-text error", d.error));
+  if (d.override) {
+    const o = el("div", "override");
+    o.append(el("div", "note-text warn", d.override.text));
+    const b = el("div", "buttons");
+    for (const [k, v] of [["override.adopt", d.override.adopt], ["override.clear", d.override.clear]]) {
+      const btn = el("button", "btn small", v.label);
+      btn.title = v.tip;
+      btn.addEventListener("click", () => click(k));
+      b.append(btn);
+    }
+    o.append(b);
+    sec.append(o);
+  }
   if (d.edit) {
     const head = el("div", "edit-head");
     head.append(el("span", "sub-title", d.edit.title));

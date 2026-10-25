@@ -213,12 +213,9 @@ pub fn swatch_scene(m: &Material) -> Scene {
 /// 大きさの球の見え方にする（描く球は SWATCH_R の大きさなので、吸収の深さをその比で伸ばす）
 const SWATCH_REPRESENTS_MM: f32 = 4.0;
 
-/// 見本に描く材質：3D モデルの面の色を使う材質は、代表の色（swatch_color。無ければ明るめの灰色）で見せる
+/// 見本に描く材質（吸収・半透明の深さを見本の球の大きさに合わせたもの）
 pub fn swatch_material(m: &Material) -> Material {
     let mut m = m.clone();
-    if m.base_color_from_model {
-        m.base_color = m.swatch_color.unwrap_or(Vec3::splat(0.5));
-    }
     let scale = 2.0 * SWATCH_R / SWATCH_REPRESENTS_MM;
     m.transmission_depth *= scale;
     m.subsurface_radius *= scale;

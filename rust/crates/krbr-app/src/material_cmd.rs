@@ -260,7 +260,7 @@ pub fn cmd_material_list() -> anyhow::Result<()> {
             let Some(m) = lib.find(&n) else { continue };
             let optics = match m.conductor.and_then(krbr_scene::conductor::get) {
                 Some(c) => format!("measured: {}", c.source),
-                None if m.base_metalness > 0.5 => if m.base_color_from_model { "F0: color of the 3D model".to_string() } else { format!("F0 {:.2} {:.2} {:.2}", m.base_color.x, m.base_color.y, m.base_color.z) },
+                None if m.base_metalness > 0.5 => format!("F0 {:.2} {:.2} {:.2}", m.base_color.x, m.base_color.y, m.base_color.z),
                 None => format!("nd {:.3}{}", m.ior_at(587.6), if m.sellmeier.is_some() { " (Sellmeier)" } else { "" }),
             };
             println!("  {:<24} rough {:<5.2} {:<52} {}", n, m.specular_roughness, optics, lib.source_of(&n));

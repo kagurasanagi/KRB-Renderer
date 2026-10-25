@@ -410,6 +410,17 @@ input.search:focus {
   gap: 10px;
 }
 
+/* 部位の調整がパラメータの値より優先していることの知らせ */
+.override {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+}
+
 .params {
   display: flex;
   flex-direction: column;

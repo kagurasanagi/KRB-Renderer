@@ -145,15 +145,12 @@ fn param_json(lib: &MaterialLibrary, m: &Material, o: &Material) -> Value {
             base.push(prow("abbe", fl!("mated-abbe"), fl!("mated-abbe-tip"), modified, c));
         }
         if kind == Kind::Dielectric {
-            let mut c = vec![c_check("base.from_model", m.base_color_from_model, fl!("mated-from-model"), fl!("mated-from-model-tip"))];
-            if !m.base_color_from_model {
-                c.push(c_color("base.color", m.base_color));
-                let e = m.base_color.max_element();
-                if !(0.015..=0.9).contains(&e) {
-                    c.push(c_note("⚠".into(), "warn", fl!("mated-albedo-warning")));
-                }
+            let mut c = vec![c_color("base.color", m.base_color)];
+            let e = m.base_color.max_element();
+            if !(0.015..=0.9).contains(&e) {
+                c.push(c_note("⚠".into(), "warn", fl!("mated-albedo-warning")));
             }
-            base.push(prow("base", fl!("mated-base-color"), String::new(), (m.base_color_from_model, m.base_color) != (o.base_color_from_model, o.base_color), c));
+            base.push(prow("base", fl!("mated-base-color"), String::new(), m.base_color != o.base_color, c));
         } else {
             base.push(prow("trans.color", fl!("mated-trans-color"), String::new(), m.transmission_color != o.transmission_color, vec![c_color("trans.color", m.transmission_color)]));
             base.push(prow("trans.depth", fl!("mated-trans-depth"), fl!("mated-trans-depth-tip"), m.transmission_depth != o.transmission_depth, vec![c_number("trans.depth", m.transmission_depth, 0.0, 1000.0, 0.05, 2, " mm")]));
@@ -260,7 +257,6 @@ fn apply_param(lib: &MaterialLibrary, m: &mut Material, id: &str, v: &Value) {
         }
         "abbe.on" => m.transmission_dispersion_scale = if b { 1.0 } else { 0.0 },
         "abbe" => set(&mut m.transmission_dispersion_abbe_number, 10.0, 100.0),
-        "base.from_model" => m.base_color_from_model = b,
         "base.color" => m.base_color = parse_linear(v).unwrap_or(m.base_color),
         "trans.color" => m.transmission_color = parse_linear(v).unwrap_or(m.transmission_color),
         "trans.depth" => set(&mut m.transmission_depth, 0.0, 1000.0),
@@ -303,6 +299,29 @@ fn apply_param(lib: &MaterialLibrary, m: &mut Material, id: &str, v: &Value) {
     }
 }
 
+/// 部位の調整が優先している行（色・粗さ）に印を付ける（param_json の行の id で探す）
+fn mark_overridden(params: &mut Value, m: &Material, v: Variant) {
+    let mut rows: Vec<&str> = Vec::new();
+    if v.color.is_some() {
+        rows.extend(match Kind::of(m) {
+            Kind::Dielectric => &["base"][..],
+            Kind::Clear => &["trans.color"][..],
+            Kind::Metal => &["metal", "f0"][..],
+        });
+    }
+    if v.roughness.is_some() {
+        rows.push("rough");
+    }
+    let Some(sections) = params.get_mut("sections").and_then(|s| s.as_array_mut()) else { return };
+    for row in sections.iter_mut().filter_map(|s| s.get_mut("rows").and_then(|r| r.as_array_mut())).flatten() {
+        if row.get("id").and_then(|i| i.as_str()).is_some_and(|id| rows.contains(&id)) {
+            if let Some(c) = row.get_mut("controls").and_then(|c| c.as_array_mut()) {
+                c.push(c_note(fl!("mated-overridden"), "warn", fl!("mated-overridden-tip")));
+            }
+        }
+    }
+}
+
 /// パラメータの行を元の値に戻す（行の id は param_json のもの）
 fn reset_row(m: &mut Material, o: &Material, row: &str) {
     match row {
@@ -310,7 +329,7 @@ fn reset_row(m: &mut Material, o: &Material, row: &str) {
         "f0" => m.base_color = o.base_color,
         "f82" => m.specular_color = o.specular_color,
         "substance" | "ior" | "abbe" => Optics::of(o).apply(m),
-        "base" => (m.base_color_from_model, m.base_color) = (o.base_color_from_model, o.base_color),
+        "base" => m.base_color = o.base_color,
         "trans.color" => m.transmission_color = o.transmission_color,
         "trans.depth" => m.transmission_depth = o.transmission_depth,
         "rough" => m.specular_roughness = o.specular_roughness,
@@ -381,19 +400,16 @@ impl MaterialEditor {
 
     fn web_item(&mut self, lib: &MaterialLibrary, name: &str, current: bool) -> Value {
         let user = is_user_material(name);
-        let mut tip = format!("{}\n{}", material_label(name), name);
+        let mut tip = format!("{}\n{}", material_label(lib, name), name);
         if let Some(m) = lib.find(name) {
             tip += &format!("\n{}", material_details(m));
-            if m.base_color_from_model && m.swatch_color.is_some() {
-                tip += &format!("\n{}", fl!("mated-swatch-color-note"));
-            }
         }
         if user {
             tip += &format!("\n{}", fl!("mated-user-material"));
         }
         tip += &format!("\n{}", fl!("mated-tile-tip"));
         json!({
-            "name": name, "label": material_label(name), "user": user, "current": current,
+            "name": name, "label": material_label(lib, name), "user": user, "current": current,
             "selected": self.browsing.as_deref() == Some(name),
             "thumb": self.thumb(name),
             "brief": self.material_for(lib, name).map(|m| material_brief(&m)).unwrap_or_default(),
@@ -408,7 +424,7 @@ impl MaterialEditor {
         let current: HashSet<String> = part.map(|p| p.rows.iter().filter(|r| self.target.as_ref().is_none_or(|t| *t == r.key)).map(|r| Variant::parse(&self.row_material(&p.reference, r)).0.to_string()).collect()).unwrap_or_default();
         let mut cats = Vec::new();
         for (cat, names) in grouped_names(lib) {
-            let shown: Vec<&String> = names.iter().filter(|n| query.is_empty() || n.to_lowercase().contains(&query) || material_label(n).to_lowercase().contains(&query)).collect();
+            let shown: Vec<&String> = names.iter().filter(|n| query.is_empty() || n.to_lowercase().contains(&query) || material_label(lib, n).to_lowercase().contains(&query)).collect();
             if shown.is_empty() {
                 continue;
             }
@@ -431,7 +447,7 @@ impl MaterialEditor {
             "categories": cats,
             "part": part_v, "noPart": fl!("mated-no-part"),
             "details": details,
-            "menu": { "assign": self.assign_label(part), "canAssign": part.is_some_and(|p| !p.rows.is_empty()), "duplicate": fl!("mated-duplicate"), "delete": fl!("mated-delete") },
+            "menu": { "assign": self.assign_label(part), "canAssign": part.is_some_and(|p| !p.rows.is_empty()), "duplicate": fl!("mated-duplicate"), "rename": fl!("mated-rename"), "delete": fl!("mated-delete") },
         })
         .to_string()
     }
@@ -449,7 +465,7 @@ impl MaterialEditor {
             .map(|(r, material)| {
                 let shown = if r.key.is_empty() { fl!("part-whole") } else { r.key.strip_prefix("kicad:").unwrap_or(&r.key).to_string() };
                 json!({
-                    "key": r.key, "shown": shown, "material": material, "label": material_label(material),
+                    "key": r.key, "shown": shown, "material": material, "label": material_label(lib, material),
                     "thumb": self.thumb(material), "on": self.target.as_ref() == Some(&r.key) || !multi,
                 })
             })
@@ -463,6 +479,7 @@ impl MaterialEditor {
             let start = adjust_start_color(&base_m);
             json!({
                 "title": fl!("mated-adjust"),
+                "note": fl!("mated-adjust-note"),
                 "color": { "on": v.color.is_some(), "value": srgb_hex(v.color.unwrap_or(srgb8(start))), "label": fl!("mated-color"),
                            "tip": if measured { fl!("mated-color-measured-tip") } else { fl!("mated-color-tip") },
                            "measured": if measured && v.color.is_some() { fl!("mated-color-measured") } else { String::new() } },
@@ -484,17 +501,12 @@ impl MaterialEditor {
     /// 右下：選んだ材質の説明・割り当て・複製・削除と、パラメータ（名前を決めているときは、その欄）
     fn web_details(&mut self, lib: &MaterialLibrary, part: Option<&PartInfo>) -> Value {
         if let Some(n) = &self.naming {
-            let name = n.name.trim();
-            let error = if !valid_material_name(name) {
-                Some(fl!("mated-name-invalid"))
-            } else if lib.find(name).is_some() {
-                Some(fl!("mated-name-exists"))
-            } else {
-                None
-            };
+            let error = (!valid_material_label(n.name.trim())).then(|| fl!("mated-name-invalid"));
+            let renaming = n.rename.is_some();
             return json!({ "naming": {
-                "title": fl!("mated-new-title"), "nameLabel": fl!("mated-new-name"), "name": n.name, "error": error,
-                "create": fl!("mated-create"), "cancel": fl!("mated-cancel"),
+                "title": if renaming { fl!("mated-rename-title") } else { fl!("mated-new-title") },
+                "nameLabel": fl!("mated-new-name"), "name": n.name, "error": error,
+                "create": if renaming { fl!("mated-rename-ok") } else { fl!("mated-create") }, "cancel": fl!("mated-cancel"),
             } });
         }
         let Some(name) = self.browsing.clone() else { return json!({ "hint": fl!("mated-choose-hint") }) };
@@ -504,27 +516,43 @@ impl MaterialEditor {
         };
         let user = is_user_material(&name);
         let can_assign = part.is_some_and(|p| !p.rows.is_empty());
+        let over = self.target_override(part).map(|(_, _, v)| v);
+        let mark = |mut params: Value, shown: &Material| {
+            if let Some(v) = over {
+                mark_overridden(&mut params, shown, v);
+            }
+            params
+        };
         let edit = if user {
             self.user_edit.as_ref().filter(|u| u.name == name).map(|u| {
                 json!({
                     "title": fl!("mated-edit-title"),
                     "undo": { "label": fl!("mated-undo"), "enabled": !u.undo.is_empty(), "tip": "Ctrl+Z" },
                     "redo": { "label": fl!("mated-redo"), "enabled": !u.redo.is_empty(), "tip": "Ctrl+Shift+Z / Ctrl+Y" },
-                    "params": param_json(lib, &u.material, &u.origin),
+                    "params": mark(param_json(lib, &u.material, &u.origin), &u.material),
                 })
             })
         } else {
-            Some(json!({ "title": fl!("mated-edit-title-builtin"), "note": fl!("mated-builtin-autocopy"), "params": param_json(lib, &m, &m) }))
+            Some(json!({ "title": fl!("mated-edit-title-builtin"), "note": fl!("mated-builtin-autocopy"), "params": mark(param_json(lib, &m, &m), &m) }))
         };
+        let override_v = self.override_text(lib, part).map(|text| {
+            json!({
+                "text": text,
+                "adopt": { "label": fl!("mated-override-adopt"), "tip": fl!("mated-override-adopt-tip") },
+                "clear": { "label": fl!("mated-override-clear"), "tip": fl!("mated-override-clear-tip") },
+            })
+        });
         json!({
-            "name": name, "label": material_label(&name), "sub": format!("{name}  ·  {}", category_label(m.category())),
+            "name": name, "label": material_label(lib, &name), "sub": format!("{name}  ·  {}", category_label(m.category())),
             "desc": material_details(&m), "user": user, "userNote": fl!("mated-user-material"),
             "thumb": self.thumb(&name),
             "assign": { "label": self.assign_label(part), "enabled": can_assign, "tip": fl!("mated-assign-tip") },
             "duplicate": { "label": fl!("mated-duplicate"), "tip": fl!("mated-duplicate-tip") },
+            "rename": user.then(|| json!({ "label": fl!("mated-rename"), "tip": fl!("mated-rename-tip") })),
             "delete": (user && !self.confirm_delete).then(|| fl!("mated-delete")),
             "confirm": (user && self.confirm_delete).then(|| json!({ "text": fl!("mated-delete-confirm"), "delete": fl!("mated-delete"), "cancel": fl!("mated-cancel") })),
             "notice": self.notice, "error": self.error,
+            "override": override_v,
             "edit": edit,
         })
     }
@@ -595,6 +623,13 @@ impl MaterialEditor {
                 self.select_browsing(lib, &name, &mut actions);
                 self.start_duplicate(lib, &name);
             }
+            "rename" => {
+                let name = if s.is_empty() { self.browsing.clone().unwrap_or_default() } else { s };
+                if is_user_material(&name) {
+                    self.select_browsing(lib, &name, &mut actions);
+                    self.start_rename(lib, &name);
+                }
+            }
             "delete.ask" => {
                 if !s.is_empty() {
                     self.select_browsing(lib, &s, &mut actions);
@@ -647,15 +682,16 @@ impl MaterialEditor {
                     }
                 }
             }
+            "override.adopt" => self.adopt_override(lib, part, &mut actions),
+            "override.clear" => self.clear_override(lib, part, &mut actions),
             "naming.name" => {
                 if let Some(n) = &mut self.naming {
                     n.name = s;
                 }
             }
             "naming.create" => {
-                let ok = self.naming.as_ref().is_some_and(|n| valid_material_name(n.name.trim()) && lib.find(n.name.trim()).is_none());
-                if ok {
-                    self.finish_naming(part, &mut actions);
+                if self.naming.as_ref().is_some_and(|n| valid_material_label(n.name.trim())) {
+                    self.finish_naming(lib, part, &mut actions);
                 }
             }
             "naming.cancel" => self.naming = None,
@@ -696,11 +732,9 @@ impl MaterialEditor {
     }
 }
 
-/// 部位の色の調整の初めの色：今の色（モデルの色を使う材質なら灰色、透明な材質なら透過の色）
-fn adjust_start_color(m: &Material) -> Vec3 {
-    if m.base_color_from_model {
-        Vec3::splat(0.5)
-    } else if m.transmission_weight > 0.0 && m.base_metalness < 0.5 {
+/// 部位の色の調整の初めの色：材質の今の色（透明な材質なら透過の色）
+pub(super) fn adjust_start_color(m: &Material) -> Vec3 {
+    if m.transmission_weight > 0.0 && m.base_metalness < 0.5 {
         m.transmission_color
     } else {
         m.base_color

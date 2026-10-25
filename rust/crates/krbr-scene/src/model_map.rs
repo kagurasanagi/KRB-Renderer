@@ -14,7 +14,7 @@ use krbr_model::ModelPart;
 use toml::Value;
 
 use crate::material::Material;
-use crate::material_library::{variant_error, MaterialLibrary};
+use crate::material_library::{variant_error, with_variant, MaterialLibrary};
 
 const BUILTIN_RULES: &str = r#"
 [[rule]]   # アルミ電解コンデンサ（KiCad 標準のモデル）：缶と上面（金属色の部位）はアルミ
@@ -25,6 +25,7 @@ material = "aluminum"
 model = "CP_Radial_D*"
 part = "kicad:light_brown_body"
 material = "plastic"
+model_color = true
 [[rule]]   # 面実装のアルミ電解コンデンサの缶
 model = "CP_Elec_*"
 part = "kicad:metal_grey_pins"
@@ -32,6 +33,7 @@ material = "aluminum"
 [[rule]]
 part = "kicad:metal_grey_pins"
 material = "metal_tin"
+model_color = true
 [[rule]]
 part = "kicad:gold_pins"
 material = "metal_gold"
@@ -41,11 +43,13 @@ material = "epoxy_black"
 [[rule]]
 part = "kicad:light_brown_body"
 material = "ceramic"
+model_color = true
 [[rule]]   # わずかに黄みのある灰色（端子の金属）
 sat_max = 0.12
 val_min = 0.55
 val_max = 0.88
 material = "metal_tin"
+model_color = true
 [[rule]]   # 金色
 hue_min = 30.0
 hue_max = 55.0
@@ -56,8 +60,10 @@ material = "metal_gold"
 sat_max = 0.05
 val_min = 0.88
 material = "glossy_plastic"
+model_color = true
 [[rule]]
 material = "plastic"
+model_color = true
 "#;
 
 /// 材質の割り当て：部位ごとの指定（parts）と、それ以外の部位すべて（material）
@@ -115,6 +121,8 @@ pub struct MaterialRule {
     pub val_min: Option<f32>,
     pub val_max: Option<f32>,
     pub material: String,
+    /// 3D モデルの面の色を、部位の色の調整（材質名の +color=）にする
+    pub model_color: bool,
 }
 
 fn rgb_to_hsv(c: Vec3) -> (f32, f32, f32) {
@@ -306,7 +314,7 @@ fn write_models(models: &[ModelEntry]) -> Value {
     )
 }
 
-const RULE_KEYS: &[&str] = &["part", "model", "hue_min", "hue_max", "sat_min", "sat_max", "val_min", "val_max", "material"];
+const RULE_KEYS: &[&str] = &["part", "model", "hue_min", "hue_max", "sat_min", "sat_max", "val_min", "val_max", "material", "model_color"];
 
 fn read_rules(root: &toml::Table, problems: &mut Vec<String>) -> Vec<MaterialRule> {
     let mut out = Vec::new();
@@ -330,7 +338,16 @@ fn read_rules(root: &toml::Table, problems: &mut Vec<String>) -> Vec<MaterialRul
                     None => None,
                 };
                 let (hue_min, hue_max, sat_min, sat_max, val_min, val_max) = (opt("hue_min"), opt("hue_max"), opt("sat_min"), opt("sat_max"), opt("val_min"), opt("val_max"));
+                let model_color = match t.get("model_color") {
+                    Some(Value::Boolean(b)) => *b,
+                    Some(_) => {
+                        problems.push(format!("{at}: 'model_color' must be true/false; ignored"));
+                        false
+                    }
+                    None => false,
+                };
                 let r = MaterialRule {
+                    model_color,
                     part: str_of(t, "part", &at, problems),
                     model: str_of(t, "model", &at, problems),
                     material: str_of(t, "material", &at, problems),
@@ -372,6 +389,9 @@ fn write_rules(rules: &[MaterialRule]) -> Value {
                     }
                 }
                 t.insert("material".into(), Value::String(r.material.clone()));
+                if r.model_color {
+                    t.insert("model_color".into(), Value::Boolean(true));
+                }
                 Value::Table(t)
             })
             .collect(),
@@ -598,6 +618,16 @@ pub struct ResolvedMaterial {
     pub stage: MaterialStage,
 }
 
+/// 規則の材質名。model_color なら、3D モデルの面の色を部位の色の調整（+color=）にする（材質名に色の指定があればそちら）
+fn rule_material(rule: &MaterialRule, part: Option<&ModelPart>) -> String {
+    match part.filter(|p| rule.model_color && p.has_color) {
+        Some(p) => with_variant(&rule.material, |v| {
+            v.color.get_or_insert(p.srgb.to_array().map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8));
+        }),
+        None => rule.material.clone(),
+    }
+}
+
 pub struct MaterialResolver<'a> {
     lib: &'a MaterialLibrary,
     project: &'a ProjectOverrides,
@@ -616,8 +646,8 @@ impl<'a> MaterialResolver<'a> {
         self.lib
     }
 
-    /// 名前が材質ライブラリにあれば材質を作る（base_color をモデルの色にする処理も行う）。
-    /// 無ければ警告して None（次の段階へ）。"+emit=" の書き方の誤りは、ライブラリに無いのとは別に知らせる
+    /// 名前が材質ライブラリにあれば材質を作る。無ければ警告して None（次の段階へ）。
+    /// "+emit=" の書き方の誤りは、ライブラリに無いのとは別に知らせる
     fn make(&self, name: &str, stage: MaterialStage, q: &MaterialQuery) -> Option<ResolvedMaterial> {
         if name.is_empty() {
             return None;
@@ -632,13 +662,7 @@ impl<'a> MaterialResolver<'a> {
             }
             return None;
         };
-        let from_model = m.base_color_from_model;
         let mut r = ResolvedMaterial { material: m, name: name.to_string(), source, stage };
-        if let Some(p) = q.part {
-            if from_model && p.has_color {
-                r.material.base_color = p.linear_color();
-            }
-        }
         r.material.name = name.to_string();
         Some(r)
     }
@@ -671,14 +695,14 @@ impl<'a> MaterialResolver<'a> {
         // 4. 色・名前の規則（全体 → 組み込み）
         for (i, rule) in self.global.rules.iter().enumerate() {
             if rule.matches(q.model_file, q.part) {
-                if let Some(r) = self.make(&rule.material, MaterialStage::GlobalRule(i + 1), q) {
+                if let Some(r) = self.make(&rule_material(rule, q.part), MaterialStage::GlobalRule(i + 1), q) {
                     return r;
                 }
             }
         }
         for (i, rule) in builtin_rules().iter().enumerate() {
             if rule.matches(q.model_file, q.part) {
-                if let Some(r) = self.make(&rule.material, MaterialStage::BuiltinRule(i + 1), q) {
+                if let Some(r) = self.make(&rule_material(rule, q.part), MaterialStage::BuiltinRule(i + 1), q) {
                     return r;
                 }
             }
@@ -720,7 +744,7 @@ mod tests {
             MaterialQuery { reference: "U1", model_spec: "${X}/a.step", model_hash: "h", model_file: "a.step", part: Some(part) }
         }
         // 組み込みの規則：KiCad の色名
-        assert_eq!(r.resolve(&q(&pins)).name, "metal_tin");
+        assert_eq!(r.resolve(&q(&pins)).name, "metal_tin+color=#d2d1c7"); // 錫の規則は model_color
         assert_eq!(r.resolve(&q(&body)).name, "epoxy_black");
         // 部品番号の上書きが勝つ（部位ごとの指定）
         let mut a = PartAssignment { material: "plastic".into(), parts: BTreeMap::new() };
@@ -731,8 +755,14 @@ mod tests {
         assert_eq!(res.name, "metal_gold");
         assert_eq!(res.source, "ref U1 (project)");
         assert_eq!(r.resolve(&q(&body)).name, "plastic");
-        // plastic は base_color_from_model：モデルの色が入る
-        assert!((r.resolve(&q(&body)).material.base_color.x - 0.0189).abs() < 0.002);
+        // 上書きで決めた材質は、その材質の色（モデルの色は使わない）
+        assert_eq!(r.resolve(&q(&body)).material.base_color, lib.find("plastic").unwrap().base_color);
+        // 規則の model_color：モデルの色が部位の色の調整になる
+        let grey = ModelPart { name: String::new(), srgb: Vec3::new(0.5, 0.25, 1.0), alpha: 1.0, has_color: true };
+        let none = ProjectOverrides::default();
+        let res = MaterialResolver::new(&lib, &none, &global).resolve(&q(&grey));
+        assert_eq!(res.name, "plastic+color=#8040ff");
+        assert!((res.material.base_color.x - 0.2158).abs() < 0.001);
     }
 
     // ref > プロジェクトのモデル > 全体のモデル > 規則 > 既定 の順に、段階を 1 つずつ足して確かめる
@@ -754,7 +784,7 @@ mod tests {
         };
 
         // 組み込みの規則（kicad:metal_grey_pins）。先頭の 3 つは電解コンデンサのモデル用
-        assert_eq!(resolve(&project, &global), ("metal_tin".into(), "rule 4 (builtin)".into()));
+        assert_eq!(resolve(&project, &global), ("metal_tin+color=#d2d1c7".into(), "rule 4 (builtin)".into()));
         global.rules.push(MaterialRule { part: "kicad:*".into(), material: "d".into(), ..Default::default() });
         assert_eq!(resolve(&project, &global).0, "d");
         global.upsert("${KICAD10_3DMODEL_DIR}/X.step", "").assign.material = "c".into();

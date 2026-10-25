@@ -462,9 +462,6 @@ fn make_substrate_material(o: &SceneOptions, lib: Option<&crate::material_librar
     if !o.substrate.is_empty() {
         match lib.and_then(|l| l.find_variant(&o.substrate)) {
             Some(mut m) => {
-                if m.base_color_from_model {
-                    m.base_color = srgb_to_linear(o.fr4_color); // モデルの色を使う材質なら、基材の色
-                }
                 m.name = format!("substrate:{}", o.substrate);
                 return m;
             }

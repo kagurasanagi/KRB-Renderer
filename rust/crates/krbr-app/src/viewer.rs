@@ -1810,7 +1810,7 @@ impl App {
         {
             // 基材：FR4 か、材質ライブラリの透明な材質・セラミック・宝石
             let current = self.prep.cfg.scene.substrate.clone();
-            let label = if current.is_empty() { fl!("substrate-fr4") } else { material_editor::material_label(&current) };
+            let label = if current.is_empty() { fl!("substrate-fr4") } else { material_editor::material_label(&self.library, &current) };
             let mut chosen: Option<String> = None;
             ui.horizontal(|ui| {
                 ui.label(fl!("substrate"));
@@ -1824,7 +1824,7 @@ impl App {
                         }
                         ui.weak(material_editor::category_label(cat));
                         for n in names {
-                            if ui.selectable_label(n == current, material_editor::material_label(&n)).on_hover_text(n.as_str()).clicked() {
+                            if ui.selectable_label(n == current, material_editor::material_label(&self.library, &n)).on_hover_text(n.as_str()).clicked() {
                                 chosen = Some(n.clone());
                             }
                         }
@@ -2119,16 +2119,21 @@ impl App {
                     self.emit_edit = None;
                     self.assign_material(&part, &material, false);
                 }
-                EditorAction::SaveUser { name, material } => self.save_user_material(&name, Some(*material)),
+                EditorAction::SaveUser { name, material, label } => self.save_user_material(&name, Some((*material, label))),
                 EditorAction::DeleteUser(name) => self.save_user_material(&name, None),
             }
         }
     }
 
-    /// 自分の材質を全体設定の materials/user.toml に書き（None なら消し）、材質ライブラリとシーンにも反映する
-    fn save_user_material(&mut self, name: &str, m: Option<krbr_scene::Material>) {
+    /// 自分の材質（name は ID、label は表示名）を全体設定の materials/user.toml に書き（None なら消し）、
+    /// 材質ライブラリとシーンにも反映する
+    fn save_user_material(&mut self, name: &str, m: Option<(krbr_scene::Material, String)>) {
         let dir = krbr_core::platform::config_dir();
-        let file = match save_user_material(&dir, name, m.as_ref()) {
+        let shown = match &m {
+            Some((_, label)) => label.clone(),
+            None => material_editor::material_label(&self.library, name),
+        };
+        let file = match save_user_material(&dir, name, m.as_ref().map(|(m, l)| (m, l.as_str()))) {
             Ok(f) => f,
             Err(e) => {
                 warn!("material {name}: {e}");
@@ -2138,21 +2143,25 @@ impl App {
         };
         let source = file.to_string_lossy().into_owned();
         match &m {
-            Some(m) => {
+            Some((m, label)) => {
                 self.library.insert(name, m.clone(), &source);
-                info!("material {name}: saved to {source}");
-                self.last_update = fl!("mated-saved", name = name, file = source.as_str());
+                self.library.set_label(name, label);
+                info!("material {name} ({label}): saved to {source}");
+                self.last_update = fl!("mated-saved", name = shown.as_str(), file = source.as_str());
             }
             None => {
                 self.library.remove(name);
                 info!("material {name}: removed from {source}");
-                self.last_update = fl!("mated-deleted", name = name);
+                self.last_update = fl!("mated-deleted", name = shown.as_str());
             }
         }
         // 組み立ての状態のライブラリも直す（読み直し中なら、終わってからファイルを読み直す）
         match self.prep.source.as_mut() {
             Some(src) => match &m {
-                Some(m) => src.materials.library.insert(name, m.clone(), &source),
+                Some((m, label)) => {
+                    src.materials.library.insert(name, m.clone(), &source);
+                    src.materials.library.set_label(name, label);
+                }
                 None => src.materials.library.remove(name),
             },
             None => self.materials_dirty_files = true,
@@ -2173,11 +2182,8 @@ impl App {
                 continue;
             }
             let Some(mut n) = self.library.find_variant(assigned) else { return false };
-            if n.base_color_from_model != m.base_color_from_model || n.emission_luminance != m.emission_luminance || n.emission_color != m.emission_color {
+            if n.emission_luminance != m.emission_luminance || n.emission_color != m.emission_color {
                 return false;
-            }
-            if n.base_color_from_model {
-                n.base_color = m.base_color; // 3D モデルの面の色
             }
             n.name = m.name.clone();
             *m = n;
@@ -2293,7 +2299,7 @@ impl App {
                 for (cat, names) in &groups {
                     ui.weak(material_editor::category_label(*cat));
                     for n in names {
-                        if ui.selectable_label(n == current, material_editor::material_label(n)).on_hover_text(n.as_str()).clicked() {
+                        if ui.selectable_label(n == current, material_editor::material_label(&self.library, n)).on_hover_text(n.as_str()).clicked() {
                             chosen = Some(n.clone());
                         }
                     }
@@ -2319,7 +2325,7 @@ impl App {
                 let shown = if key.is_empty() { fl!("part-whole") } else { key.strip_prefix("kicad:").unwrap_or(&key).to_string() };
                 ui.label(shown).on_hover_text(fl!("part-source-tip", keys = r.part_keys.as_str(), source = r.source.as_str()));
                 // 材質を選び直しても、模様のあり・なしと発光は保つ
-                if let Some(m) = combo(ui, format!("part{i}"), base, material_editor::material_label(base)) {
+                if let Some(m) = combo(ui, format!("part{i}"), base, material_editor::material_label(&self.library, base)) {
                     // 色・粗さの調整は前の材質に合わせたものなので外す
                     actions.push((key.clone(), with_emission(&with_smooth(&m, smooth), emission), false));
                 }

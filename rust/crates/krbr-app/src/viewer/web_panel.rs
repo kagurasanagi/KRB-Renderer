@@ -121,7 +121,7 @@ impl App {
     fn material_groups(&self) -> Vec<Value> {
         material_editor::grouped_names(&self.library)
             .into_iter()
-            .map(|(cat, names)| json!({ "label": material_editor::category_label(cat), "options": names.iter().map(|n| json!({ "v": n, "label": material_editor::material_label(n) })).collect::<Vec<_>>() }))
+            .map(|(cat, names)| json!({ "label": material_editor::category_label(cat), "options": names.iter().map(|n| json!({ "v": n, "label": material_editor::material_label(&self.library, n) })).collect::<Vec<_>>() }))
             .collect()
     }
 
@@ -330,7 +330,7 @@ impl App {
         let mut sub_groups = vec![(String::new(), vec![(String::new(), fl!("substrate-fr4"), String::new())])];
         for (cat, names) in material_editor::grouped_names(&self.library) {
             if matches!(cat, krbr_scene::Category::Glass | krbr_scene::Category::Gem | krbr_scene::Category::Ceramic) {
-                sub_groups.push((material_editor::category_label(cat), names.iter().map(|n| (n.clone(), material_editor::material_label(n), n.clone())).collect()));
+                sub_groups.push((material_editor::category_label(cat), names.iter().map(|n| (n.clone(), material_editor::material_label(&self.library, n), n.clone())).collect()));
             }
         }
         let mut surface = vec![

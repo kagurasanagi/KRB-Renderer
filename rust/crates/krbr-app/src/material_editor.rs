@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use glam::Vec3;
 use krbr_render::Context;
-use krbr_scene::material_library::{builtin_names, builtin_order, valid_material_name, Variant};
+use krbr_scene::material_library::{builtin_names, builtin_order, new_user_material_id, valid_material_label, Variant};
 use krbr_scene::{conductor, linear_to_srgb, srgb_to_linear, Category, Material, MaterialLibrary, Scene};
 
 use crate::fl;
@@ -37,10 +37,13 @@ const UNDO_LIMIT: usize = 100;
 
 // ---------------------------------------------------------------- 表示名
 
-/// 材質の表示名（組み込みの材質は訳、自分の材質は名前のまま）。変種の指定は含めない
-pub fn material_label(name: &str) -> String {
+/// 材質の表示名（[krbr] label があればそれ、組み込みの材質は訳、それ以外は ID）。変種の指定は含めない
+pub fn material_label(lib: &MaterialLibrary, name: &str) -> String {
     let (base, _) = Variant::parse(name);
-    i18n::get(&format!("matname-{base}")).unwrap_or_else(|| base.to_string())
+    match lib.label(base) {
+        Some(l) => l.to_string(),
+        None => i18n::get(&format!("matname-{base}")).unwrap_or_else(|| base.to_string()),
+    }
 }
 
 pub fn category_label(c: Category) -> String {
@@ -140,8 +143,8 @@ pub struct PartInfo {
 pub enum Action {
     /// 部位（空なら全部位）に材質を書き込む
     Assign { part: String, material: String },
-    /// 自分の材質を書く（同じ名前があれば置き換え）
-    SaveUser { name: String, material: Box<Material> },
+    /// 自分の材質を書く（name は ID。同じ ID があれば置き換え）。label は表示名
+    SaveUser { name: String, material: Box<Material>, label: String },
     DeleteUser(String),
 }
 
@@ -158,7 +161,10 @@ struct Adjust {
 
 /// 自分の材質の編集中の値（止まってから書き込む）
 struct UserEdit {
+    /// 材質の ID
     name: String,
+    /// 表示名（名前を変えたら、材質と一緒に書き込む）
+    label: String,
     material: Material,
     /// 編集を始めたときの値（項目を右クリックして戻す先。組み込みの材質から作ったコピーなら、その組み込みの材質）
     origin: Material,
@@ -171,8 +177,8 @@ struct UserEdit {
 }
 
 impl UserEdit {
-    fn new(name: &str, material: Material, origin: Material) -> Self {
-        Self { name: name.to_string(), material, origin, changed_at: None, undo: Vec::new(), redo: Vec::new(), in_burst: false }
+    fn new(name: &str, label: &str, material: Material, origin: Material) -> Self {
+        Self { name: name.to_string(), label: label.to_string(), material, origin, changed_at: None, undo: Vec::new(), redo: Vec::new(), in_burst: false }
     }
 
     /// 値が変わった（before は変わる前の値）
@@ -208,12 +214,13 @@ impl UserEdit {
 /// ドラッグ中の材質（一覧の見本を、部位の行や部品のプレビューへ落として割り当てる）
 struct MaterialDrag(String);
 
-/// 新しい自分の材質の名前を決めているところ
+/// 新しい自分の材質の名前（表示名）を決めているところ。rename なら、その自分の材質（ID）の名前を変える
 struct Naming {
     name: String,
     material: Material,
     /// 作ったら割り当てる部位（部位の調整から作ったとき）と、残す変種（模様なし・発光）
     assign_to: Option<(String, Variant)>,
+    rename: Option<String>,
 }
 
 struct PartView {
@@ -340,7 +347,7 @@ impl MaterialEditor {
             });
         });
         self.open = open;
-        self.drag_ghost(ctx);
+        self.drag_ghost(ctx, lib);
         self.flush(part, &mut actions, false);
         actions
     }
@@ -363,7 +370,7 @@ impl MaterialEditor {
     }
 
     /// ドラッグ中の材質を、ポインタの横に見本と名前で描く
-    fn drag_ghost(&self, ctx: &egui::Context) {
+    fn drag_ghost(&self, ctx: &egui::Context, lib: &MaterialLibrary) {
         let (Some(drag), Some(pos)) = (egui::DragAndDrop::payload::<MaterialDrag>(ctx), ctx.pointer_interact_pos()) else { return };
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("mated_drag")));
         let rect = egui::Rect::from_min_size(pos + egui::vec2(14.0, 6.0), egui::vec2(40.0, 40.0));
@@ -375,7 +382,7 @@ impl MaterialEditor {
                 painter.rect_filled(rect, 4.0, egui::Color32::from_gray(60));
             }
         }
-        let galley = painter.layout_no_wrap(material_label(&drag.0), egui::FontId::proportional(13.0), egui::Color32::WHITE);
+        let galley = painter.layout_no_wrap(material_label(lib, &drag.0), egui::FontId::proportional(13.0), egui::Color32::WHITE);
         let at = rect.right_center() + egui::vec2(6.0, -galley.size().y * 0.5);
         painter.rect_filled(egui::Rect::from_min_size(at, galley.size()).expand(3.0), 3.0, egui::Color32::from_black_alpha(200));
         painter.galley(at, galley, egui::Color32::WHITE);
@@ -435,7 +442,7 @@ impl MaterialEditor {
         let current: HashSet<String> = part.map(|p| p.rows.iter().filter(|r| self.target.as_ref().is_none_or(|t| *t == r.key)).map(|r| Variant::parse(&self.row_material(&p.reference, r)).0.to_string()).collect()).unwrap_or_default();
         egui::ScrollArea::vertical().id_salt("mated_left").auto_shrink([false, false]).show(ui, |ui| {
             for (cat, names) in grouped_names(lib) {
-                let shown: Vec<&String> = names.iter().filter(|n| query.is_empty() || n.to_lowercase().contains(&query) || material_label(n).to_lowercase().contains(&query)).collect();
+                let shown: Vec<&String> = names.iter().filter(|n| query.is_empty() || n.to_lowercase().contains(&query) || material_label(lib, n).to_lowercase().contains(&query)).collect();
                 if shown.is_empty() {
                     continue;
                 }
@@ -480,7 +487,7 @@ impl MaterialEditor {
             .allocate_ui_with_layout(egui::vec2(W, W + 30.0), egui::Layout::top_down(egui::Align::Center), |ui| {
                 ui.set_width(W);
                 let r = self.swatch(ui, name, W - 8.0, egui::Sense::click_and_drag());
-                let mut text = egui::RichText::new(material_label(name)).small();
+                let mut text = egui::RichText::new(material_label(lib, name)).small();
                 if current {
                     text = text.strong().color(egui::Color32::from_rgb(255, 170, 40));
                 }
@@ -513,7 +520,7 @@ impl MaterialEditor {
             }
             let sw = egui::Rect::from_min_size(rect.min + egui::vec2(2.0, 1.0), egui::vec2(H - 2.0, H - 2.0));
             self.paint_swatch(ui, name, sw);
-            let mut label = material_label(name);
+            let mut label = material_label(lib, name);
             if is_user_material(name) {
                 label = format!("★ {label}");
             }
@@ -530,12 +537,9 @@ impl MaterialEditor {
     /// 見本のタイル・一覧の行の操作：説明、ドラッグ＆ドロップ、クリックで選ぶ、ダブルクリックで割り当て、右クリックでメニュー
     fn item_interact(&mut self, resp: egui::Response, lib: &MaterialLibrary, name: &str, part: Option<&PartInfo>, actions: &mut Vec<Action>) {
         let user = is_user_material(name);
-        let mut tip = format!("{}\n{}", material_label(name), name);
+        let mut tip = format!("{}\n{}", material_label(lib, name), name);
         if let Some(m) = lib.find(name) {
             tip += &format!("\n{}", material_details(m));
-            if m.base_color_from_model && m.swatch_color.is_some() {
-                tip += &format!("\n{}", fl!("mated-swatch-color-note"));
-            }
         }
         if user {
             tip += &format!("\n{}", fl!("mated-user-material"));
@@ -560,6 +564,10 @@ impl MaterialEditor {
                 self.start_duplicate(lib, name);
                 ui.close();
             }
+            if user && ui.button(fl!("mated-rename")).clicked() {
+                self.start_rename(lib, name);
+                ui.close();
+            }
             if user && ui.button(fl!("mated-delete")).clicked() {
                 self.confirm_delete = true;
                 ui.close();
@@ -581,7 +589,14 @@ impl MaterialEditor {
         let Some(m) = self.material_for(lib, name) else { return };
         let mut d = m.clone();
         d.category = Some(m.category());
-        self.naming = Some(Naming { name: unique_name(lib, &fl!("mated-copy-of", name = material_label(name))), material: d, assign_to: None });
+        self.naming = Some(Naming { name: unique_label(lib, &fl!("mated-copy-of", name = material_label(lib, name))), material: d, assign_to: None, rename: None });
+    }
+
+    /// 自分の材質の名前（表示名）を変える（新しい名前を決めてもらう）。ID は変わらないので、割り当てはそのまま
+    fn start_rename(&mut self, lib: &MaterialLibrary, name: &str) {
+        let Some(m) = self.material_for(lib, name) else { return };
+        let label = self.user_edit.as_ref().filter(|u| u.name == name).map(|u| u.label.clone()).unwrap_or_else(|| material_label(lib, name));
+        self.naming = Some(Naming { name: label, material: m, assign_to: None, rename: Some(name.to_string()) });
     }
 
     fn select_browsing(&mut self, lib: &MaterialLibrary, name: &str, actions: &mut Vec<Action>) {
@@ -597,7 +612,7 @@ impl MaterialEditor {
         }
         self.flush_user(actions);
         self.notice.clear();
-        self.user_edit = if is_user_material(name) { lib.find(name).map(|m| UserEdit::new(name, m.clone(), m.clone())) } else { None };
+        self.user_edit = if is_user_material(name) { lib.find(name).map(|m| UserEdit::new(name, &material_label(lib, name), m.clone(), m.clone())) } else { None };
     }
 
     /// 自分の材質の編集を、待たずに書き込む
@@ -605,13 +620,13 @@ impl MaterialEditor {
         if let Some(u) = &mut self.user_edit {
             u.in_burst = false;
             if u.changed_at.take().is_some() {
-                actions.push(Action::SaveUser { name: u.name.clone(), material: Box::new(u.material.clone()) });
+                actions.push(Action::SaveUser { name: u.name.clone(), material: Box::new(u.material.clone()), label: u.label.clone() });
             }
         }
     }
 
-    /// 材質を、部位 target（None なら全部位）に書き込む。色・粗さの調整は前の材質に合わせたものなので外し、
-    /// 模様のあり・なしと発光は保つ
+    /// 材質を、部位 target（None なら全部位）に書き込む。別の材質にするときは、色・粗さの調整は前の材質に合わせたものなので外し、
+    /// 模様のあり・なしと発光は保つ（同じ材質を割り当て直したときは、調整もそのまま）
     fn assign(&mut self, name: &str, part: Option<&PartInfo>, target: Option<String>, actions: &mut Vec<Action>) {
         let Some(p) = part else { return };
         self.flush(part, actions, true);
@@ -622,8 +637,8 @@ impl MaterialEditor {
             return;
         }
         for r in rows {
-            let (_, v) = Variant::parse(&r.material);
-            let keep = Variant { smooth: v.smooth, emission: v.emission, ..Default::default() };
+            let (base, v) = Variant::parse(&r.material);
+            let keep = if base == name { v } else { Variant { smooth: v.smooth, emission: v.emission, ..Default::default() } };
             actions.push(Action::Assign { part: r.key.clone(), material: keep.name(name) });
         }
     }
@@ -703,7 +718,7 @@ impl MaterialEditor {
                 }
                 let s = self.swatch(ui, material, 22.0, egui::Sense::click());
                 let shown = if r.key.is_empty() { fl!("part-whole") } else { r.key.strip_prefix("kicad:").unwrap_or(&r.key).to_string() };
-                let resp = ui.selectable_label(on, format!("{shown}: {}", material_label(material))).on_hover_text(material.as_str());
+                let resp = ui.selectable_label(on, format!("{shown}: {}", material_label(lib, material))).on_hover_text(material.as_str());
                 if resp.clicked() || s.clicked() {
                     self.target = Some(r.key.clone());
                     self.select_browsing(lib, Variant::parse(material).0, actions);
@@ -733,6 +748,7 @@ impl MaterialEditor {
         let Some((row, material)) = rows.iter().find(|(r, _)| r.key == t).cloned() else { return };
         ui.add_space(4.0);
         ui.strong(fl!("mated-adjust"));
+        ui.weak(fl!("mated-adjust-note"));
         let Some(base_m) = lib.find(Variant::parse(&material).0).cloned().or_else(|| self.material_for(lib, Variant::parse(&material).0)) else {
             ui.weak(fl!("mated-unknown-material", name = material.as_str()));
             return;
@@ -744,9 +760,8 @@ impl MaterialEditor {
             let mut on = v.color.is_some();
             let tip = if measured { fl!("mated-color-measured-tip") } else { fl!("mated-color-tip") };
             if ui.checkbox(&mut on, fl!("mated-color")).on_hover_text(tip).changed() {
-                // 初めの色：今の色（モデルの色を使う材質なら、灰色）
-                let start = if base_m.base_color_from_model { Vec3::splat(0.5) } else if base_m.transmission_weight > 0.0 && base_m.base_metalness < 0.5 { base_m.transmission_color } else { base_m.base_color };
-                v.color = on.then(|| srgb8(start));
+                // 初めの色：材質の今の色
+                v.color = on.then(|| srgb8(web::adjust_start_color(&base_m)));
             }
             if let Some(c) = &mut v.color {
                 ui.color_edit_button_srgb(c);
@@ -790,12 +805,64 @@ impl MaterialEditor {
         }
     }
 
+    /// 一覧で選んだ材質が、割り当て先の部位の材質で、その部位に色・粗さの調整があれば（部位のキー, 材質, 変種）。
+    /// パラメータの欄の値はその部位では使われないので、そのことを知らせる
+    fn target_override(&self, part: Option<&PartInfo>) -> Option<(String, String, Variant)> {
+        let (p, t, browsing) = (part?, self.target.as_ref()?, self.browsing.as_ref()?);
+        let row = p.rows.iter().find(|r| &r.key == t)?;
+        let material = self.row_material(&p.reference, row);
+        let (base, v) = Variant::parse(&material);
+        (base == browsing && (v.color.is_some() || v.roughness.is_some())).then(|| (row.key.clone(), base.to_string(), v))
+    }
+
+    /// パラメータの欄の上に出す、部位の調整の知らせ（調整が無ければ None）
+    fn override_text(&self, _lib: &MaterialLibrary, part: Option<&PartInfo>) -> Option<String> {
+        let (_, _, v) = self.target_override(part)?;
+        let mut what = Vec::new();
+        if let Some([r, g, b]) = v.color {
+            what.push(format!("{} #{r:02x}{g:02x}{b:02x}", fl!("mated-color")));
+        }
+        if let Some(r) = v.roughness {
+            what.push(format!("{} {r:.2}", fl!("mated-roughness")));
+        }
+        Some(fl!("mated-override", what = what.join("・")))
+    }
+
+    /// 部位の材質を書き込み、組み直しが終わるまで表示にその名前を使う
+    fn write_row(&mut self, reference: &str, key: &str, material: String, actions: &mut Vec<Action>) {
+        actions.push(Action::Assign { part: key.to_string(), material: material.clone() });
+        self.adjust = Some(Adjust { reference: reference.to_string(), part: key.to_string(), material, changed_at: Instant::now(), written: true });
+    }
+
+    /// 部位の色・粗さの調整を材質の値にして、部位の調整を外す（組み込みの材質ならコピーを作って、それにする）
+    fn adopt_override(&mut self, lib: &MaterialLibrary, part: Option<&PartInfo>, actions: &mut Vec<Action>) {
+        let Some((key, base, v)) = self.target_override(part) else { return };
+        let Some(p) = part else { return };
+        self.flush(part, actions, true);
+        let adj = Variant { color: v.color, roughness: v.roughness, ..Default::default() };
+        self.edit_material(lib, &base, part, actions, |m, _| adj.apply(m));
+        // 自分の材質の値を先に書く（割り当てより前に）
+        self.flush_user(actions);
+        let material = self.browsing.clone().unwrap_or(base);
+        let keep = Variant { smooth: v.smooth, emission: v.emission, ..Default::default() };
+        self.write_row(&p.reference, &key, keep.name(&material), actions);
+    }
+
+    /// 部位の色・粗さの調整を外して、材質の値に戻す
+    fn clear_override(&mut self, _lib: &MaterialLibrary, part: Option<&PartInfo>, actions: &mut Vec<Action>) {
+        let Some((key, base, v)) = self.target_override(part) else { return };
+        let Some(p) = part else { return };
+        self.flush(part, actions, true);
+        let keep = Variant { color: None, roughness: None, ..v };
+        self.write_row(&p.reference, &key, keep.name(&base), actions);
+    }
+
     /// 調整した部位の材質を、自分の材質にする（名前を決めてもらう）
     fn start_save_adjusted(&mut self, lib: &MaterialLibrary, reference: &str, key: &str, base: &str, v: Variant, base_m: &Material) {
         if let Some(mut m) = self.material_for(lib, &Variant { emission: None, smooth: false, ..v }.name(base)) {
             m.category = Some(base_m.category());
             let keep = Variant { smooth: v.smooth, emission: v.emission, ..Default::default() };
-            self.naming = Some(Naming { name: unique_name(lib, &format!("{} {}", material_label(base), reference)), material: m, assign_to: Some((key.to_string(), keep)) });
+            self.naming = Some(Naming { name: unique_label(lib, &format!("{} {}", material_label(lib, base), reference)), material: m, assign_to: Some((key.to_string(), keep)), rename: None });
             self.browsing = None;
         }
     }
@@ -818,7 +885,7 @@ impl MaterialEditor {
         ui.horizontal(|ui| {
             self.swatch(ui, &name, 96.0, egui::Sense::hover());
             ui.vertical(|ui| {
-                ui.heading(material_label(&name));
+                ui.heading(material_label(lib, &name));
                 ui.weak(format!("{name}  ·  {}", category_label(m.category())));
                 ui.label(material_details(&m));
                 if user {
@@ -833,6 +900,9 @@ impl MaterialEditor {
             }
             if ui.button(fl!("mated-duplicate")).on_hover_text(fl!("mated-duplicate-tip")).clicked() {
                 self.start_duplicate(lib, &name);
+            }
+            if user && ui.button(fl!("mated-rename")).on_hover_text(fl!("mated-rename-tip")).clicked() {
+                self.start_rename(lib, &name);
             }
             if user && !self.confirm_delete && ui.button(fl!("mated-delete")).clicked() {
                 self.confirm_delete = true;
@@ -859,6 +929,20 @@ impl MaterialEditor {
             ui.colored_label(egui::Color32::from_rgb(255, 102, 102), &self.error);
         }
         ui.separator();
+        if let Some(text) = self.override_text(lib, part) {
+            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), text);
+            ui.horizontal(|ui| {
+                if ui.button(fl!("mated-override-adopt")).on_hover_text(fl!("mated-override-adopt-tip")).clicked() {
+                    self.adopt_override(lib, part, actions);
+                }
+                if ui.button(fl!("mated-override-clear")).on_hover_text(fl!("mated-override-clear-tip")).clicked() {
+                    self.clear_override(lib, part, actions);
+                }
+            });
+            if self.browsing.as_deref() != Some(name.as_str()) {
+                return;
+            }
+        }
         if user {
             self.user_editor_ui(ui, lib, &name);
         } else {
@@ -878,21 +962,19 @@ impl MaterialEditor {
     /// 新しい自分の材質の名前を決める
     fn naming_ui(&mut self, ui: &mut egui::Ui, lib: &MaterialLibrary, part: Option<&PartInfo>, actions: &mut Vec<Action>) {
         let Some(n) = &mut self.naming else { return };
-        ui.strong(fl!("mated-new-title"));
+        let renaming = n.rename.is_some();
+        ui.strong(if renaming { fl!("mated-rename-title") } else { fl!("mated-new-title") });
         ui.horizontal(|ui| {
             ui.label(fl!("mated-new-name"));
             ui.text_edit_singleline(&mut n.name);
         });
-        let valid = valid_material_name(n.name.trim());
-        let exists = lib.find(n.name.trim()).is_some();
+        let valid = valid_material_label(n.name.trim());
         if !valid {
             ui.colored_label(egui::Color32::from_rgb(255, 102, 102), fl!("mated-name-invalid"));
-        } else if exists {
-            ui.colored_label(egui::Color32::from_rgb(255, 102, 102), fl!("mated-name-exists"));
         }
         let mut done = None;
         ui.horizontal(|ui| {
-            if ui.add_enabled(valid && !exists, egui::Button::new(fl!("mated-create"))).clicked() {
+            if ui.add_enabled(valid, egui::Button::new(if renaming { fl!("mated-rename-ok") } else { fl!("mated-create") })).clicked() {
                 done = Some(true);
             }
             if ui.button(fl!("mated-cancel")).clicked() {
@@ -900,27 +982,42 @@ impl MaterialEditor {
             }
         });
         match done {
-            Some(true) => self.finish_naming(part, actions),
+            Some(true) => self.finish_naming(lib, part, actions),
             Some(false) => self.naming = None,
             None => {}
         }
     }
 
-    /// 決めた名前で自分の材質を作る（部位の調整から作ったときは、その部位に割り当てる）
-    fn finish_naming(&mut self, part: Option<&PartInfo>, actions: &mut Vec<Action>) {
+    /// 決めた名前（表示名）で自分の材質を作る（ID は新しく振る。部位の調整から作ったときは、その部位に割り当てる）。
+    /// 名前を変えているときは、その材質の表示名を変える
+    fn finish_naming(&mut self, lib: &MaterialLibrary, part: Option<&PartInfo>, actions: &mut Vec<Action>) {
         let Some(n) = self.naming.take() else { return };
-        let name = n.name.trim().to_string();
+        let label = n.name.trim().to_string();
+        if let Some(id) = n.rename {
+            if self.user_edit.as_ref().is_none_or(|u| u.name != id) {
+                self.flush_user(actions);
+                self.user_edit = Some(UserEdit::new(&id, &label, n.material.clone(), n.material));
+            }
+            if let Some(u) = &mut self.user_edit {
+                u.label = label;
+                u.changed_at = Some(Instant::now());
+            }
+            self.flush_user(actions);
+            self.browsing = Some(id);
+            return;
+        }
+        let name = new_user_material_id(lib);
         let mut m = n.material;
         m.name = name.clone();
         self.flush_user(actions);
-        actions.push(Action::SaveUser { name: name.clone(), material: Box::new(m.clone()) });
+        actions.push(Action::SaveUser { name: name.clone(), material: Box::new(m.clone()), label: label.clone() });
         if let (Some((part_key, keep)), Some(p)) = (n.assign_to, part) {
             actions.push(Action::Assign { part: part_key.clone(), material: keep.name(&name) });
             self.adjust = Some(Adjust { reference: p.reference.clone(), part: part_key, material: keep.name(&name), changed_at: Instant::now(), written: true });
         }
         self.browsing = Some(name.clone());
         self.notice.clear();
-        self.user_edit = Some(UserEdit::new(&name, m.clone(), m));
+        self.user_edit = Some(UserEdit::new(&name, &label, m.clone(), m));
     }
 
     /// 組み込みの材質のパラメータ。組み込みの材質は書き換えず、値を変えると自分の材質のコピーを作ってそれを編集する。
@@ -937,28 +1034,30 @@ impl MaterialEditor {
 
     /// 組み込みの材質 name（値 m）の値を変えた（edited）：自分の材質のコピーを作ってそれを編集する
     fn copy_builtin(&mut self, lib: &MaterialLibrary, name: &str, m: &Material, mut edited: Material, part: Option<&PartInfo>, actions: &mut Vec<Action>) {
-        let copy = unique_name(lib, &fl!("mated-copy-of", name = material_label(name)));
+        let copy = new_user_material_id(lib);
+        let label = unique_label(lib, &fl!("mated-copy-of", name = material_label(lib, name)));
         edited.name = copy.clone();
         edited.category = Some(edited.category());
         self.flush_user(actions);
-        actions.push(Action::SaveUser { name: copy.clone(), material: Box::new(edited.clone()) });
+        actions.push(Action::SaveUser { name: copy.clone(), material: Box::new(edited.clone()), label: label.clone() });
         if let Some(p) = part {
             self.flush(part, actions, true);
             self.adjust = None;
             for r in p.rows.iter().filter(|r| self.target.as_ref().is_none_or(|t| *t == r.key)) {
                 let (base, v) = Variant::parse(&r.material);
                 if base == name {
-                    let keep = Variant { smooth: v.smooth, emission: v.emission, ..Default::default() };
+                    // 色の調整は保つ（粗さの調整は外す：編集した粗さが隠れないように）
+                    let keep = Variant { roughness: None, ..v };
                     actions.push(Action::Assign { part: r.key.clone(), material: keep.name(&copy) });
                 }
             }
         }
         // 元に戻すと組み込みの材質の値。動かしている途中の値は、止まってから書き込む
-        let mut u = UserEdit::new(&copy, edited, m.clone());
+        let mut u = UserEdit::new(&copy, &label, edited, m.clone());
         u.changed(m.clone());
         self.user_edit = Some(u);
         self.browsing = Some(copy.clone());
-        self.notice = fl!("mated-copied", from = material_label(name), name = copy);
+        self.notice = fl!("mated-copied", from = material_label(lib, name), name = label);
     }
 
     /// 自分の材質のパラメータと、元に戻す・やり直す
@@ -1136,11 +1235,7 @@ impl MaterialEditor {
             for (main_id, m) in &resolved {
                 let (Some(m), Some(&(_, local))) = (m, v.map.iter().find(|(a, _)| a == main_id)) else { continue };
                 let local = local as usize;
-                let mut m = m.clone();
-                if m.base_color_from_model {
-                    m.base_color = v.base[local].base_color; // 3D モデルの面の色
-                }
-                mats[local] = m;
+                mats[local] = m.clone();
             }
             pv.set_materials(mats)?;
             let cam = part_camera(pv.scene(), v.elevation, v.azimuth, v.zoom, PART_W as f32 / PART_H as f32);
@@ -1217,7 +1312,6 @@ fn set_kind(m: &mut Material, kind: Kind) {
         Kind::Metal => {
             m.base_metalness = 1.0;
             m.transmission_weight = 0.0;
-            m.base_color_from_model = false;
             if m.conductor.is_none() {
                 if let Some(c) = conductor::find("Ni") {
                     m.set_conductor(c);
@@ -1229,7 +1323,6 @@ fn set_kind(m: &mut Material, kind: Kind) {
             m.conductor = None;
             m.transmission_weight = 1.0;
             m.base_color = Vec3::ONE;
-            m.base_color_from_model = false;
             m.specular_color = Vec3::ONE;
             m.coat_weight = 0.0;
             m.bump_pattern = krbr_scene::BumpPattern::None;
@@ -1307,7 +1400,8 @@ const SUBSTANCES: &[&str] = &[
 ];
 
 fn substance_label(name: &str) -> String {
-    i18n::get(&format!("subst-{name}")).unwrap_or_else(|| material_label(name))
+    // 物質は組み込みの材質だけ（表示名は訳）
+    i18n::get(&format!("subst-{name}")).or_else(|| i18n::get(&format!("matname-{name}"))).unwrap_or_else(|| name.to_string())
 }
 
 /// 折りたためる節（Blender の Principled BSDF のパネルのように）。中は 2 列の表
@@ -1440,15 +1534,10 @@ fn param_editor(ui: &mut egui::Ui, lib: &MaterialLibrary, m: &mut Material, o: &
             }
             v.apply(m);
             if kind == Kind::Dielectric {
-                let mut v = (m.base_color_from_model, m.base_color);
-                row(ui, &fl!("mated-base-color"), "", &mut v, &(o.base_color_from_model, o.base_color), |ui, v| {
-                    ui.checkbox(&mut v.0, fl!("mated-from-model")).on_hover_text(fl!("mated-from-model-tip"));
-                    if !v.0 {
-                        color_edit(ui, &mut v.1);
-                        albedo_warning(ui, v.1);
-                    }
+                row(ui, &fl!("mated-base-color"), "", &mut m.base_color, &o.base_color, |ui, c| {
+                    color_edit(ui, c);
+                    albedo_warning(ui, *c);
                 });
-                (m.base_color_from_model, m.base_color) = v;
             } else {
                 row(ui, &fl!("mated-trans-color"), "", &mut m.transmission_color, &o.transmission_color, color_edit);
                 row(ui, &fl!("mated-trans-depth"), &fl!("mated-trans-depth-tip"), &mut m.transmission_depth, &o.transmission_depth, |ui, d| {
@@ -1573,13 +1662,16 @@ fn albedo_warning(ui: &mut egui::Ui, c: Vec3) {
 }
 
 /// 一覧に無い名前（"名前"、"名前 2"、…）
-fn unique_name(lib: &MaterialLibrary, want: &str) -> String {
-    let base: String = want.chars().map(|c| if "+.\"\\[]#\n".contains(c) { ' ' } else { c }).collect::<String>().trim().to_string();
+/// 新しい材質の名前（表示名）の候補：ほかの材質と見分けられるよう、同じ表示名があれば番号を付ける
+/// （ID で区別するので同じ名前でも作れるが、一覧で紛らわしい）
+fn unique_label(lib: &MaterialLibrary, want: &str) -> String {
+    let base: String = want.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().trim().to_string();
     let base = if base.is_empty() { "material".to_string() } else { base };
-    if lib.find(&base).is_none() {
+    let taken: HashSet<String> = lib.names().iter().map(|n| material_label(lib, n)).collect();
+    if !taken.contains(&base) {
         return base;
     }
-    (2..).map(|i| format!("{base} {i}")).find(|n| lib.find(n).is_none()).unwrap()
+    (2..).map(|i| format!("{base} {i}")).find(|n| !taken.contains(n)).unwrap()
 }
 
 #[cfg(test)]
@@ -1601,11 +1693,6 @@ mod tests {
         for n in RARE {
             assert!(builtin_names().contains(*n), "{n}");
         }
-        // モデルの色を使う組み込みの材質には、見本の色がある（一覧で見分けられるように）
-        for n in builtin_names() {
-            let m = lib.find(n).unwrap();
-            assert!(!m.base_color_from_model || m.swatch_color.is_some(), "{n} has no swatch_color");
-        }
         // 一覧の順：金属が先頭で、全部の材質がどこかに入る
         let g = grouped_names(&lib);
         assert_eq!(g[0].0, Category::Metal);
@@ -1622,7 +1709,8 @@ mod tests {
             let o = lib.find(name).unwrap().clone();
             let mut m = o.clone();
             for _ in 0..3 {
-                let _ = ctx.run_ui(egui::RawInput::default(), |ui| param_editor(ui, &lib, &mut m, &o));
+                // 描いた結果（フォントの画像など）は使わないので捨てる（捨てる前に clear しないと epaint が警告で止まる）
+                ctx.run_ui(egui::RawInput::default(), |ui| param_editor(ui, &lib, &mut m, &o)).textures_delta.clear();
             }
             assert_eq!(m, o, "{name}");
         }
@@ -1654,7 +1742,7 @@ mod tests {
     fn undo_and_redo() {
         let lib = MaterialLibrary::builtin();
         let a = lib.find("plastic_abs").unwrap().clone();
-        let mut u = UserEdit::new("x", a.clone(), a.clone());
+        let mut u = UserEdit::new("x", "x", a.clone(), a.clone());
         // 一続きの編集は 1 つの履歴
         for r in [0.1, 0.2, 0.3] {
             let before = u.material.clone();
@@ -1676,10 +1764,55 @@ mod tests {
     }
 
     #[test]
-    fn unique_names() {
-        let lib = MaterialLibrary::builtin();
-        assert_eq!(unique_name(&lib, "my+red"), "my red");
-        assert_eq!(unique_name(&lib, "plastic"), "plastic 2");
-        assert!(valid_material_name(&unique_name(&lib, "a.b")));
+    fn part_adjustment_over_the_material() {
+        let mut lib = MaterialLibrary::builtin();
+        lib.insert("user_1", lib.find("plastic").unwrap().clone(), "test");
+        let part = |material: &str| PartInfo { reference: "J2".into(), model: None, instances: Vec::new(), rows: vec![PartRow { key: "#a0a0a0".into(), material: material.into(), scene_material: 0 }] };
+        let assigned = |actions: &[Action]| actions.iter().rev().find_map(|a| if let Action::Assign { material, .. } = a { Some(material.clone()) } else { None });
+        let editor = |browsing: &str| MaterialEditor { browsing: Some(browsing.into()), target: Some("#a0a0a0".into()), ..Default::default() };
+
+        // 調整が無ければ知らせない。一覧で別の材質を選んでいても知らせない
+        assert!(editor("user_1").target_override(Some(&part("user_1+smooth"))).is_none());
+        assert!(editor("plastic").target_override(Some(&part("user_1+color=#ff0000"))).is_none());
+
+        // 外す：模様なしは残して、色・粗さだけ外す
+        let p = part("user_1+smooth+color=#ff0000+rough=0.2");
+        let mut e = editor("user_1");
+        assert!(e.override_text(&lib, Some(&p)).is_some_and(|t| t.contains("#ff0000") && t.contains("0.20")));
+        let mut actions = Vec::new();
+        e.clear_override(&lib, Some(&p), &mut actions);
+        assert_eq!(assigned(&actions).as_deref(), Some("user_1+smooth"));
+
+        // 取り込む（自分の材質）：材質の値にして、割り当ては調整なしに
+        let mut e = editor("user_1");
+        e.select_browsing(&lib, "plastic", &mut Vec::new());
+        e.select_browsing(&lib, "user_1", &mut Vec::new());
+        let mut actions = Vec::new();
+        e.adopt_override(&lib, Some(&p), &mut actions);
+        let saved = actions.iter().find_map(|a| if let Action::SaveUser { name, material, .. } = a { Some((name.clone(), material.clone())) } else { None }).unwrap();
+        assert_eq!((saved.0.as_str(), saved.1.base_color, saved.1.specular_roughness), ("user_1", Vec3::new(1.0, 0.0, 0.0), 0.2));
+        assert_eq!(assigned(&actions).as_deref(), Some("user_1+smooth"));
+
+        // 取り込む（組み込みの材質）：コピーを作ってそれにする
+        let p = part("plastic_pbt+color=#ff0000");
+        let mut e = editor("plastic_pbt");
+        let mut actions = Vec::new();
+        e.adopt_override(&lib, Some(&p), &mut actions);
+        let copy = assigned(&actions).unwrap();
+        assert!(copy.starts_with("user_") && Variant::parse(&copy).1 == Variant::default(), "{copy}");
+        assert!(actions.iter().any(|a| matches!(a, Action::SaveUser { name, material, .. } if *name == copy && material.base_color == Vec3::new(1.0, 0.0, 0.0))));
+    }
+
+    #[test]
+    fn unique_labels() {
+        let mut lib = MaterialLibrary::builtin();
+        assert_eq!(unique_label(&lib, "my+red.1"), "my+red.1");
+        let taken = material_label(&lib, "plastic");
+        assert_eq!(unique_label(&lib, &taken), format!("{taken} 2"));
+        lib.insert("user_1", Material::default(), "test");
+        lib.set_label("user_1", "mine");
+        assert_eq!(unique_label(&lib, "mine"), "mine 2");
+        assert_eq!(material_label(&lib, "user_1+smooth"), "mine");
+        assert!(valid_material_label(&unique_label(&lib, " a\nb ")));
     }
 }

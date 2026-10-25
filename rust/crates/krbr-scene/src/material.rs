@@ -157,8 +157,6 @@ pub struct Material {
     pub geometry_thin_walled: bool,
 
     // ---- krbr 独自の拡張（TOML では [krbr] の下）
-    /// base_color を 3D モデルの面の色にする（材質ライブラリで base_color 省略時）
-    pub base_color_from_model: bool,
     pub bump_pattern: BumpPattern,
     /// 傾きの大きさ（0.05 で約 3°）
     pub bump_strength: f32,
@@ -172,8 +170,6 @@ pub struct Material {
     pub conductor: Option<usize>,
     /// 一覧での分類。書かなければパラメータから決める（category()）
     pub category: Option<Category>,
-    /// 見本の色（リニア）：3D モデルの色を使う材質を、材質の一覧で見分けられるように塗る代表の色。描画には使わない
-    pub swatch_color: Option<Vec3>,
 }
 
 impl Default for Material {
@@ -220,7 +216,6 @@ impl Default for Material {
             emission_color: Vec3::ONE,
             geometry_opacity: 1.0,
             geometry_thin_walled: false,
-            base_color_from_model: false,
             bump_pattern: BumpPattern::None,
             bump_strength: 0.0,
             bump_scale: 0.2,
@@ -228,7 +223,6 @@ impl Default for Material {
             sellmeier: None,
             conductor: None,
             category: None,
-            swatch_color: None,
         }
     }
 }
@@ -241,7 +235,6 @@ impl Material {
         self.base_metalness = 1.0;
         self.base_color = f0;
         self.specular_color = tint;
-        self.base_color_from_model = false;
     }
 
     /// 一覧での分類（書いていなければ、金属・透明・その他をパラメータから決める）
