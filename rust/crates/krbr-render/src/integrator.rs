@@ -291,7 +291,8 @@ impl Integrator for Bidirectional<'_> {
         // この繰り返しの数を CPU から読めるところへ写す（review_completed で見る）
         let n = VCM_COUNTER_COUNT as u64 * 4;
         unsafe { dev.cmd_copy_buffer(cmd, b.counters.buffer, b.counters_readback.buffer, &[vk::BufferCopy { src_offset: 0, dst_offset: 0, size: n }]) };
-        memory_barrier(dev, cmd, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, vk::PipelineStageFlags2::HOST, vk::AccessFlags2::HOST_READ);
+        // 写し終えてから、CPU が読む・次の繰り返しの初めに数を書き直す（CLEAR の段階の vkCmdUpdateBuffer）
+        memory_barrier(dev, cmd, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, vk::PipelineStageFlags2::HOST | vk::PipelineStageFlags2::CLEAR, vk::AccessFlags2::HOST_READ | vk::AccessFlags2::TRANSFER_WRITE);
     }
     fn review_completed(&mut self) -> Result<(), String> {
         let Some(bytes) = self.buffers.counters_readback.mapped_bytes() else { return Ok(()) };

@@ -362,7 +362,7 @@ impl<'a> Denoiser<'a> {
         check(api, self.device, "filter")?;
 
         let ctx = self.ctx;
-        self.out_image = ctx.create_image_2d(self.width, self.height, 1, vk::Format::R32G32B32A32_SFLOAT, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_DST)?;
+        self.out_image = ctx.create_image_2d(self.width, self.height, 1, vk::Format::R32G32B32A32_SFLOAT, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST)?;
         let img = self.out_image.image;
         ctx.submit_and_wait(|dev, cmd| {
             image_barrier(dev, cmd, img, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, 1);

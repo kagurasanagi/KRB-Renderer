@@ -460,7 +460,9 @@ impl Drop for Kernel<'_> {
     }
 }
 
-/// レイを飛ばすカーネルの書き込みを、次のカーネル・計算シェーダ・転送が読めるようにする
+/// レイを飛ばすカーネルの書き込みを、次のカーネル・計算シェーダ・転送が読めるようにする。
+/// 待つ側は転送のすべて（TRANSFER = COPY と CLEAR など）：次の繰り返しの初めの vkCmdFillBuffer / vkCmdUpdateBuffer は
+/// CLEAR の段階で動くので、COPY だけでは、前の繰り返しのカーネルが読み終える前にバッファを空にしてしまう
 pub fn compute_barrier(ctx: &Context, cmd: vk::CommandBuffer) {
     let trace = ctx.trace_stages();
     memory_barrier(
@@ -468,7 +470,7 @@ pub fn compute_barrier(ctx: &Context, cmd: vk::CommandBuffer) {
         cmd,
         trace | vk::PipelineStageFlags2::TRANSFER,
         vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::TRANSFER_WRITE,
-        trace | vk::PipelineStageFlags2::COPY,
-        vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::TRANSFER_READ,
+        trace | vk::PipelineStageFlags2::TRANSFER,
+        vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::TRANSFER_READ | vk::AccessFlags2::TRANSFER_WRITE,
     );
 }
