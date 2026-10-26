@@ -37,8 +37,10 @@ void main() {
     vec4 n = imageLoad(accumNormal, ip);
     float inv = c.a > 0.0 ? 1.0 / c.a : 0.0;
     colorBuf[i] = vec4(max(toRgb(c.rgb * inv), vec3(0.0)), 1.0);
-    albedoBuf[i] = vec4(clamp(toRgb(a.rgb * inv), 0.0, 1.0), 1.0);
-    vec3 nn = n.rgb * inv;
+    // アルベド・法線は、光の通ったサンプルの数（A）で割る（レンズの中で遮られたサンプルは数えない。common.glsl の accumulate）
+    float invA = a.a > 0.0 ? 1.0 / a.a : 0.0;
+    albedoBuf[i] = vec4(clamp(toRgb(a.rgb * invA), 0.0, 1.0), 1.0);
+    vec3 nn = n.rgb * (n.a > 0.0 ? 1.0 / n.a : 0.0);
     normalBuf[i] = vec4(dot(nn, nn) > 1e-12 ? normalize(nn) : vec3(0.0), 1.0);
     outputBuf[i] = vec4(0.0, 0.0, 0.0, 1.0);  // OIDN は RGB だけを書く。A はトーンマッピングで割る数（1）
 }

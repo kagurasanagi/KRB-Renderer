@@ -383,6 +383,7 @@ impl<'a> GpuScene<'a> {
         let emissions: Vec<Vec3> = sc.materials.iter().map(emission_radiance).collect();
         for (k, i) in sc.instances.iter().enumerate() {
             let m = &sc.meshes[i.mesh as usize].mesh;
+            let mirrored = i.xform.determinant() < 0.0;
             for p in &m.positions {
                 let w = i.xform.transform_point3(*p);
                 lo = lo.min(w);
@@ -395,7 +396,12 @@ impl<'a> GpuScene<'a> {
                 if y <= 0.0 {
                     continue;
                 }
-                let v: Vec<Vec3> = (0..3).map(|k| i.xform.transform_point3(m.positions[m.indices[t * 3 + k] as usize])).collect();
+                let mut v: Vec<Vec3> = (0..3).map(|k| i.xform.transform_point3(m.positions[m.indices[t * 3 + k] as usize])).collect();
+                // 鏡映した（行列式が負の）インスタンスでは、変換した頂点の外積が外向きの法線と逆を向く（交差判定は法線を
+                // 逆転置で変換するので向きが保たれる）。シェーダは頂点の外積で光る面を決めるので、頂点の順を入れ替えてそろえる
+                if mirrored {
+                    v.swap(1, 2);
+                }
                 let area = 0.5 * (v[1] - v[0]).cross(v[2] - v[0]).length();
                 if area <= 0.0 {
                     continue;

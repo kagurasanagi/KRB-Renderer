@@ -236,7 +236,10 @@ void main() {
             } else {
                 float directPdfA = emitterPdfA(hm.emission.rgb);
                 float emissionPdfW = directPdfA * max(dot(hit.ng, wo), 0.0) * INV_PI;
-                float wCamera = Mis(directPdfA) * cam.dVCM + Mis(emissionPdfW) * cam.dVC;
+                // misOnHit はシェーディング法線の余弦で割ったが、光源を直接サンプリングする戦略・光源から放つ戦略は
+                // 光源の幾何法線の余弦で測る（lights.glsl の cosAtLight）。そろえないと、法線を補間した発光面で重みの和が 1 にならない
+                float cosFix = Mis(max(abs(dot(ns, wo)), 1e-6)) / Mis(max(abs(dot(hit.ng, wo)), 1e-6));
+                float wCamera = (Mis(directPdfA) * cam.dVCM + Mis(emissionPdfW) * cam.dVC) * cosFix;
                 vec4 c = maskTerminated(cam.throughput * Le / (1.0 + wCamera), cam.terminated);
                 L += clampIndirect(c, roughBefore, cam.terminated);
             }
@@ -313,5 +316,5 @@ void main() {
     uint si = splatIndex(px);
     vec3 color = dropNonFinite(toOutputColor(L)) + vec3(splat[si], splat[si + 1u], splat[si + 2u]);
     if (spectral) albedo = rgbToXyz(albedo);
-    accumulate(ivec2(px), color, albedo, normal, firstPos);
+    accumulate(ivec2(px), color, albedo, normal, firstPos, cr.weight > 0.0 ? 1.0 : 0.0);
 }

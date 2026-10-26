@@ -46,5 +46,5 @@ void main() {
 
     vec3 color = spectral ? spectrumToXyz(L) : L.rgb;
     if (spectral) albedo = rgbToXyz(albedo);
-    accumulate(ivec2(px), color, albedo, normal, firstPos);
+    accumulate(ivec2(px), color, albedo, normal, firstPos, cr.weight > 0.0 ? 1.0 : 0.0);
 }

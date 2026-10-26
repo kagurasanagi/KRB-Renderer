@@ -1,8 +1,8 @@
-//! 画像の入出力：.hdr / .exr の読み込み、EXR（リニア）と PNG（ACES でトーンマッピング、sRGB）の書き出し
+//! 画像の入出力：.hdr / .exr（と、sRGB の PNG / JPG など）の読み込み、EXR（リニア）と PNG（ACES でトーンマッピング、sRGB）の書き出し
 
 use std::path::Path;
 
-use krbr_scene::material::linear_to_srgb_f;
+use krbr_scene::material::{linear_to_srgb_f, srgb_to_linear_f};
 
 /// RGBA float のリニア画像
 #[derive(Debug, Clone, Default)]
@@ -36,9 +36,20 @@ pub fn load_hdr_image(p: &Path) -> Result<ImageF, String> {
         return Ok(img.layer_data.channel_data.pixels);
     }
     let dyn_img = image::open(p).map_err(|e| format!("{e}"))?;
+    // .hdr などの浮動小数の画像はリニア。PNG / JPG などの整数の画像は sRGB で符号化してあるので、リニアに戻す
+    // （戻さないと、環境マップの中間調が明るすぎ、重点的サンプリングの分布も歪む）
+    let float = matches!(dyn_img, image::DynamicImage::ImageRgb32F(_) | image::DynamicImage::ImageRgba32F(_));
     let rgba = dyn_img.to_rgba32f();
     let (w, h) = (rgba.width(), rgba.height());
-    Ok(ImageF { width: w, height: h, rgba: rgba.into_raw() })
+    let mut data = rgba.into_raw();
+    if !float {
+        for px in data.chunks_exact_mut(4) {
+            for c in &mut px[..3] {
+                *c = srgb_to_linear_f(*c);
+            }
+        }
+    }
+    Ok(ImageF { width: w, height: h, rgba: data })
 }
 
 pub fn save_exr(p: &Path, img: &ImageF) -> Result<(), String> {

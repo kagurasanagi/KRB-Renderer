@@ -283,8 +283,10 @@ Shade surfaceAt(Hit hit, inout vec3 ns, inout Rng rng) {
         if (uint(base.params2.x) == BUMP_WEAVE) addDetail(base, hit.pObj, nObj, seed, 0.05, footprint, d);
         float thickness = 0.0;
         if (F.maskParams2.w > 0.0 && abs(nObj.y) > 0.5) {
-            // 距離場からレジストの厚みと、縁のなだらかな傾き（法線）を求める
-            uint side = nObj.y > 0.0 ? 0u : 1u;
+            // 距離場からレジストの厚みと、縁のなだらかな傾き（法線）を求める。表裏は面の外向き（幾何法線）で決める：
+            // ns は光線の来た側に向けてあるので、基材の中から当たった光線では逆を向く（以前は反対の面の距離場を読んでいた）
+            float outward = dot(ns, hit.ng) >= 0.0 ? 1.0 : -1.0;
+            uint side = nObj.y * outward > 0.0 ? 0u : 1u;
             vec2 sd = boardSdf(hit.pos, side);
             thickness = maskThickness(sd.x, sd.y);
             const float e = 0.01;  // 有限差分の幅（mm）
@@ -292,8 +294,8 @@ Shade surfaceAt(Hit hit, inout vec3 ns, inout Rng rng) {
             float h0 = maskSurfaceHeight(sd.x, sd.y);
             float dhx = (maskSurfaceHeight(sx.x, sx.y) - h0) / e;
             float dhz = (maskSurfaceHeight(sz.x, sz.y) - h0) / e;
-            // 表面の高さは外向き（表は +Y、裏は -Y）に測るので、勾配はそのまま法線から引く
-            d.grad += vec3(dhx, 0.0, dhz);
+            // 表面の高さは外向き（表は +Y、裏は -Y）に測るので、勾配は外向きの法線から引く（ns が内向きなら符号が逆）
+            d.grad += outward * vec3(dhx, 0.0, dhz);
         }
         s.baseColor *= d.colorMul;
         s.baseRgb *= d.colorMul;

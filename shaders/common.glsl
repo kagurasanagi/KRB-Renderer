@@ -150,17 +150,19 @@ vec3 dropNonFinite(vec3 c) {
 }
 
 // position：最初に当たった点と 1（当たらなければ 0）
-void accumulate(ivec2 ip, vec3 color, vec3 albedo, vec3 normal, vec4 position) {
+// aovCount：アルベド・法線の AOV に数えるか（1 / 0）。レンズの中で遮られたサンプル（実レンズ・口径食。cr.weight = 0）は
+// アルベド・法線を持たないので数えない（数えると、絞ったときに AOV が通った割合だけ暗くなる）。色は weight で補正済みなので数える
+void accumulate(ivec2 ip, vec3 color, vec3 albedo, vec3 normal, vec4 position, float aovCount) {
     color = dropNonFinite(color);
     if (pc.sampleIndex == 0u) {
         imageStore(accumColor, ip, vec4(color, 1.0));
-        imageStore(accumAlbedo, ip, vec4(albedo, 1.0));
-        imageStore(accumNormal, ip, vec4(normal, 1.0));
+        imageStore(accumAlbedo, ip, vec4(albedo, aovCount));
+        imageStore(accumNormal, ip, vec4(normal, aovCount));
         imageStore(accumPosition, ip, position);
     } else {
         imageStore(accumColor, ip, imageLoad(accumColor, ip) + vec4(color, 1.0));
-        imageStore(accumAlbedo, ip, imageLoad(accumAlbedo, ip) + vec4(albedo, 1.0));
-        imageStore(accumNormal, ip, imageLoad(accumNormal, ip) + vec4(normal, 1.0));
+        imageStore(accumAlbedo, ip, imageLoad(accumAlbedo, ip) + vec4(albedo, aovCount));
+        imageStore(accumNormal, ip, imageLoad(accumNormal, ip) + vec4(normal, aovCount));
         imageStore(accumPosition, ip, imageLoad(accumPosition, ip) + position);
     }
 }
