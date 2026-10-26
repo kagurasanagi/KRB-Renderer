@@ -61,7 +61,10 @@ body.panel header {
 body.panel main {
   flex: 1;
   overflow-y: auto;
-  padding: 6px 12px 24px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 10px 24px 10px;
 }
 
 section {
@@ -85,12 +88,185 @@ section h2 {
   text-transform: uppercase;
 }
 
-/* スライダー：名前・つまみ・値 */
+/* グループ：見出し（押すと開閉）と中身の、囲まれたカード。カードの間は空ける。
+   パネルが低くてもカードは縮めない（中身を切らずに、パネルをスクロールする） */
+.card {
+  flex: none;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.fold-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.card > .fold-head {
+  position: relative;
+  height: 36px;
+  padding: 0 12px 0 14px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+/* 見出しの左端の、アクセント色の縦線 */
+.card > .fold-head::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 9px;
+  bottom: 9px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
+
+.card > .fold-head:hover {
+  background: var(--panel-3);
+}
+
+.fold-title {
+  flex: 1;
+}
+
+.fold-hint {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-a15);
+  color: var(--accent-hi);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+/* 開閉の印（▸ 閉じている、▾ 開いている） */
+.chev {
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 6px solid var(--text-2);
+  transition: transform 0.15s var(--ease);
+  flex: none;
+}
+
+.open > .fold-head > .chev {
+  transform: rotate(90deg);
+}
+
+.fold-body {
+  display: none;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.open > .fold-body {
+  display: flex;
+}
+
+.card > .fold-body {
+  padding: 4px 12px 14px 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+/* グループの中の「詳細」：小さな見出しと、少し下げた中身 */
+.subgroup > .fold-head {
+  height: 26px;
+  padding: 0;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.subgroup > .fold-head:hover {
+  color: var(--text);
+}
+
+.subgroup > .fold-body {
+  padding: 6px 0 2px 12px;
+  border-left: 2px solid var(--line-2);
+  margin-left: 2px;
+}
+
+.panel-foot {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 4px 0;
+}
+
+/* スライダー：1 段目に名前と［−］値［＋］、2 段目につまみ（パネルの幅いっぱい。名前を切らず、つまみも細かく動かせる） */
 .slider {
   display: grid;
-  grid-template-columns: 88px 1fr 74px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "label value" "range range";
   align-items: center;
-  gap: 10px;
+  column-gap: 8px;
+  row-gap: 2px;
+}
+
+.slider label {
+  grid-area: label;
+}
+
+.slider .value {
+  grid-area: value;
+}
+
+.slider input[type="range"] {
+  grid-area: range;
+  min-width: 0;
+}
+
+.slider .num {
+  width: 60px;
+}
+
+/* カードの中身が、パネルの幅より広がらないように */
+.card,
+.fold-body > * {
+  min-width: 0;
+}
+
+.step {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--panel-3);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  flex: none;
+}
+
+.step:hover {
+  border-color: var(--line-3);
+  color: var(--text);
+}
+
+.step:active {
+  background: var(--accent-a15);
+  border-color: var(--accent-a30);
+  color: var(--accent-hi);
 }
 
 .slider label {

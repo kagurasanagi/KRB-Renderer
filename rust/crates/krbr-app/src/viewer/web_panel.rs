@@ -6,8 +6,11 @@ use serde_json::{json, Value};
 
 use super::*;
 
+/// スライダー。［−］［＋］の 1 回の増減（step）は表示の最小桁、Shift を押したときは 10 倍（big）。
+/// 露出のように別の刻みにするものは、呼んだ側で step・big を書き換える
 fn slider(id: &str, label: String, value: f64, min: f64, max: f64, log: bool, digits: u32, suffix: &str) -> Value {
-    json!({ "t": "slider", "id": id, "label": label, "value": value, "min": min, "max": max, "log": log, "digits": digits, "suffix": suffix })
+    let step = 10f64.powi(-(digits as i32));
+    json!({ "t": "slider", "id": id, "label": label, "value": value, "min": min, "max": max, "log": log, "digits": digits, "suffix": suffix, "step": step, "big": step * 10.0 })
 }
 
 fn tip(mut v: Value, tip: String) -> Value {
@@ -218,7 +221,6 @@ impl App {
         }
     }
 
-    /// 設定パネルの JSON（egui の App::panel と同じ項目）
     /// 材質を書き込む先の選択肢（設定パネルと材質エディタで共通）
     pub(super) fn scope_json(&self) -> Value {
         json!({ "t": "radio", "id": "sel.scope", "value": scope_name(self.assign_scope), "options": [
@@ -228,13 +230,59 @@ impl App {
         ] })
     }
 
+    /// グループ（と、グループの中の「詳細」）が開いているか。覚えていなければ既定（詳細だけ畳む）
+    pub(super) fn section_open(&self, id: &str) -> bool {
+        self.panel_open.get(id).copied().unwrap_or(!DEFAULT_CLOSED_SECTIONS.contains(&id))
+    }
+
+    /// グループ：見出し・開閉・添え書き（描き直さずに効く、など）
+    fn group_section(&self, id: &str, title: String, hint: Option<String>, items: Vec<Value>) -> Value {
+        json!({ "id": id, "title": title, "hint": hint, "open": self.section_open(id), "items": items })
+    }
+
+    /// グループの中の、畳める小さなまとまり（「詳細」）
+    fn sub_group(&self, id: &str, title: String, items: Vec<Value>) -> Value {
+        json!({ "t": "group", "id": id, "title": title, "open": self.section_open(id), "items": items })
+    }
+
+    /// 設定パネルの JSON。グループは作業の流れの順：選んだ部品 → 基板 → 照明 → カメラ → レンズ → 画像の仕上げ → 描画
     pub(super) fn panel_json(&self) -> String {
         let st = &self.st;
         let cfg = &self.prep.cfg;
         let cam = self.view_camera();
-        let mut sections = vec![self.selection_section()];
+        let mut sections = Vec::new();
 
-        // 環境マップ
+        // 選んだ部品（選んでいるときだけ。選び方は末尾の説明に出す）
+        if self.selected.is_some() {
+            let mut sel = self.selection_section();
+            sel["id"] = json!("selection");
+            sel["open"] = json!(self.section_open("selection"));
+            sections.push(sel);
+        }
+
+        // 基板：レジストの色・基材・表面の凹凸
+        let presets = mask_presets();
+        let mut mask_opts = vec![(String::new(), fl!("mask-as-configured"), String::new())];
+        mask_opts.extend(presets.iter().map(|p| (p.name.to_string(), p.name.to_string(), i18n::get(&format!("mask-note-{}", p.name)).unwrap_or_else(|| p.note.to_string()))));
+        let mask_value = st.mask_choice.map(|i| presets[i].name.to_string()).unwrap_or_default();
+        let mut sub_groups = vec![(String::new(), vec![(String::new(), fl!("substrate-fr4"), String::new())])];
+        for (cat, names) in material_editor::grouped_names(&self.library) {
+            if matches!(cat, krbr_scene::Category::Glass | krbr_scene::Category::Gem | krbr_scene::Category::Ceramic) {
+                sub_groups.push((material_editor::category_label(cat), names.iter().map(|n| (n.clone(), material_editor::material_label(&self.library, n), n.clone())).collect()));
+            }
+        }
+        let mut board = vec![
+            select("surface.mask", Some(fl!("mask-label")), &mask_value, vec![(String::new(), mask_opts)]),
+            select("surface.substrate", Some(fl!("substrate")), &cfg.scene.substrate, sub_groups),
+        ];
+        let clear = self.library.find(&cfg.scene.substrate).is_some_and(|m| m.transmission_weight > 0.0);
+        if clear && cfg.scene.mask_preset != "clear" {
+            board.push(note(fl!("substrate-clear-hint"), "muted"));
+        }
+        board.push(slider("surface.bump", fl!("bump-intensity"), st.bump_intensity as f64, 0.0, 2.0, false, 2, ""));
+        sections.push(self.group_section("board", fl!("panel-board"), None, board));
+
+        // 照明：環境マップ・強さ・回転
         let mut env = Vec::new();
         let groups = self.env_list.iter().map(|g| (String::new(), g.iter().map(|p| (p.clone(), env_label(p), env_tip(p))).collect())).collect();
         let current = self.env_list.iter().flatten().find(|p| remember::same_hdr(p, &self.env_path)).cloned().unwrap_or_else(|| self.env_path.clone());
@@ -248,17 +296,74 @@ impl App {
         }
         env.push(slider("env.intensity", fl!("env-intensity"), st.env_intensity as f64, 0.05, 8.0, true, 2, ""));
         env.push(slider("env.rotation", fl!("env-rotation"), st.env_rotation_deg as f64, -180.0, 180.0, false, 0, "°"));
-        sections.push(section(fl!("panel-environment"), env));
+        sections.push(self.group_section("lighting", fl!("panel-lighting"), None, env));
 
-        // 露出・グロー・ノイズ除去
-        let mut ex = vec![
-            slider("exposure.ev", "EV".into(), st.exposure as f64, -6.0, 6.0, false, 2, ""),
+        // カメラ：画角・視点・視点の操作
+        let mut camera = vec![
+            slider("camera.fov", fl!("camera-fov"), st.fov, 5.0, 90.0, false, 0, "°"),
+            note(fl!("camera-angles", elevation = format!("{:.0}", st.elevation), azimuth = format!("{:.0}", st.azimuth.rem_euclid(360.0))), "muted"),
+        ];
+        if self.has_board() {
+            let (cx, cy) = (self.prep.scene.board.center.x, self.prep.scene.board.center.y);
+            let t = st.target;
+            camera.push(kv(fl!("camera-web-target"), format!("x {}  y {}", format_length(t.x as f64 + cx), format_length(t.z as f64 + cy))));
+            camera.push(kv(fl!("camera-web-distance"), format_length(st.distance as f64)));
+            let p = cam.position;
+            camera.push(kv(fl!("camera-web-position"), format!("x {}  y {}", format_length(p.x as f64 + cx), format_length(p.z as f64 + cy))));
+            camera.push(kv(fl!("camera-web-height"), format_length(p.y as f64 - 0.5 * self.prep.scene.board.thickness)));
+        }
+        camera.push(buttons(vec![("camera.fit", fl!("camera-fit"), fl!("toolbar-fit-tip"), self.has_board()), ("camera.reset", fl!("camera-reset"), String::new(), true)]));
+        sections.push(self.group_section("camera", fl!("panel-camera"), None, camera));
+
+        // レンズ：種類・F 値・ピント・焦点距離。羽根・周辺減光・収差は「詳細」
+        let l = &cfg.lens;
+        let mut lens = vec![radio("lens.model", lens_model_name(l.model), vec![("pinhole", fl!("lens-pinhole")), ("thin", fl!("lens-thin")), ("realistic", fl!("lens-realistic"))])];
+        if l.model != LensModel::Pinhole {
+            lens.push(slider("lens.f", fl!("lens-f-number"), l.f_number as f64, 0.7, 22.0, true, 1, ""));
+            let focus = st.focus_point.map(|p| focus_distance_to(p, &cam)).unwrap_or(st.distance);
+            lens.push(slider("lens.focus", fl!("lens-focus"), focus as f64, 5.0, 5000.0, true, 0, ""));
+            lens.push(tip(buttons(vec![("lens.focus_auto", fl!("lens-focus-auto"), fl!("lens-focus-auto-tip"), st.focus_point.is_some())]), fl!("lens-focus-auto-tip")));
+            lens.push(note(if st.focus_point.is_some() { fl!("lens-focus-point-hint") } else { fl!("lens-focus-hint") }, "muted"));
+        }
+        if l.model == LensModel::Thin {
+            lens.push(slider("lens.focal", fl!("lens-focal-length"), l.focal_length_mm as f64, 10.0, 300.0, true, 0, ""));
+            let mut details = Vec::new();
+            let mut blades = slider("lens.blades", fl!("lens-blades"), l.blades as f64, 0.0, 12.0, false, 0, "");
+            blades["int"] = json!(true);
+            details.push(blades);
+            if l.blades >= 3 {
+                details.push(slider("lens.blade_rot", fl!("lens-blade-rotation"), l.blade_rotation_deg as f64, 0.0, 360.0, false, 0, "°"));
+                details.push(slider("lens.blade_round", fl!("lens-blade-roundness"), l.blade_roundness as f64, 0.0, 1.0, false, 2, ""));
+            }
+            details.push(check("lens.natural_vig", fl!("lens-natural-vignetting"), l.natural_vignetting));
+            details.push(slider("lens.optical_vig", fl!("lens-optical-vignetting"), l.optical_vignetting as f64, 0.0, 1.0, false, 2, ""));
+            details.push(slider("lens.abbe", fl!("lens-axial-ca"), l.abbe_number as f64, 0.0, 80.0, false, 0, ""));
+            details.push(slider("lens.lateral", fl!("lens-lateral-ca"), l.lateral_ca as f64, 0.0, 0.02, false, 3, ""));
+            if (l.abbe_number > 0.0 || l.lateral_ca > 0.0) && !st.spectral {
+                details.push(note(fl!("lens-ca-hint"), "warn"));
+            }
+            lens.push(self.sub_group("lens.details", fl!("panel-lens-details"), details));
+        }
+        sections.push(self.group_section("lens", fl!("panel-lens"), None, lens));
+
+        // 画像の仕上げ（描き直さずに効く）：露出・グロー・ノイズ除去
+        let mut exposure = slider("exposure.ev", fl!("exposure"), st.exposure as f64, -6.0, 6.0, false, 2, " EV");
+        exposure["step"] = json!(1.0 / 3.0); // 写真と同じ 1/3 段。Shift で 1 段
+        exposure["big"] = json!(1.0);
+        let mut finish = vec![
+            exposure,
             buttons(vec![("exposure.auto", fl!("exposure-auto"), String::new(), true), ("exposure.zero", "0".into(), String::new(), true)]),
             tip(slider("glow.strength", fl!("glow"), st.glow as f64, 0.0, 4.0, false, 2, ""), fl!("glow-tip")),
         ];
         if st.glow > 0.0 {
-            ex.push(tip(slider("glow.threshold", fl!("glow-threshold"), st.glow_threshold as f64, 0.5, 20.0, true, 1, ""), fl!("glow-threshold-tip")));
-            ex.push(tip(slider("glow.spread", fl!("glow-spread"), st.glow_spread as f64, 0.0, 1.0, false, 2, ""), fl!("glow-spread-tip")));
+            finish.push(self.sub_group(
+                "finish.glow",
+                fl!("panel-glow-details"),
+                vec![
+                    tip(slider("glow.threshold", fl!("glow-threshold"), st.glow_threshold as f64, 0.5, 20.0, true, 1, ""), fl!("glow-threshold-tip")),
+                    tip(slider("glow.spread", fl!("glow-spread"), st.glow_spread as f64, 0.0, 1.0, false, 2, ""), fl!("glow-spread-tip")),
+                ],
+            ));
         }
         let denoiser = self.gpu.as_ref().and_then(|g| g.denoiser.as_ref());
         let on_cpu = denoiser.is_some_and(|d| d.device_name() == "CPU");
@@ -271,91 +376,19 @@ impl App {
         } else if self.denoiser_tried && st.denoise {
             dn.push(note(fl!("denoise-unavailable"), "muted"));
         }
-        ex.push(row(dn));
+        finish.push(row(dn));
         if st.denoise {
-            ex.push(tip(slider("denoise.strength", fl!("denoise-strength"), st.denoise_strength as f64, 0.0, 1.0, false, 2, ""), fl!("denoise-strength-tip")));
+            finish.push(tip(slider("denoise.strength", fl!("denoise-strength"), st.denoise_strength as f64, 0.0, 1.0, false, 2, ""), fl!("denoise-strength-tip")));
             if on_cpu {
-                ex.push(note(fl!("denoise-cpu-hint"), "muted"));
+                finish.push(note(fl!("denoise-cpu-hint"), "muted"));
             }
             if !self.denoise_error.is_empty() {
-                ex.push(note(self.denoise_error.clone(), "error"));
+                finish.push(note(self.denoise_error.clone(), "error"));
             }
         }
-        sections.push(section(fl!("panel-exposure"), ex));
+        sections.push(self.group_section("finish", fl!("panel-finish"), Some(fl!("panel-finish-hint")), finish));
 
-        // 積分器
-        let kind = cfg.integrator;
-        sections.push(section(
-            fl!("panel-integrator"),
-            vec![
-                radio("integrator", kind.as_str(), IntegratorKind::ALL.iter().map(|k| (k.as_str(), k.as_str().to_uppercase())).collect()),
-                note(
-                    match kind {
-                        IntegratorKind::Pt => fl!("integrator-pt-hint"),
-                        IntegratorKind::Bdpt => fl!("integrator-bdpt-hint"),
-                        IntegratorKind::Vcm => fl!("integrator-vcm-hint"),
-                    },
-                    "muted",
-                ),
-            ],
-        ));
-
-        // レンズ
-        let l = &cfg.lens;
-        let mut lens = vec![radio("lens.model", lens_model_name(l.model), vec![("pinhole", fl!("lens-pinhole")), ("thin", fl!("lens-thin")), ("realistic", fl!("lens-realistic"))])];
-        if l.model != LensModel::Pinhole {
-            lens.push(slider("lens.f", fl!("lens-f-number"), l.f_number as f64, 0.7, 22.0, true, 1, ""));
-            let focus = st.focus_point.map(|p| focus_distance_to(p, &cam)).unwrap_or(st.distance);
-            lens.push(slider("lens.focus", fl!("lens-focus"), focus as f64, 5.0, 5000.0, true, 0, ""));
-            lens.push(tip(buttons(vec![("lens.focus_auto", fl!("lens-focus-auto"), fl!("lens-focus-auto-tip"), st.focus_point.is_some())]), fl!("lens-focus-auto-tip")));
-            lens.push(note(if st.focus_point.is_some() { fl!("lens-focus-point-hint") } else { fl!("lens-focus-hint") }, "muted"));
-        }
-        if l.model == LensModel::Thin {
-            lens.push(slider("lens.focal", fl!("lens-focal-length"), l.focal_length_mm as f64, 10.0, 300.0, true, 0, ""));
-            let mut blades = slider("lens.blades", fl!("lens-blades"), l.blades as f64, 0.0, 12.0, false, 0, "");
-            blades["int"] = json!(true);
-            lens.push(blades);
-            if l.blades >= 3 {
-                lens.push(slider("lens.blade_rot", fl!("lens-blade-rotation"), l.blade_rotation_deg as f64, 0.0, 360.0, false, 0, "°"));
-                lens.push(slider("lens.blade_round", fl!("lens-blade-roundness"), l.blade_roundness as f64, 0.0, 1.0, false, 2, ""));
-            }
-            lens.push(check("lens.natural_vig", fl!("lens-natural-vignetting"), l.natural_vignetting));
-            lens.push(slider("lens.optical_vig", fl!("lens-optical-vignetting"), l.optical_vignetting as f64, 0.0, 1.0, false, 2, ""));
-            lens.push(slider("lens.abbe", fl!("lens-axial-ca"), l.abbe_number as f64, 0.0, 80.0, false, 0, ""));
-            lens.push(slider("lens.lateral", fl!("lens-lateral-ca"), l.lateral_ca as f64, 0.0, 0.02, false, 3, ""));
-            if (l.abbe_number > 0.0 || l.lateral_ca > 0.0) && !st.spectral {
-                lens.push(note(fl!("lens-ca-hint"), "warn"));
-            }
-        }
-        sections.push(section(fl!("panel-lens"), lens));
-
-        // 色の計算
-        sections.push(section(fl!("panel-color"), vec![radio("color.spectral", if st.spectral { "spectral" } else { "rgb" }, vec![("rgb", "RGB".into()), ("spectral", fl!("color-spectral"))])]));
-
-        // 表面
-        let presets = mask_presets();
-        let mut mask_opts = vec![(String::new(), fl!("mask-as-configured"), String::new())];
-        mask_opts.extend(presets.iter().map(|p| (p.name.to_string(), p.name.to_string(), i18n::get(&format!("mask-note-{}", p.name)).unwrap_or_else(|| p.note.to_string()))));
-        let mask_value = st.mask_choice.map(|i| presets[i].name.to_string()).unwrap_or_default();
-        let mut sub_groups = vec![(String::new(), vec![(String::new(), fl!("substrate-fr4"), String::new())])];
-        for (cat, names) in material_editor::grouped_names(&self.library) {
-            if matches!(cat, krbr_scene::Category::Glass | krbr_scene::Category::Gem | krbr_scene::Category::Ceramic) {
-                sub_groups.push((material_editor::category_label(cat), names.iter().map(|n| (n.clone(), material_editor::material_label(&self.library, n), n.clone())).collect()));
-            }
-        }
-        let mut surface = vec![
-            slider("surface.bump", fl!("bump-intensity"), st.bump_intensity as f64, 0.0, 2.0, false, 2, ""),
-            select("surface.mask", None, &mask_value, vec![(String::new(), mask_opts)]),
-            note(fl!("mask-hint"), "muted"),
-            select("surface.substrate", Some(fl!("substrate")), &cfg.scene.substrate, sub_groups),
-        ];
-        let clear = self.library.find(&cfg.scene.substrate).is_some_and(|m| m.transmission_weight > 0.0);
-        if clear && cfg.scene.mask_preset != "clear" {
-            surface.push(note(fl!("substrate-clear-hint"), "muted"));
-        }
-        sections.push(section(fl!("panel-surface"), surface));
-
-        // 表示
+        // 描画：サイズ・比率・サンプル数・積分器・色の計算・表示の種類・保存
         let mut sizes = vec![("fit".to_string(), fl!("size-fit-window"), String::new())];
         sizes.extend(SIZE_PRESETS.iter().map(|&(w, h)| (format!("{w}x{h}"), size_label(w, h), String::new())));
         let size_value = st.size_mode.map(|(w, h)| format!("{w}x{h}")).unwrap_or_else(|| "fit".into());
@@ -376,42 +409,36 @@ impl App {
         let mut max_spp = slider("display.max_spp", fl!("max-spp"), e as f64, 4.0, 16.0, false, 0, "");
         max_spp["int"] = json!(true);
         max_spp["format"] = json!("pow2");
-        sections.push(section(
-            fl!("panel-display"),
-            vec![
-                select("display.size", None, &size_value, size_groups),
-                note(fl!("size-hint"), "muted"),
-                select("display.ratio", None, &format!("{}", st.render_ratio), ratio_groups),
-                note(fl!("ratio-hint"), "muted"),
-                radio("display.mode", display_mode_name(st.mode), vec![("image", fl!("mode-image")), ("albedo", fl!("mode-albedo")), ("normal", fl!("mode-normal"))]),
-                max_spp,
-            ],
-        ));
-
-        // カメラ
-        let mut camera = vec![
-            slider("camera.fov", fl!("camera-fov"), st.fov, 5.0, 90.0, false, 0, "°"),
-            note(fl!("camera-angles", elevation = format!("{:.0}", st.elevation), azimuth = format!("{:.0}", st.azimuth.rem_euclid(360.0))), "muted"),
+        let kind = cfg.integrator;
+        let render = vec![
+            select("display.size", None, &size_value, size_groups),
+            note(fl!("size-hint"), "muted"),
+            select("display.ratio", None, &format!("{}", st.render_ratio), ratio_groups),
+            note(fl!("ratio-hint"), "muted"),
+            max_spp,
+            radio("integrator", kind.as_str(), IntegratorKind::ALL.iter().map(|k| (k.as_str(), k.as_str().to_uppercase())).collect()),
+            note(
+                match kind {
+                    IntegratorKind::Pt => fl!("integrator-pt-hint"),
+                    IntegratorKind::Bdpt => fl!("integrator-bdpt-hint"),
+                    IntegratorKind::Vcm => fl!("integrator-vcm-hint"),
+                },
+                "muted",
+            ),
+            radio("color.spectral", if st.spectral { "spectral" } else { "rgb" }, vec![("rgb", "RGB".into()), ("spectral", fl!("color-spectral"))]),
+            radio("display.mode", display_mode_name(st.mode), vec![("image", fl!("mode-image")), ("albedo", fl!("mode-albedo")), ("normal", fl!("mode-normal"))]),
+            buttons(vec![("render.save", fl!("render-save"), fl!("render-save-tip"), true)]),
         ];
-        if self.has_board() {
-            let (cx, cy) = (self.prep.scene.board.center.x, self.prep.scene.board.center.y);
-            let t = st.target;
-            camera.push(kv(fl!("camera-web-target"), format!("x {}  y {}", format_length(t.x as f64 + cx), format_length(t.z as f64 + cy))));
-            camera.push(kv(fl!("camera-web-distance"), format_length(st.distance as f64)));
-            let p = cam.position;
-            camera.push(kv(fl!("camera-web-position"), format!("x {}  y {}", format_length(p.x as f64 + cx), format_length(p.z as f64 + cy))));
-            camera.push(kv(fl!("camera-web-height"), format_length(p.y as f64 - 0.5 * self.prep.scene.board.thickness)));
-        }
-        camera.push(buttons(vec![
-            ("camera.fit", fl!("camera-fit"), fl!("toolbar-fit-tip"), self.has_board()),
-            ("camera.reset", fl!("camera-reset"), String::new(), true),
-            ("camera.save", fl!("camera-save"), String::new(), true),
-        ]));
-        camera.push(note(fl!("panel-help-mouse"), "muted"));
-        camera.push(note(fl!("panel-help-toggle"), "muted"));
-        sections.push(section(fl!("panel-camera"), camera));
+        sections.push(self.group_section("render", fl!("panel-render"), None, render));
 
-        json!({ "title": fl!("panel-settings"), "closeTip": fl!("panel-close-tip"), "resizeTip": fl!("panel-resize-tip"), "sections": sections }).to_string()
+        // 末尾：操作の説明（グループにしない）
+        let mut help = vec![note(fl!("panel-help-mouse"), "muted"), note(fl!("panel-help-toggle"), "muted")];
+        if self.selected.is_none() {
+            help.insert(0, note(fl!("sel-none-hint"), "muted"));
+        }
+        sections.push(json!({ "id": "help", "plain": true, "items": help }));
+
+        json!({ "title": fl!("panel-settings"), "closeTip": fl!("panel-close-tip"), "resizeTip": fl!("panel-resize-tip"), "stepTip": fl!("panel-step-tip"), "sections": sections }).to_string()
     }
 
     /// パネルのボタン。パネルのものなら true
@@ -429,7 +456,13 @@ impl App {
             }
             "camera.fit" => st.req.fit_view = true,
             "camera.reset" => st.req.reset_view = true,
-            "camera.save" => st.req.save = true,
+            "render.save" => st.req.save = true,
+            id if id.starts_with("section:") => {
+                // グループ・詳細の開閉（覚えて、次に開いたときもそのまま）
+                let id = &id["section:".len()..];
+                let open = !self.section_open(id);
+                self.panel_open.insert(id.to_string(), open);
+            }
             "sel.deselect" => {
                 self.flush_emit_edit(true);
                 self.emit_edit = None;

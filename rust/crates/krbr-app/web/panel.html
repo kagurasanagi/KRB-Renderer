@@ -74,7 +74,7 @@ const el = (tag, cls, text) => {
 };
 
 function fmt(v, it) {
-  if (it.format === "pow2") return `2^${v} = ${1 << v}`;
+  if (it.format === "pow2") return `${1 << v}`; // 最大 spp：2 の累乗（値は指数。［−］［＋］で半分・2 倍）
   const d = it.digits ?? 2;
   return Number(v).toFixed(d) + (it.suffix || "");
 }
@@ -100,26 +100,91 @@ function slider(it) {
   range.value = toPos(it.value);
   const num = el("input", "num mono");
   num.type = it.format === "pow2" ? "text" : "number";
-  num.value = fmt(it.value, it).replace(it.suffix || "\u0000", "");
   num.readOnly = it.format === "pow2";
   const fill = () => range.style.setProperty("--p", (range.value / steps) * 100 + "%");
-  fill();
+  let cur = it.value;
+  // 値を表示に反映する（つまみ・数値欄）。send なら Rust へも送る
+  const show = (v, send) => {
+    cur = v;
+    range.value = toPos(v);
+    num.value = fmt(v, it).replace(it.suffix || "\u0000", "");
+    fill();
+    if (send) set(it.id, v);
+  };
+  show(it.value, false);
   range.addEventListener("input", () => {
     const v = toVal(Number(range.value));
+    cur = v;
     num.value = fmt(v, it).replace(it.suffix || "\u0000", "");
     fill();
     set(it.id, v);
   });
   num.addEventListener("change", () => {
     const v = Number(num.value);
-    if (Number.isFinite(v)) set(it.id, Math.min(it.max, Math.max(it.min, v)));
+    if (Number.isFinite(v)) show(Math.min(it.max, Math.max(it.min, v)), true);
+  });
+  // 最小単位での増減：今の値の次（前）の目盛り（step の整数倍）へ。Shift なら big の目盛り
+  const step = (dir, big) => {
+    const s = (big ? it.big : it.step) || it.step || 1;
+    const n = dir > 0 ? Math.floor(cur / s + 1e-6) + 1 : Math.ceil(cur / s - 1e-6) - 1;
+    let v = Number((n * s).toPrecision(12));
+    if (it.int) v = Math.round(v);
+    v = Math.min(it.max, Math.max(it.min, v));
+    if (v !== cur) show(v, true);
+  };
+  num.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    e.preventDefault();
+    step(e.key === "ArrowUp" ? 1 : -1, e.shiftKey);
   });
   const value = el("div", "value");
-  value.append(num);
+  value.append(stepButton("−", -1, step), num, stepButton("+", 1, step));
   if (it.suffix) value.append(el("span", "unit", it.suffix.trim()));
   row.append(label, range, value);
   return row;
 }
+
+// ［−］［＋］：押すと 1 回、押し続けると連続（だんだん速く）。Shift で大きな単位。
+// Shift は押した時点のものから始め、押し続けている間の Shift の押し・離しだけで変える（ページの外で離したときに残らない）
+function stepButton(text, dir, step) {
+  const b = el("button", "step", text);
+  b.title = stepTip;
+  b.tabIndex = -1;
+  let timer = null;
+  let shift = false;
+  const onKey = (e) => {
+    if (e.key === "Shift") shift = e.type === "keydown";
+  };
+  const stop = () => {
+    clearTimeout(timer);
+    timer = null;
+    window.removeEventListener("keydown", onKey);
+    window.removeEventListener("keyup", onKey);
+  };
+  b.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    shift = e.shiftKey;
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKey);
+    step(dir, shift);
+    // 押したまま外へ動かしても離すまで続ける（捕まえられなければ、離した・外れたで止まる）
+    try {
+      b.setPointerCapture(e.pointerId);
+    } catch (_) {}
+    let delay = 160;
+    const again = () => {
+      step(dir, shift);
+      delay = Math.max(30, delay * 0.85);
+      timer = setTimeout(again, delay);
+    };
+    timer = setTimeout(again, 400);
+  });
+  b.addEventListener("pointerup", stop);
+  b.addEventListener("pointercancel", stop);
+  b.addEventListener("lostpointercapture", stop);
+  return b;
+}
+let stepTip = "";
 
 function check(it) {
   const row = el("label", "check");
@@ -311,13 +376,32 @@ function parts(it) {
   return t;
 }
 
-const KINDS = { slider, check, radio, select, buttons, note, kv, row, parts };
+// 開閉できる見出しと中身：見出しを押すとすぐ開閉し、Rust に覚えてもらう（section:<id>）
+function foldable(cls, id, title, hint, open, items) {
+  const box = el("div", cls + (open ? " open" : ""));
+  const head = el("button", "fold-head");
+  head.append(el("span", "chev"), el("span", "fold-title", title));
+  if (hint) head.append(el("span", "fold-hint", hint));
+  const body = el("div", "fold-body");
+  for (const it of items) body.append(item(it));
+  head.addEventListener("click", () => {
+    box.classList.toggle("open");
+    click("section:" + id);
+  });
+  box.append(head, body);
+  return box;
+}
+
+const group = (it) => foldable("subgroup", it.id, it.title, null, it.open, it.items);
+
+const KINDS = { slider, check, radio, select, buttons, note, kv, row, parts, group };
 const item = (it) => KINDS[it.t](it);
 
 function render(m) {
   shown = m;
   shownKey = skeleton(m);
   notes = new Map();
+  stepTip = m.stepTip || "";
   document.getElementById("title").textContent = m.title;
   document.getElementById("close").title = m.closeTip;
   document.getElementById("resize").title = m.resizeTip;
@@ -325,10 +409,13 @@ function render(m) {
   const scroll = main.scrollTop;
   const frag = document.createDocumentFragment();
   for (const s of m.sections) {
-    const sec = el("section");
-    sec.append(el("h2", null, s.title));
-    for (const it of s.items) sec.append(item(it));
-    frag.append(sec);
+    if (s.plain) {
+      const foot = el("div", "panel-foot");
+      for (const it of s.items) foot.append(item(it));
+      frag.append(foot);
+      continue;
+    }
+    frag.append(foldable("card", s.id, s.title, s.hint, s.open, s.items));
   }
   main.replaceChildren(frag);
   main.scrollTop = scroll;

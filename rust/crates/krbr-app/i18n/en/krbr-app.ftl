@@ -140,7 +140,6 @@ panel-resize-tip = Drag to resize
 panel-help-mouse = Left drag: rotate  Right drag: pan  Wheel: zoom  Click: select a part
 panel-help-toggle = F1 / Tab: show or hide this panel
 
-panel-environment = Environment map
 env-builtin = { $id } (built-in)
 env-builtin-studio = Studio (built-in)
 env-builtin-studio-tip = A grey photo booth with a large softbox
@@ -155,7 +154,6 @@ env-not-an-environment = Not an environment map (.hdr / .exr): { $path }
 dlg-open-env-title = Open environment map
 dlg-env-filter = Environment maps (*.hdr, *.exr)
 
-panel-exposure = Exposure
 exposure-auto = Auto
 glow = Glow
 glow-tip = How strongly very bright lights, such as lit LEDs, bleed into their surroundings (0: none). Also applied to saved images
@@ -170,7 +168,6 @@ denoise-strength = Strength
 denoise-strength-tip = How much of the denoised image to blend in (1: the OIDN result as is; lower values keep a little detail and grain)
 denoise-cpu-hint = Running on the CPU, so it is applied only when rendering finishes and on the D key
 
-panel-integrator = Integrator
 integrator-pt-hint = Unidirectional (fast)
 integrator-bdpt-hint = Bidirectional (connects to paths from the lights)
 integrator-vcm-hint = Bidirectional + vertex merging (also converges caustics through transparent objects)
@@ -197,13 +194,10 @@ lens-lateral-ca = Lateral chromatic aberration
 lens-ca-hint = Chromatic aberration needs the spectral mode
 focus-set = Focused at { $mm }
 
-panel-color = Color computation
 color-spectral = Spectral (4 wavelengths)
 
-panel-surface = Surface
 bump-intensity = Bump strength
 mask-as-configured = As configured
-mask-hint = Solder mask color (preset)
 mask-note-green = KiCad / the common green
 mask-note-clear = Clear coat: no pigment (see-through with a clear substrate)
 mask-note-jlcpcb-green = JLCPCB Green: a slightly lighter green, glossy
@@ -211,7 +205,6 @@ mask-note-jlcpcb-purple = JLCPCB Purple: a bluish purple
 mask-note-jlcpcb-white = JLCPCB White: nearly opaque
 mask-note-jlcpcb-black = JLCPCB Black: glossy black
 
-panel-display = Display
 size-fit-window = Fit to window
 size-preset = { $size } ({ $name })
 size-full-hd = Full HD
@@ -239,7 +232,6 @@ camera-web-position = Camera (KiCad)
 camera-web-height = Height above the board
 camera-fit = Fit (F)
 camera-reset = Reset view (R)
-camera-save = Save (S)
 
 ## Selected part
 sel-title = Selected part
@@ -662,3 +654,15 @@ video-done = Exported the video: { $path } ({ $size } MB, { $time })
 video-cancelled = Stopped the export ({ $done } of { $total } frames written to { $path })
 video-failed = Could not export the video: { $error }
 webview-missing = The menus and the settings panel need the Microsoft Edge WebView2 Runtime, which was not found. Install it from https://developer.microsoft.com/microsoft-edge/webview2/ and start KRB Renderer again. The keys still work.
+panel-board = Board
+panel-lighting = Lighting
+panel-lens-details = Details (blades, vignetting, aberrations)
+panel-finish = Image finishing
+panel-finish-hint = Instant (no re-render)
+panel-glow-details = Glow details
+panel-render = Rendering
+panel-step-tip = Step by the smallest unit (hold to repeat, Shift for bigger steps)
+mask-label = Solder mask
+exposure = Exposure
+render-save = Save image (S)
+render-save-tip = Save a numbered PNG and EXR in the board's folder

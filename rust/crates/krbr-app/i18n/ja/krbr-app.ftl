@@ -140,7 +140,6 @@ panel-resize-tip = ドラッグで幅を変える
 panel-help-mouse = 左ドラッグ: 回転  右ドラッグ: 移動  ホイール: 拡大  クリック: 部品を選ぶ
 panel-help-toggle = F1 / Tab: このパネルの表示切り替え
 
-panel-environment = 環境マップ
 env-builtin = { $id }（内蔵）
 env-builtin-studio = スタジオ（内蔵）
 env-builtin-studio-tip = 灰色の撮影ブースと大きなソフトボックス
@@ -155,7 +154,6 @@ env-not-an-environment = 環境マップ（.hdr / .exr）ではない: { $path }
 dlg-open-env-title = 環境マップを開く
 dlg-env-filter = 環境マップ (*.hdr, *.exr)
 
-panel-exposure = 露出
 exposure-auto = 自動
 glow = グロー
 glow-tip = 点灯した LED など、とても明るい光が周りへにじむ強さ（0 でなし）。保存する画像にも入る
@@ -170,7 +168,6 @@ denoise-strength = 強さ
 denoise-strength-tip = 元の画像と混ぜる割合（1 で OIDN の結果そのまま。下げると細部やざらつきが少し残る）
 denoise-cpu-hint = CPU のため、収束時と D キーのときだけかけます
 
-panel-integrator = 積分器
 integrator-pt-hint = 単方向（速い）
 integrator-bdpt-hint = 双方向（光源側の経路とつなぐ）
 integrator-vcm-hint = 双方向＋近傍のまとめ（透明な物体越しの集光模様も収束）
@@ -197,13 +194,10 @@ lens-lateral-ca = 倍率色収差
 lens-ca-hint = 色収差は分光モードで有効
 focus-set = ピントを { $mm } に合わせた
 
-panel-color = 色の計算
 color-spectral = 分光（4 波長）
 
-panel-surface = 表面
 bump-intensity = 凹凸の強さ
 mask-as-configured = 設定どおり
-mask-hint = レジストの色（プリセット）
 mask-note-green = KiCad / 一般的な緑
 mask-note-clear = 透明なレジスト：顔料なし（透明な基材と組み合わせると基板が透ける）
 mask-note-jlcpcb-green = JLCPCB Green：やや明るい緑、光沢
@@ -211,7 +205,6 @@ mask-note-jlcpcb-purple = JLCPCB Purple：青みの紫
 mask-note-jlcpcb-white = JLCPCB White：ほぼ不透明
 mask-note-jlcpcb-black = JLCPCB Black：光沢の黒
 
-panel-display = 表示
 size-fit-window = ウィンドウに合わせる
 size-preset = { $size }（{ $name }）
 size-full-hd = フル HD
@@ -239,7 +232,6 @@ camera-web-position = カメラ（KiCad の座標）
 camera-web-height = 基板の上面からの高さ
 camera-fit = 全体を表示 (F)
 camera-reset = 視点を戻す (R)
-camera-save = 保存 (S)
 
 ## 選んだ部品
 sel-title = 選んだ部品
@@ -662,3 +654,15 @@ video-done = 動画を書き出しました：{ $path }（{ $size } MB、{ $time
 video-cancelled = 書き出しを中止しました（{ $total } コマのうち { $done } コマを { $path } に書きました）
 video-failed = 動画を書き出せませんでした：{ $error }
 webview-missing = メニューと設定パネルには Microsoft Edge WebView2 Runtime が必要ですが、見つかりませんでした。https://developer.microsoft.com/microsoft-edge/webview2/ から入れて、KRB Renderer を起動し直してください。キーの操作は使えます。
+panel-board = 基板
+panel-lighting = 照明
+panel-lens-details = 詳細（羽根・周辺減光・収差）
+panel-finish = 画像の仕上げ
+panel-finish-hint = すぐ効く（描き直さない）
+panel-glow-details = グローの詳細
+panel-render = 描画
+panel-step-tip = 最小単位で増減（押し続けると連続、Shift で大きく）
+mask-label = レジスト
+exposure = 露出
+render-save = 画像を保存 (S)
+render-save-tip = PNG と EXR を番号を付けて基板のフォルダに保存する

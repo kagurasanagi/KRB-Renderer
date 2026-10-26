@@ -487,11 +487,13 @@ pub struct WindowState {
     pub panel_shown: bool,
     /// 設定パネルの幅（egui のポイント）
     pub panel_width: Option<f32>,
+    /// 設定パネルのグループ・詳細の開閉（id → 開いているか。開閉したものだけ）
+    pub sections: std::collections::BTreeMap<String, bool>,
 }
 
 impl Default for WindowState {
     fn default() -> Self {
-        Self { size: None, position: None, maximized: false, panel_shown: true, panel_width: None }
+        Self { size: None, position: None, maximized: false, panel_shown: true, panel_width: None, sections: Default::default() }
     }
 }
 
@@ -507,6 +509,9 @@ fn window_state_in(t: &Table) -> WindowState {
     w.maximized = v.get("maximized").and_then(|x| x.as_bool()).unwrap_or(false);
     w.panel_shown = v.get("panel_shown").and_then(|x| x.as_bool()).unwrap_or(true);
     w.panel_width = v.get("panel_width").and_then(|x| x.as_float()).map(|x| x as f32);
+    if let Some(s) = v.get("sections").and_then(|x| x.as_table()) {
+        w.sections = s.iter().filter_map(|(k, v)| v.as_bool().map(|b| (k.clone(), b))).collect();
+    }
     w
 }
 
@@ -523,6 +528,9 @@ fn remember_window_in(t: &mut Table, w: &WindowState) {
     v.insert("panel_shown".into(), Value::Boolean(w.panel_shown));
     if let Some(pw) = w.panel_width {
         v.insert("panel_width".into(), Value::Float(pw as f64));
+    }
+    if !w.sections.is_empty() {
+        v.insert("sections".into(), Value::Table(w.sections.iter().map(|(k, b)| (k.clone(), Value::Boolean(*b))).collect()));
     }
     t.insert("window".into(), Value::Table(v));
 }
@@ -822,7 +830,7 @@ mod tests {
     fn window_state_round_trip() {
         let mut t = Table::new();
         assert_eq!(window_state_in(&t), WindowState::default());
-        let w = WindowState { size: Some((1600, 900)), position: Some((-1200, 40)), maximized: true, panel_shown: false, panel_width: Some(420.0) };
+        let w = WindowState { size: Some((1600, 900)), position: Some((-1200, 40)), maximized: true, panel_shown: false, panel_width: Some(420.0), sections: [("lens".to_string(), false), ("lens.details".to_string(), true)].into() };
         remember_window_in(&mut t, &w);
         let t: Table = t.to_string().parse().unwrap();
         assert_eq!(window_state_in(&t), w);

@@ -1070,6 +1070,8 @@ struct App {
     win_changed_at: Instant,
     /// 設定パネルの今の幅（egui のポイント）
     panel_width: f32,
+    /// 設定パネルのグループ・詳細の開閉（開閉したものだけ。ほかは既定。ウィンドウの状態と一緒に覚える）
+    panel_open: std::collections::BTreeMap<String, bool>,
     /// 決まったサイズに合わせてウィンドウの大きさを変えている途中：あと何フレーム合わせ直すか
     fit_frames: u32,
     /// 表示の言語（決まった言語タグ）と、メニューで選んだもの（None：自動）
@@ -1154,6 +1156,8 @@ const TITLE_BAR_PROBE: (i32, i32) = (40, 10);
 /// 覚えた大きさが無いときのウィンドウの中の大きさ（物理ピクセル）と、設定パネルの幅（egui のポイント）
 const DEFAULT_WINDOW_SIZE: (u32, u32) = (1600, 900);
 const DEFAULT_PANEL_WIDTH: f32 = 340.0;
+/// 設定パネルで初めは畳んでおく「詳細」（羽根・周辺減光・収差、グローのしきい値と広がり）
+const DEFAULT_CLOSED_SECTIONS: [&str; 2] = ["lens.details", "finish.glow"];
 
 fn ratio_label(r: f32) -> String {
     let what = if r < 1.0 {
@@ -1295,11 +1299,17 @@ impl App {
             w.size = Some((size.width, size.height));
             w.position = window.outer_position().ok().map(|p| (p.x, p.y));
         }
+        Some(self.with_panel_state(w))
+    }
+
+    /// ウィンドウの状態のうち、設定パネルのもの（表示・幅・グループの開閉）を今の値にする
+    fn with_panel_state(&self, mut w: remember::WindowState) -> remember::WindowState {
         w.panel_shown = self.st.show_panel;
+        w.sections = self.panel_open.clone();
         if self.st.show_panel {
             w.panel_width = Some(self.panel_width.round());
         }
-        Some(w)
+        w
     }
 
     /// パネルの設定とウィンドウの状態が変わっていたら覚える（最後に変わってから 1 秒たったら。now なら待たずに）
@@ -3833,6 +3843,7 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         win_saved: win.clone(),
         win_changed_at: Instant::now(),
         panel_width: win.panel_width.unwrap_or(DEFAULT_PANEL_WIDTH),
+        panel_open: win.sections.clone(),
         fit_frames: 0,
         language,
         language_choice,
@@ -4089,6 +4100,27 @@ mod tests {
             assert!(app.apply_panel_click(id), "{id}: the button is not handled");
         }
         assert!(app.st.req.reset_view && app.st.req.fit_view && app.st.req.save && app.st.focus_point.is_none() && app.st.exposure == 0.0);
+
+        // スライダーはどれも［−］［＋］の最小単位（step）と Shift の単位（big）を持つ。露出は 1/3 段、Shift で 1 段
+        let json: serde_json::Value = serde_json::from_str(&app.panel_json()).unwrap();
+        let (controls, _) = panel_controls(&app.panel_json());
+        for (id, c) in controls.iter().filter(|(_, c)| c["t"] == "slider") {
+            let (step, big, range) = (c["step"].as_f64().unwrap_or(0.0), c["big"].as_f64().unwrap_or(0.0), c["max"].as_f64().unwrap() - c["min"].as_f64().unwrap());
+            assert!(step > 0.0 && big >= step && step <= range / 10.0, "{id}: step {step}, big {big}, range {range}");
+        }
+        let ev = &controls.iter().find(|(id, _)| id == "exposure.ev").unwrap().1;
+        assert!((ev["step"].as_f64().unwrap() - 1.0 / 3.0).abs() < 1e-9 && ev["big"] == 1.0);
+
+        // グループは作業の流れの順。グループと詳細は開閉でき、開閉は覚える（ウィンドウの状態）
+        let ids: Vec<&str> = json["sections"].as_array().unwrap().iter().filter_map(|s| s["id"].as_str()).collect();
+        assert_eq!(ids, ["board", "lighting", "camera", "lens", "finish", "render", "help"]);
+        assert!(app.section_open("board") && !app.section_open("lens.details") && !app.section_open("finish.glow"));
+        assert!(app.apply_panel_click("section:board") && app.apply_panel_click("section:lens.details"));
+        assert!(!app.section_open("board") && app.section_open("lens.details"));
+        let json: serde_json::Value = serde_json::from_str(&app.panel_json()).unwrap();
+        assert_eq!(json["sections"][0]["open"], false);
+        let w = app.with_panel_state(app.win_seen.clone());
+        assert_eq!((w.sections.get("board"), w.sections.get("lens.details")), (Some(&false), Some(&true)));
 
         // 覚える値の往復：覚えた値を既定の設定に当てると、同じ値になる
         let v = app.current_view();
