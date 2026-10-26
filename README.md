@@ -39,7 +39,7 @@ KiCad の 3D ビューアは編集の邪魔をしない簡素な表示なので�
 2. KiCad で編集して保存すると、自動で描き直す
 3. `S` で画像を保存（基板のフォルダへ）。動画は「ファイル → 動画を書き出す」
 
-**KiCad から開く**：「設定 → KiCad プラグイン」で登録し、KiCad を開き直すと、PCB エディタのツールバーに「KRB Render でプレビュー」が出ます。
+![画面の見方](docs/images/viewer_annotated.png)
 
 | 操作 | 内容 |
 |---|---|
@@ -50,6 +50,22 @@ KiCad の 3D ビューアは編集の邪魔をしない簡素な表示なので�
 | Ctrl ＋クリック | ピントを合わせる |
 | `F` | 全体を表示 |
 | `P` | 一時停止 |
+
+### 材質を変える
+
+部品をクリックし、設定の「材質エディタ...」で見本から選びます。
+
+![材質エディタ](docs/images/material_editor.png)
+
+### KiCad から開く
+
+1. 「設定 → KiCad プラグイン」で、使っている KiCad の「登録」を押す
+
+   <img src="docs/images/kicad_plugin.png" width="60%" alt="KiCad プラグインの登録">
+
+2. KiCad を開き直すと、PCB エディタのツールバーにボタンが出る。押すとビューアが開きます
+
+   ![KiCad のツールバーに出るボタン](docs/images/kicad_toolbar.png)
 
 ## 困ったとき
 
