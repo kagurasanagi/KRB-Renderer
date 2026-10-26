@@ -660,4 +660,19 @@ mod tests {
         assert!(ring.holes[0].iter().all(|&p| holes.vertex_owner.get(&vertex_key(p)) == Some(&0)));
         assert!(ring.outer.iter().all(|&p| !holes.vertex_owner.contains_key(&vertex_key(p))));
     }
+
+    /// 基板を貫通する穴になるのは貫通ビアだけ（ブラインド・ベリッドのビアは、以前は貫通する穴とメッキの壁になっていた）
+    #[test]
+    fn only_through_vias_drill_the_board() {
+        let mut board = Board::default();
+        let c = [Vec2::new(0.0, 0.0), Vec2::new(20.0, 0.0), Vec2::new(20.0, 10.0), Vec2::new(0.0, 10.0)];
+        for i in 0..4 {
+            board.graphics.push(line(c[i], c[(i + 1) % 4]));
+        }
+        for (x, from, to) in [(5.0, "F.Cu", "B.Cu"), (10.0, "F.Cu", "In1.Cu"), (15.0, "In1.Cu", "In2.Cu")] {
+            board.vias.push(krbr_kicad::Via { pos: Vec2::new(x, 5.0), size: 0.6, drill: 0.3, layer_from: from.into(), layer_to: to.into(), tent_front: None, tent_back: None });
+        }
+        let geo = build_board_geometry(&board, &BoardBuildOptions::default());
+        assert_eq!(geo.hole_count, 1);
+    }
 }

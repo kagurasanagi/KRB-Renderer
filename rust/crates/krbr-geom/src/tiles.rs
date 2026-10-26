@@ -427,4 +427,39 @@ pub fn build_relief_tiles(cache: &mut ReliefTileCache, board: &Board, geo: &Boar
         tris
     );
     todo.len()
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use krbr_kicad::{Drill, Pad, PadShape, PadType, Vec2, Via};
+
+    /// パッドのレジスト開口の中のビア（QFN のサーマルビアなど）には、その面でくぼみを作らない（開口の側が優先する）
+    #[test]
+    fn via_in_a_pad_opening_gets_no_dimple() {
+        let mut board = Board::default();
+        board.pads.push(Pad {
+            number: "EP".into(),
+            kind: PadType::Smd,
+            shape: PadShape::Rect,
+            pos: Vec2::new(0.0, 0.0),
+            angle_deg: 0.0,
+            size: Vec2::new(3.0, 3.0),
+            rect_delta: Vec2::ZERO,
+            round_ratio: 0.0,
+            chamfer_ratio: 0.0,
+            chamfer_corners: 0,
+            drill: Drill::default(),
+            layers: vec!["F.Cu".into(), "F.Mask".into()],
+            mask_margin: None,
+            custom_anchor: PadShape::Circle,
+            primitives: Vec::new(),
+            footprint: None,
+        });
+        let v = |x: f64| Via { pos: Vec2::new(x, 0.0), size: 0.6, drill: 0.3, layer_from: "F.Cu".into(), layer_to: "B.Cu".into(), tent_front: None, tent_back: None };
+        assert!(via_in_mask_opening(&board, &v(0.5), Side::Front));
+        assert!(!via_in_mask_opening(&board, &v(0.5), Side::Back)); // 裏にはパッドが無い
+        assert!(!via_in_mask_opening(&board, &v(5.0), Side::Front)); // パッドの外
+    }
 }

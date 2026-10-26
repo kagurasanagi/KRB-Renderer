@@ -827,4 +827,21 @@ mod tests {
         let t: Table = t.to_string().parse().unwrap();
         assert_eq!(window_state_in(&t), w);
     }
+
+    /// 覚えたレジストの色が設定ファイルと同じなら当て直さない：設定ファイルに書いた粗さ・散乱がプリセットの値に戻らない
+    #[test]
+    fn remembered_mask_keeps_the_configured_scatter() {
+        let mut cfg = ProjectConfig::default();
+        apply_mask_color_spec(&mut cfg.scene, "jlcpcb-white").unwrap();
+        cfg.scene.mask_scatter = 0.5; // 設定ファイルで明示
+        let remembered = ViewSettings::of(&cfg).values();
+        let mut again = cfg.clone();
+        apply_view_values(&mut again, &remembered);
+        assert_eq!(again.scene.mask_scatter, 0.5);
+        // 別のプリセットを覚えていれば、そのプリセットにする
+        let mut other = remembered.clone();
+        other.insert("mask".into(), Value::String("jlcpcb-purple".into()));
+        apply_view_values(&mut again, &other);
+        assert_eq!(again.scene.mask_preset, "jlcpcb-purple");
+    }
 }

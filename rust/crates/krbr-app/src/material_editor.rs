@@ -1848,4 +1848,29 @@ mod tests {
         assert_eq!(material_label(&lib, "user_1+smooth"), "mine");
         assert!(valid_material_label(&unique_label(&lib, " a\nb ")));
     }
+
+    /// 止まってから書く部位の調整は、書く前に別の部品を選んでも、エディタを閉じても、調整した部品に書く（以前は捨てていた）
+    #[test]
+    fn pending_adjustments_are_written_to_their_part() {
+        let lib = MaterialLibrary::builtin();
+        let part = |r: &str| PartInfo { reference: r.into(), model: Some(0), instances: Vec::new(), rows: vec![PartRow { key: "Body 1".into(), material: "plastic".into(), scene_material: 0 }] };
+        let assigned_to = |actions: &[Action], r: &str| {
+            actions.iter().find_map(|a| match a {
+                Action::AssignTo { reference, model, part, material } if reference == r => Some((*model, part.clone(), material.clone())),
+                _ => None,
+            })
+        };
+        let mut e = MaterialEditor { open: true, ..Default::default() };
+        let mut actions = Vec::new();
+        e.adjust_to(Some(&part("U1")), "U1", "Body 1", "plastic+color=#ff0000".into(), &mut actions);
+        assert!(actions.is_empty(), "written only after the edit stops");
+        // 書く前に U2 を選んだ：U1 の調整をその場で書く
+        let actions = e.web_update(&lib, Some(&part("U2")));
+        assert_eq!(assigned_to(&actions, "U1"), Some((Some(0), "Body 1".to_string(), "plastic+color=#ff0000".to_string())));
+        // 書く前に閉じた：閉じたときに書く
+        e.adjust_to(Some(&part("U2")), "U2", "Body 1", "plastic+rough=0.5".into(), &mut Vec::new());
+        e.open = false;
+        let actions = e.web_update(&lib, Some(&part("U2")));
+        assert_eq!(assigned_to(&actions, "U2").map(|a| a.2), Some("plastic+rough=0.5".to_string()));
+    }
 }

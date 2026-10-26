@@ -335,3 +335,39 @@ pub fn cmd_probe() -> anyhow::Result<()> {
     info!("headless device created (no surface / swapchain)");
     Ok(())
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 消した自分の材質への割り当て（変種を付けたものも）を、基板の設定ファイルと全体の対応表から外す。ほかの指定は残す
+    #[test]
+    fn forgetting_a_material_removes_its_assignments() {
+        let _g = crate::config_lock();
+        let ws = std::env::temp_dir().join(format!("krbr_forget_material_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("config")).unwrap();
+        std::env::set_var("KRBR_CONFIG_DIR", ws.join("config"));
+        let pcb = ws.join("b.kicad_pcb");
+        std::fs::write(
+            ws.join("b.krbr"),
+            "[ref.U1]\nmaterial = \"user_abc+color=#ff0000\"\n\n[ref.U2]  # keep\nmaterial = \"plastic\"\nparts = { \"Body 1\" = \"user_abc\" }\n\n[[model]]\npath = \"x.step\"\nmaterial = \"user_abc\"\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join("config").join("model_map.toml"), "[[model]]\npath = \"y.step\"\nmaterial = \"user_abc\"\nparts = { a = \"plastic\" }\n").unwrap();
+        let written = forget_material(&pcb, "user_abc").unwrap();
+        assert_eq!(written.len(), 2);
+        let ms = load_material_setup(&pcb);
+        assert!(!ms.project.refs.contains_key("U1"));
+        let u2 = &ms.project.refs["U2"];
+        assert!(u2.material == "plastic" && u2.parts.is_empty());
+        assert!(ms.project.models.is_empty());
+        assert_eq!(ms.global.models.len(), 1);
+        assert!(ms.global.models[0].assign.material.is_empty() && ms.global.models[0].assign.parts["a"] == "plastic");
+        assert!(std::fs::read_to_string(ws.join("b.krbr")).unwrap().contains("[ref.U2]  # keep"));
+        // 使っていなければ何も書かない
+        assert!(forget_material(&pcb, "user_abc").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+}

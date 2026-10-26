@@ -148,4 +148,17 @@ mod tests {
         let (r, g, b) = aces_fitted(1.0, 1.0, 1.0);
         assert!(r < 1.0 && r > 0.55 && (r - g).abs() < 0.02 && (g - b).abs() < 0.02, "{r} {g} {b}");
     }
+
+    /// PNG など整数の画像は sRGB なので、リニアに戻して読む（.hdr / .exr はそのまま）
+    #[test]
+    fn ldr_images_are_read_as_linear() {
+        let dir = std::env::temp_dir().join(format!("krbr_rust_ldr_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("grey.png");
+        image::save_buffer(&p, &[128u8, 128, 128, 255], 1, 1, image::ColorType::Rgba8).unwrap();
+        let img = load_hdr_image(&p).unwrap();
+        assert!((img.rgba[0] - srgb_to_linear_f(128.0 / 255.0)).abs() < 1e-4 && (img.rgba[0] - 0.2158).abs() < 1e-3, "{}", img.rgba[0]);
+        assert_eq!(img.rgba[3], 1.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

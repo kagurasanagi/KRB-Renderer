@@ -548,4 +548,26 @@ mod tests {
         assert!((decode_sdf_mm(enc[w + 190]) - range).abs() < range * 0.01);
         assert!((decode_sdf_mm(enc[w + 2]) + range).abs() < range * 0.01);
     }
+
+    fn via(pos: Vec2, from: &str, to: &str, tent: bool) -> krbr_kicad::Via {
+        krbr_kicad::Via { pos, size: 0.6, drill: 0.3, layer_from: from.into(), layer_to: to.into(), tent_front: Some(tent), tent_back: Some(tent) }
+    }
+
+    /// ビアのランドは、届いている面だけ（ブラインドビアは片面、ベリッドビアはどちらにも出ない）。
+    /// 開いたビアのレジスト開口は、基板のレジストの広がり（pad_to_mask_clearance）だけ広い
+    #[test]
+    fn vias_appear_only_on_the_sides_they_reach() {
+        let mut board = Board::default();
+        board.setup.pad_to_mask_clearance = 0.05;
+        board.vias.push(via(Vec2::new(0.0, 0.0), "F.Cu", "B.Cu", false)); // 貫通
+        board.vias.push(via(Vec2::new(5.0, 0.0), "F.Cu", "In1.Cu", false)); // ブラインド（表）
+        board.vias.push(via(Vec2::new(10.0, 0.0), "In1.Cu", "In2.Cu", false)); // ベリッド
+        let opts = LayerArtOptions::default();
+        let (front, back) = (collect_side_paths(&board, Side::Front, &opts, None), collect_side_paths(&board, Side::Back, &opts, None));
+        let land = std::f64::consts::PI * 0.3 * 0.3;
+        assert!((area(&front.copper) - 2.0 * land).abs() < 0.02, "{}", area(&front.copper));
+        assert!((area(&back.copper) - land).abs() < 0.01, "{}", area(&back.copper));
+        let opening = std::f64::consts::PI * 0.35 * 0.35;
+        assert!((area(&front.mask_open) - 2.0 * opening).abs() < 0.02, "{}", area(&front.mask_open));
+    }
 }

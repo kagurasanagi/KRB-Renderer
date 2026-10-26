@@ -650,4 +650,22 @@ x = 1
             assert!(apply_mask_color_spec(&mut o, bad).is_err(), "{bad}");
         }
     }
+
+    /// ひな形のレジストのプリセット名の行のコメントを外すと、プリセットの色・粗さ・散乱になる
+    /// （以前はひな形の mask_roughness / mask_scatter の行が緑の値で上書きし、白いレジストが半透明になった）
+    #[test]
+    fn template_preset_line_sets_the_whole_preset() {
+        let _g = config_lock();
+        let (proj, ws) = workspace("config_template_preset");
+        let pcb = proj.join("b.kicad_pcb");
+        write_default_configs(&pcb);
+        let file = proj.join("b.krbr");
+        let text = std::fs::read_to_string(&file).unwrap();
+        let line = text.lines().find(|l| l.trim_start().starts_with("# mask_color = \"jlcpcb-purple\"")).expect("the template has a preset line");
+        std::fs::write(&file, text.replace(line, "mask_color = \"jlcpcb-white\"")).unwrap();
+        let c = load_project_config(&pcb);
+        let p = find_mask_preset("jlcpcb-white").unwrap();
+        assert_eq!((c.scene.mask_preset.as_str(), c.scene.mask_roughness, c.scene.mask_scatter), ("jlcpcb-white", p.roughness, p.scatter));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 }

@@ -1249,4 +1249,26 @@ mod tests {
         // 設定で固定した高さはそのまま
         assert_eq!(placeholder_height_for(1.0, Vec2::ZERO, Vec2::new(30.0, 30.0)), 1.0);
     }
+
+    /// 材質の設定のファイルの書き換え：材質の割り当てが変わったときだけ新しい設定を返す（ビューアが覚えた設定を書いただけなら返さない）
+    #[test]
+    fn material_files_watch_reports_content_changes_only() {
+        let _g = crate::board_file::tests::config_lock();
+        let (proj, ws) = crate::board_file::tests::workspace("material_watch");
+        let pcb = proj.join("b.kicad_pcb");
+        let file = crate::board_file::resolve(&pcb);
+        let setup = load_material_setup(&pcb);
+        let mut w = MaterialFilesWatch::new(&pcb);
+        let wait = || std::thread::sleep(std::time::Duration::from_millis(1100));
+        wait();
+        assert!(w.poll(&pcb, &setup).is_none());
+        std::fs::write(&file, "[render]\nspp = 8\n").unwrap(); // 材質に関係の無い書き換え
+        wait();
+        assert!(w.poll(&pcb, &setup).is_none());
+        std::fs::write(&file, "[render]\nspp = 8\n[ref.U1]\nmaterial = \"metal_gold\"\n").unwrap();
+        wait();
+        let new = w.poll(&pcb, &setup).expect("the assignment changed");
+        assert_eq!(new.project.refs["U1"].material, "metal_gold");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 }
