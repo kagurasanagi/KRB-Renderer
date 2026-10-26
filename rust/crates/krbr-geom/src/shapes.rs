@@ -217,20 +217,20 @@ fn basic_shape(shape: PadShape, size: Vec2, p: &Pad) -> Paths {
         }
         PadShape::RoundRect => {
             let r = p.round_ratio.clamp(0.0, 0.5) * min_dim;
-            let base: Paths = to_path(&if p.chamfer_corners != 0 {
-                chamfered_rect_pts(size, p.chamfer_ratio * min_dim, p.chamfer_corners)
-            } else {
-                rect_pts(size)
-            })
-            .into();
+            let chamfered = p.chamfer_corners != 0 && p.chamfer_ratio > 0.0;
+            let chamfer_base = || -> Paths { to_path(&chamfered_rect_pts(size, p.chamfer_ratio * min_dim, p.chamfer_corners)).into() };
             if r <= 0.0 {
-                return base;
+                return if chamfered { chamfer_base() } else { to_path(&rect_pts(size)).into() };
             }
+            // 角を丸めた四角形。面取りする角は、そこから面取りの三角形を切る（KiCad と同じ。面取りの辺の端は丸めない）
+            let base: Paths = to_path(&rect_pts(size)).into();
             let shrunk = base.inflate(-r, JoinType::Miter, EndType::Polygon, 10.0);
-            if shrunk.is_empty() {
-                return disc(Vec2::ZERO, min_dim / 2.0);
+            let rounded = if shrunk.is_empty() { disc(Vec2::ZERO, min_dim / 2.0) } else { shrunk.inflate(r, JoinType::Round, EndType::Polygon, 2.0) };
+            if chamfered {
+                intersect(&rounded, &chamfer_base())
+            } else {
+                rounded
             }
-            shrunk.inflate(r, JoinType::Round, EndType::Polygon, 2.0)
         }
         PadShape::Custom => Paths::new(Vec::new()),
     }
@@ -427,6 +427,36 @@ mod tests {
         let rings = nest_rings(&body);
         assert_eq!(rings.len(), 1);
         assert_eq!(rings[0].holes.len(), 1);
+    }
+
+    /// 丸めと面取りを併用した角丸四角形：面取りの辺の両端は角のまま（KiCad と同じ）。ほかの角は丸める
+    #[test]
+    fn chamfered_corner_of_a_round_rect_stays_sharp() {
+        let p = Pad {
+            number: "1".into(),
+            kind: krbr_kicad::PadType::Smd,
+            shape: PadShape::RoundRect,
+            pos: Vec2::ZERO,
+            angle_deg: 0.0,
+            size: Vec2::new(2.0, 2.0),
+            rect_delta: Vec2::ZERO,
+            round_ratio: 0.25,
+            chamfer_ratio: 0.4,
+            chamfer_corners: 1,
+            drill: Default::default(),
+            layers: Vec::new(),
+            mask_margin: None,
+            custom_anchor: PadShape::Circle,
+            primitives: Vec::new(),
+            footprint: None,
+        };
+        let paths = basic_shape(PadShape::RoundRect, p.size, &p);
+        let pts: Vec<Vec2> = paths.iter().flat_map(|path| path.iter().map(|q| Vec2::new(q.x(), q.y())).collect::<Vec<_>>()).collect();
+        let has = |v: Vec2| pts.iter().any(|q| (*q - v).length() < 1e-3);
+        // 左上の面取り（0.4 × 2 = 0.8）の辺の両端
+        assert!(has(Vec2::new(-1.0, -0.2)) && has(Vec2::new(-0.2, -1.0)), "{pts:?}");
+        // 右下の角は丸い（角の点は無い）
+        assert!(!has(Vec2::new(1.0, 1.0)));
     }
 
     #[test]

@@ -87,33 +87,40 @@ fn outline_loops(board: &Board, open_chains: &mut usize) -> Vec<Vec<Vec2>> {
         }
         used[i] = true;
         let mut chain = open[i].clone();
-        let mut extended = true;
-        while extended && !near(chain[0], *chain.last().unwrap()) {
-            extended = false;
+        // 末尾の側へ伸ばし、行き止まりになったときだけ先頭の側へ 1 本伸ばす。閉じたらそこで止める。
+        // 以前は 1 回の走査で両端へ伸ばし、閉じた後も続けたので、輪郭が閉じる点に触れる別の輪郭（面付けした基板、
+        // 外形と頂点を共有する切り欠き）までつないで 1 本にしていた
+        while !near(chain[0], *chain.last().unwrap()) {
+            let mut extended = false;
             for j in 0..open.len() {
                 if used[j] {
                     continue;
                 }
                 let p = &open[j];
-                let (front, back) = (chain[0], *chain.last().unwrap());
+                let back = *chain.last().unwrap();
                 if near(back, p[0]) {
                     chain.extend_from_slice(&p[1..]);
                 } else if near(back, *p.last().unwrap()) {
                     chain.extend(p[..p.len() - 1].iter().rev());
-                } else if near(front, *p.last().unwrap()) {
-                    let mut c = p[..p.len() - 1].to_vec();
-                    c.extend(chain.iter());
-                    chain = c;
-                } else if near(front, p[0]) {
-                    let mut c: Vec<Vec2> = p[1..].iter().rev().cloned().collect();
-                    c.extend(chain.iter());
-                    chain = c;
                 } else {
                     continue;
                 }
                 used[j] = true;
                 extended = true;
+                if near(chain[0], *chain.last().unwrap()) {
+                    break;
+                }
             }
+            if extended {
+                continue;
+            }
+            let front = chain[0];
+            let Some(j) = (0..open.len()).find(|&j| !used[j] && (near(front, open[j][0]) || near(front, *open[j].last().unwrap()))) else { break };
+            let p = &open[j];
+            let mut c: Vec<Vec2> = if near(front, *p.last().unwrap()) { p[..p.len() - 1].to_vec() } else { p[1..].iter().rev().cloned().collect() };
+            c.extend(chain.iter());
+            chain = c;
+            used[j] = true;
         }
         if near(chain[0], *chain.last().unwrap()) {
             chain.pop();
@@ -433,6 +440,28 @@ mod tests {
 
     fn line(a: Vec2, b: Vec2) -> Graphic {
         Graphic { kind: GrKind::Line, layer: "Edge.Cuts".into(), start: a, end: b, ..Default::default() }
+    }
+
+    /// 頂点を共有する 2 つの四角形（面付けした基板など）は、2 本の輪郭のまま（以前は閉じた後もつなぎ続けて 1 本になった）
+    #[test]
+    fn outlines_sharing_a_vertex_stay_separate() {
+        let mut board = Board::default();
+        let a = [Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), Vec2::new(10.0, 10.0), Vec2::new(0.0, 10.0)];
+        let b = [Vec2::new(0.0, 0.0), Vec2::new(-10.0, 0.0), Vec2::new(-10.0, -10.0), Vec2::new(0.0, -10.0)];
+        // 共有する頂点は a の輪郭が閉じる点。a の最後の辺を b の辺より後に並べる（a が閉じた時点で、まだ b の辺が残っている）
+        for i in 0..3 {
+            board.graphics.push(line(a[i], a[i + 1]));
+        }
+        for i in 0..4 {
+            board.graphics.push(line(b[i], b[(i + 1) % 4]));
+        }
+        board.graphics.push(line(a[3], a[0]));
+        let mut open = 0;
+        let loops = outline_loops(&board, &mut open);
+        assert_eq!(open, 0);
+        let mut sizes: Vec<usize> = loops.iter().map(|l| l.len()).collect();
+        sizes.sort();
+        assert_eq!(sizes, vec![4, 4]);
     }
 
     #[test]

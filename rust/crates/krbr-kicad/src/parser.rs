@@ -101,10 +101,23 @@ fn read_graphic(n: &Node, kind: &str, xf: &Xform, fp: Option<usize>) -> Option<G
         }
         "arc" => {
             g.kind = GrKind::Arc;
-            n.child("mid")?; // 旧形式（angle 指定）は非対応
-            g.start = xf.apply(xy(n.child("start")));
-            g.mid = xf.apply(xy(n.child("mid")));
-            g.end = xf.apply(xy(n.child("end")));
+            if n.has("mid") {
+                g.start = xf.apply(xy(n.child("start")));
+                g.mid = xf.apply(xy(n.child("mid")));
+                g.end = xf.apply(xy(n.child("end")));
+            } else {
+                // KiCad 5 の形：(start 中心) (end 始点) (angle 角度)。終点は始点を中心のまわりに角度だけ回した点
+                // （KiCad の座標は y が下向きなので、正の角度は画面で時計回り。KiCad 6 が読み替えるときと同じ）
+                let (c, s) = (xy(n.child("start")), xy(n.child("end")));
+                let a = n.child_num("angle")?.to_radians();
+                let rot = |t: f64| {
+                    let d = s - c;
+                    c + Vec2::new(d.x * t.cos() - d.y * t.sin(), d.x * t.sin() + d.y * t.cos())
+                };
+                g.start = xf.apply(s);
+                g.mid = xf.apply(rot(a / 2.0));
+                g.end = xf.apply(rot(a));
+            }
         }
         "circle" => {
             g.kind = GrKind::Circle;
@@ -390,7 +403,9 @@ fn read_zone(n: &Node, board: &mut Board) {
     for fpoly in n.children("filled_polygon") {
         let pts = read_pts(fpoly.child("pts"));
         if pts.len() >= 3 {
-            board.zones.push(ZoneFill { layer: fpoly.child_str("layer").unwrap_or("").to_string(), pts });
+            // KiCad 5 の filled_polygon には層が無い（ゾーン自身の (layer) の層）
+            let layer = fpoly.child_str("layer").or_else(|| n.child_str("layer")).unwrap_or("");
+            board.zones.push(ZoneFill { layer: layer.to_string(), pts });
         }
     }
 }
@@ -816,6 +831,23 @@ mod tests {
         let (lo, hi) = k.pts.iter().fold((Vec2::splat(99.0), Vec2::splat(-99.0)), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
         assert!((lo - Vec2::new(9.9, 9.9)).length() < 1e-9 && (hi - Vec2::new(10.3, 11.1)).length() < 1e-9, "{lo} {hi}");
         assert!(b.graphics[3].cutouts.is_empty() && b.graphics[3].pts.len() == 4);
+    }
+
+    /// KiCad 5 の形：円弧は (start 中心) (end 始点) (angle 角度)、ベタの filled_polygon には層が無い。
+    /// 中点・終点は kicad-cli pcb upgrade の結果と同じ（以前は円弧を捨て、ベタは層が空で消えていた）
+    #[test]
+    fn kicad5_arcs_and_zone_fills() {
+        let text = r#"(kicad_pcb (version 20171130) (host pcbnew 5.1.12)
+  (gr_arc (start 10 10) (end 15 10) (angle 90) (layer Edge.Cuts) (width 0.1))
+  (zone (net 1) (net_name GND) (layer F.Cu) (tstamp 0) (hatch edge 0.508)
+    (filled_polygon (pts (xy 0 0) (xy 5 0) (xy 5 5))))
+)"#;
+        let b = load_text("k5.kicad_pcb", text);
+        let arc = b.graphics.iter().find(|g| g.kind == GrKind::Arc).expect("arc");
+        let near = |p: Vec2, x: f64, y: f64| (p - Vec2::new(x, y)).length() < 1e-5;
+        assert!(near(arc.start, 15.0, 10.0) && near(arc.mid, 13.535534, 13.535534) && near(arc.end, 10.0, 15.0), "{:?}", arc);
+        assert_eq!(b.zones.len(), 1);
+        assert_eq!(b.zones[0].layer, "F.Cu");
     }
 
     /// レジストの広がりは パッド → 部品 → 基板 の順に継ぐ（以前は部品の指定を読まず、基板の既定に飛んでいた）
