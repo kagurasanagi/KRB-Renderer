@@ -1575,7 +1575,7 @@ impl App {
         let wh = window.window_handle().map_err(|e| format!("{e}"))?.as_raw();
         let exts = ash_window::enumerate_required_extensions(display).map_err(|e| format!("{e:?}"))?.to_vec();
         let factory: krbr_render::vk::SurfaceFactory = Box::new(move |entry, instance| unsafe { ash_window::create_surface(entry, instance, display, wh, None) }.map_err(|e| format!("surface: {e:?}")));
-        let ctx: &'static Context = Box::leak(Box::new(Context::new(&ContextOptions { validation: self.vo.common.validate, low_queue_priority: true, instance_extensions: exts, create_surface: Some(factory) })?));
+        let ctx: &'static Context = Box::leak(Box::new(Context::new(&ContextOptions { validation: self.vo.common.validate, low_queue_priority: true, instance_extensions: exts, create_surface: Some(factory), ..Default::default() })?));
         // 積分器が GpuScene への参照を持つので、ムーブしてもアドレスが変わらないよう Box に入れる
         let mut gpu = Box::new(GpuScene::new(ctx));
         gpu.build(&self.prep.scene, &self.prep.env, &self.prep.dist, self.st.bump_intensity).map_err(|e| format!("GPU scene: {e}"))?;

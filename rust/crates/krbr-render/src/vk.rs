@@ -30,6 +30,8 @@ pub type SurfaceFactory = Box<dyn Fn(&ash::Entry, &ash::Instance) -> Result<vk::
 #[derive(Default)]
 pub struct ContextOptions {
     pub validation: bool,
+    /// 検証レイヤーの同期の検証（コマンドの間のバリアの抜け）も有効にする（validation のときだけ。遅い。テスト用）
+    pub sync_validation: bool,
     /// VK_KHR_global_priority が使えれば LOW で作る。画面表示するときは、計算専用のファミリーがあれば、サンプルを積む
     /// キュー（render_queue）だけを LOW にして、表示のキュー（queue）は普通の優先度にする（重い描画の間も画面が滑らかに動く）
     pub low_queue_priority: bool,
@@ -119,6 +121,14 @@ fn query_info(instance: &ash::Instance, pd: vk::PhysicalDevice) -> DeviceInfo {
     }
 }
 
+/// 検証レイヤーが報告したエラーの数（プロセス全体。テストで、描画の前後の差を見る）
+static VALIDATION_ERRORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// 検証レイヤーが報告したエラーの数（プロセスを始めてからの合計）
+pub fn validation_error_count() -> usize {
+    VALIDATION_ERRORS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 unsafe extern "system" fn debug_callback(
     severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     _types: vk::DebugUtilsMessageTypeFlagsEXT,
@@ -127,6 +137,7 @@ unsafe extern "system" fn debug_callback(
 ) -> vk::Bool32 {
     let msg = if data.is_null() || (*data).p_message.is_null() { String::new() } else { CStr::from_ptr((*data).p_message).to_string_lossy().into_owned() };
     if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) {
+        VALIDATION_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         krbr_core::error!("[vulkan] {}", msg);
     } else if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING) {
         krbr_core::warn!("[vulkan] {}", msg);
@@ -134,7 +145,7 @@ unsafe extern "system" fn debug_callback(
     vk::FALSE
 }
 
-fn create_instance(entry: &ash::Entry, validation: bool, extra_exts: &[*const c_char]) -> Result<(ash::Instance, bool), String> {
+fn create_instance(entry: &ash::Entry, validation: bool, sync_validation: bool, extra_exts: &[*const c_char]) -> Result<(ash::Instance, bool), String> {
     let app_name = CString::new("krbr").unwrap();
     let app = vk::ApplicationInfo::default().application_name(&app_name).application_version(vk::make_api_version(0, 0, 1, 0)).engine_name(&app_name).api_version(vk::API_VERSION_1_3);
     let mut layers: Vec<*const c_char> = Vec::new();
@@ -152,7 +163,12 @@ fn create_instance(entry: &ash::Entry, validation: bool, extra_exts: &[*const c_
             krbr_core::warn!("validation layer not available");
         }
     }
-    let ci = vk::InstanceCreateInfo::default().application_info(&app).enabled_layer_names(&layers).enabled_extension_names(&exts);
+    let enables = [vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION];
+    let mut features = vk::ValidationFeaturesEXT::default().enabled_validation_features(&enables);
+    let mut ci = vk::InstanceCreateInfo::default().application_info(&app).enabled_layer_names(&layers).enabled_extension_names(&exts);
+    if with_validation && sync_validation {
+        ci = ci.push_next(&mut features);
+    }
     // 安全性：引数の文字列は関数の終わりまで生きている
     let instance = unsafe { entry.create_instance(&ci, None) }.map_err(|e| format!("vkCreateInstance failed ({e:?})"))?;
     Ok((instance, with_validation))
@@ -192,7 +208,7 @@ impl Context {
     pub fn enumerate() -> Result<Vec<DeviceInfo>, String> {
         // 安全性：Vulkan ローダーの読み込み
         let entry = unsafe { ash::Entry::load() }.map_err(|e| format!("Vulkan loader not found: {e}"))?;
-        let (instance, _) = create_instance(&entry, false, &[])?;
+        let (instance, _) = create_instance(&entry, false, false, &[])?;
         let out = unsafe { instance.enumerate_physical_devices() }.unwrap_or_default().into_iter().map(|pd| query_info(&instance, pd)).collect();
         unsafe { instance.destroy_instance(None) };
         Ok(out)
@@ -200,7 +216,7 @@ impl Context {
 
     pub fn new(opts: &ContextOptions) -> Result<Self, String> {
         let entry = unsafe { ash::Entry::load() }.map_err(|e| format!("Vulkan loader not found: {e}"))?;
-        let (instance, with_validation) = create_instance(&entry, opts.validation, &opts.instance_extensions)?;
+        let (instance, with_validation) = create_instance(&entry, opts.validation, opts.sync_validation, &opts.instance_extensions)?;
         let (surface, surface_loader) = match &opts.create_surface {
             Some(f) => (f(&entry, &instance)?, Some(khr::surface::Instance::new(&entry, &instance))),
             None => (vk::SurfaceKHR::null(), None),
@@ -583,6 +599,11 @@ impl Context {
     }
 
     /// 1 回きりのコマンドを記録して完了まで待つ。投入や待機に失敗したら Err（デバイスを失ったときなど）
+    /// 検証レイヤーを有効にして作ったか（レイヤーが無ければ、指定しても無効のまま）
+    pub fn validating(&self) -> bool {
+        self.debug.is_some()
+    }
+
     pub fn submit_and_wait(&self, record: impl FnOnce(&ash::Device, vk::CommandBuffer)) -> Result<(), String> {
         let dev = &self.device;
         let ai = vk::CommandBufferAllocateInfo::default().command_pool(self.pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1);
