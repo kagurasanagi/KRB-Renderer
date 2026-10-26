@@ -317,17 +317,7 @@ fn read_pad(n: &Node, xf: &Xform, fp: Option<usize>, board: &mut Board) {
         primitives: Vec::new(),
         footprint: fp,
     };
-    if let Some(ch) = n.child("chamfer") {
-        for i in 1..ch.len() {
-            p.chamfer_corners |= match ch.str(i) {
-                "top_left" => 1,
-                "top_right" => 2,
-                "bottom_left" => 4,
-                "bottom_right" => 8,
-                _ => 0,
-            };
-        }
-    }
+    p.chamfer_corners = read_chamfer_corners(n);
     if let Some(d) = n.child("drill") {
         p.drill.present = true;
         let mut i = 1;
@@ -352,29 +342,81 @@ fn read_pad(n: &Node, xf: &Xform, fp: Option<usize>, board: &mut Board) {
         }
     }
     if p.shape == PadShape::Custom {
-        if let Some(a) = n.child("options").and_then(|o| o.child_str("anchor")) {
-            p.custom_anchor = parse_shape(a);
+        read_custom_primitives(&mut p, n, fp);
+    }
+    // KiCad 9 以降の padstack（層ごとの形）：裏の銅箔に別の形があれば、パッドを表（と内層。穴はこちら）と裏に分ける。
+    // レジストの開口は、その面の銅箔の形に従う（KiCad と同じ）。以前は表の形を両面に使っていた
+    if let Some(back) = n.child("padstack").and_then(|ps| ps.children("layer").find(|l| l.str(1) == "B.Cu")) {
+        let mut b = p.clone();
+        apply_layer_shape(&mut b, back, fp);
+        b.drill.present = false; // 穴は表のパッドが開ける
+        b.layers = side_layers(&p.layers, "B.");
+        p.layers = p.layers.iter().filter(|l| !l.starts_with("B.")).map(|l| l.replace("*.", "F.").replace("F&B.", "F.")).collect();
+        board.pads.push(p);
+        board.pads.push(b);
+        return;
+    }
+    board.pads.push(p);
+}
+
+/// padstack の層の形（(layer "B.Cu" (shape rect) (size w h) ...)）をパッドに当てる。書いていない項目は既定値
+fn apply_layer_shape(p: &mut Pad, l: &Node, fp: Option<usize>) {
+    p.shape = parse_shape(l.child_str("shape").unwrap_or("circle"));
+    p.size = xy(l.child("size"));
+    p.rect_delta = xy(l.child("rect_delta"));
+    p.round_ratio = l.child_num("roundrect_rratio").unwrap_or(0.25);
+    p.chamfer_ratio = l.child_num("chamfer_ratio").unwrap_or(0.0);
+    p.chamfer_corners = read_chamfer_corners(l);
+    p.drill.offset = xy(l.child("offset"));
+    p.custom_anchor = PadShape::Circle;
+    p.primitives.clear();
+    if p.shape == PadShape::Custom {
+        read_custom_primitives(p, l, fp);
+    }
+}
+
+/// 層の一覧のうち、面 prefix（"B." など）のもの（"*.Cu"・"F&B.Cu" はその面の層にする）
+fn side_layers(layers: &[String], prefix: &str) -> Vec<String> {
+    layers.iter().filter(|l| l.starts_with(prefix) || l.starts_with("*.") || l.starts_with("F&B.")).map(|l| l.replace("*.", prefix).replace("F&B.", prefix)).collect()
+}
+
+/// (chamfer top_left bottom_right ...) の角のビット
+fn read_chamfer_corners(n: &Node) -> u32 {
+    let mut corners = 0;
+    if let Some(ch) = n.child("chamfer") {
+        for i in 1..ch.len() {
+            corners |= match ch.str(i) {
+                "top_left" => 1,
+                "top_right" => 2,
+                "bottom_left" => 4,
+                "bottom_right" => 8,
+                _ => 0,
+            };
         }
-        if let Some(prims) = n.child("primitives") {
-            let ident = Xform::default();
-            for it in &prims.items {
-                if !it.is_list {
-                    continue;
+    }
+    corners
+}
+
+/// カスタムパッドの基準の形（options の anchor）とプリミティブ
+fn read_custom_primitives(p: &mut Pad, n: &Node, fp: Option<usize>) {
+    if let Some(a) = n.child("options").and_then(|o| o.child_str("anchor")) {
+        p.custom_anchor = parse_shape(a);
+    }
+    if let Some(prims) = n.child("primitives") {
+        let ident = Xform::default();
+        for it in &prims.items {
+            if !it.is_list {
+                continue;
+            }
+            let Some(kind) = it.tag().strip_prefix("gr_") else { continue };
+            if let Some(mut g) = read_graphic(it, kind, &ident, fp) {
+                if !it.has("fill") && g.kind == GrKind::Poly {
+                    g.filled = true; // 旧形式の既定
                 }
-                let Some(kind) = it.tag().strip_prefix("gr_") else { continue };
-                if let Some(mut g) = read_graphic(it, kind, &ident, fp) {
-                    if !it.has("fill") && g.kind == GrKind::Poly {
-                        g.filled = true; // 旧形式の既定
-                    }
-                    p.primitives.push(g);
-                }
+                p.primitives.push(g);
             }
         }
     }
-    if n.has("padstack") {
-        krbr_core::debug!("pad {} uses padstack (per-layer shapes); using default layer shape", p.number);
-    }
-    board.pads.push(p);
 }
 
 fn read_model(n: &Node) -> Model3D {
@@ -848,6 +890,25 @@ mod tests {
         assert!(near(arc.start, 15.0, 10.0) && near(arc.mid, 13.535534, 13.535534) && near(arc.end, 10.0, 15.0), "{:?}", arc);
         assert_eq!(b.zones.len(), 1);
         assert_eq!(b.zones[0].layer, "F.Cu");
+    }
+
+    /// padstack（KiCad 9 以降）で裏の銅箔の形が違うパッドは、表（穴あり）と裏（裏の形、穴なし）に分ける
+    #[test]
+    fn padstack_back_layer_shape() {
+        let text = r#"(kicad_pcb (version 20260206) (generator "pcbnew")
+  (footprint "Test:P" (layer "F.Cu") (uuid "f1") (at 10 10 0)
+    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1) (layers "*.Cu" "*.Mask") (uuid "p1")
+      (padstack (mode front_inner_back)
+        (layer "Inner" (shape circle) (size 1.2 1.2))
+        (layer "B.Cu" (shape roundrect) (size 2.5 1.7) (roundrect_rratio 0.1)))))
+)"#;
+        let b = load_text("padstack.kicad_pcb", text);
+        assert_eq!(b.pads.len(), 2);
+        let (f, k) = (&b.pads[0], &b.pads[1]);
+        assert!(f.on_layer("F.Cu") && f.on_layer("F.Mask") && !f.on_layer("B.Cu") && !f.on_layer("B.Mask") && f.drill.present);
+        assert!(k.on_layer("B.Cu") && k.on_layer("B.Mask") && !k.on_layer("F.Cu") && !k.drill.present);
+        assert_eq!((f.shape, f.size), (PadShape::Circle, Vec2::new(1.7, 1.7)));
+        assert_eq!((k.shape, k.size, k.round_ratio), (PadShape::RoundRect, Vec2::new(2.5, 1.7), 0.1));
     }
 
     /// レジストの広がりは パッド → 部品 → 基板 の順に継ぐ（以前は部品の指定を読まず、基板の既定に飛んでいた）
