@@ -21,6 +21,14 @@ C++ は STEP 変換器 DLL（step_dll/、CMake・vcpkg は OpenCASCADE と glm �
 - GitHub Releases への公開（公開の前に確認を取る）
 - KiCad 11 で旧来の Action Plugin（SWIG の pcbnew）が無くなるので、IPC API のプラグイン（plugin.json）に移す
 
+## V2：Ubuntu（Linux）対応（2026-10-26 決定。最初の公開は Windows 専用）
+- 画面の部品（WebView）は、まず XWayland で動かす：Linux では winit を X11 で起動し、wry の子ウィンドウ（build_as_child は X11 のみ）で今と同じ作りにする。
+  要るもの：GTK の初期化とフレームごとの GTK のイベント処理、表示範囲の切り抜き（Windows の SetWindowRgn）の X11 版（GDK の shape）
+- ネイティブの Wayland は将来の課題：3D を Vulkan のサブサーフェスに描いて GTK の透明なウィンドウの下に敷く（入力とイベントループを GTK に移す）か、
+  WebView を画面外で描かせて Vulkan で合成する（WPE WebKit / CEF の画面外描画。ウィンドウは 1 枚）
+- ほかに Linux で要るもの：ビルド（webkit2gtk の開発用パッケージ、STEP 変換器の Linux 版）、動画の書き出し（今は Windows の Media Foundation だけ）、
+  KiCad プラグインの登録、配布の形。描画の確認には GPU のある実機の Ubuntu が要る（WSL の Vulkan ではレイトレーシングがほぼ使えない）
+
 ## 実装予定機能リスト（Arnold / V-Ray / Corona の系統で、公開情報のある技術）
 優先度の高い順に進める。各項目で、参考にする論文や公開実装を明示すること。
 1. LightMix：光源グループごとに AOV を出力し、後から合成する。LED の点灯・消灯を、描画し直さずに切り替えられるようにする
