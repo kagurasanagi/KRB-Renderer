@@ -45,6 +45,8 @@ pub(crate) fn needs_kicad_cli(n: &Node) -> bool {
         "fp_text_box" | "gr_text_box" => true,
         // 寸法線・表・ターゲット（krbr は形を作らない。以前はどの経路でも描かれず、消えていた）
         "dimension" | "table" | "target" => true,
+        // バーコード（KiCad 10。ファイルには中身の文字列しか無く、模様は KiCad が作る）
+        "barcode" => true,
         _ => false,
     }
 }
@@ -93,13 +95,13 @@ fn filter_footprint(fp: &Node) -> Node {
                 }
                 out.items.push(t);
             }
-            "fp_text_box" | "dimension" | "table" | "target" => {
+            "fp_text_box" | "dimension" | "table" | "target" | "barcode" => {
                 if plotted_by_kicad_cli(it) {
                     out.items.push(it.clone());
                 }
             }
             // 図形・パッド・ゾーン・3D モデルなどは要らない
-            "pad" | "zone" | "model" | "group" | "image" | "barcode" => {}
+            "pad" | "zone" | "model" | "group" | "image" => {}
             t if t.starts_with("fp_") => {}
             _ => out.items.push(it.clone()),
         }
@@ -130,7 +132,7 @@ pub fn stroke_text_only_board(text: &str) -> Result<String, String> {
                 out.items.push(l);
             }
             "footprint" | "module" => out.items.push(filter_footprint(it)),
-            "gr_text" | "gr_text_box" | "dimension" | "table" | "target" => {
+            "gr_text" | "gr_text_box" | "dimension" | "table" | "target" | "barcode" => {
                 if plotted_by_kicad_cli(it) {
                     out.items.push(it.clone());
                 }
@@ -237,16 +239,19 @@ mod tests {
     (gr_text "40 mm" (at 130 143.85 0) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15)))))
   (table (column_count 1) (layer "F.SilkS") (uuid "tb1") (cells (table_cell "A" (start 10 10) (end 20 15) (layer "F.SilkS") (effects (font (size 1 1))))))
   (target plus (at 5 5) (size 5) (width 0.1) (layer "Edge.Cuts") (uuid "tg1"))
+  (barcode (at 60 60 0) (layer "F.SilkS") (size 10 10) (text "https://example.com") (text_height 1) (type qr) (ecc_level L) (uuid "bc1"))
+  (barcode (at 80 60 0) (layer "F.Fab") (size 10 10) (text "fab") (type qr) (uuid "bc2"))
 )"#;
 
     #[test]
-    fn dimensions_and_tables_are_plotted_and_counted() {
+    fn dimensions_tables_and_barcodes_are_plotted_and_counted() {
         let out = parse(&stroke_text_only_board(BOARD_WITH_DIMENSIONS).unwrap()).unwrap();
         let fp = out.child("footprint").unwrap();
         assert_eq!(fp.children("dimension").count(), 1); // 部品図の層のものは渡さない
         assert_eq!(out.children("dimension").count(), 1);
         assert_eq!(out.children("table").count(), 1);
         assert!(!out.has("target")); // 外形の層は描かせない
+        assert_eq!(out.children("barcode").map(|b| b.child_str("uuid").unwrap()).collect::<Vec<_>>(), vec!["bc1"]);
 
         let dir = std::env::temp_dir().join(format!("krbr_rust_dimension_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -255,9 +260,12 @@ mod tests {
         let b = crate::parser::load_board(&file);
         let _ = std::fs::remove_dir_all(&dir);
         let b = b.unwrap();
-        assert_eq!(b.stroke_text_count(), 3);
+        assert_eq!(b.stroke_text_count(), 4);
         let d1 = b.items.iter().find(|it| it.key == "d1").unwrap();
         assert!(d1.stroke_text && d1.bbox.lo.x <= 110.0 && d1.bbox.hi.x >= 150.0 && d1.bbox.lo.y <= 143.85);
+        // バーコードは置き場所の 1 点から、大きさと文字の分を広げた範囲
+        let bc1 = b.items.iter().find(|it| it.key == "bc1").unwrap();
+        assert!(bc1.stroke_text && bc1.bbox.lo.x <= 50.0 && bc1.bbox.hi.x >= 70.0 && bc1.bbox.lo.y <= 50.0 && bc1.bbox.hi.y >= 71.0);
     }
 
     /// 銅箔・マスク・内層・部品図の層の文字を含む基板

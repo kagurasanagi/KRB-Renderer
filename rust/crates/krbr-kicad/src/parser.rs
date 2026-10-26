@@ -223,7 +223,7 @@ fn read_text(n: &Node, fp: Option<usize>, xf: &Xform, board: &mut Board) {
     board.stroke_texts.push(StrokeText { text: text.to_string(), layer: layer.to_string(), pos, footprint: fp, bbox: stroke_text_box(n, text, pos) });
 }
 
-/// 寸法線・表・ターゲット。krbr は形を作らず、銅箔・マスク・シルクの層のものは kicad-cli に描かせる（文字の枠と同じく
+/// 寸法線・表・ターゲット・バーコード。krbr は形を作らず、銅箔・マスク・シルクの層のものは kicad-cli に描かせる（文字の枠と同じく
 /// 線フォントの文字の一覧に入れて、kicad-cli を呼ぶかの判定と差分の検出に含める）。範囲は中の点すべて（部品内なら、
 /// 部品に対する座標と見たときの基板座標も含める）に、矢印・文字のはみ出しを見込んだ余白を足したもの
 fn read_plotted_item(n: &Node, fp: Option<usize>, xf: &Xform, board: &mut Board) {
@@ -241,6 +241,12 @@ fn read_plotted_item(n: &Node, fp: Option<usize>, xf: &Xform, board: &mut Board)
     }
     let mut pts = Vec::new();
     collect(n, &mut pts);
+    // バーコードは置き場所の 1 点だけなので、大きさ（と下に添える文字）の分を、回しても収まるよう広げる
+    if let (Some(&at), Some(size)) = (pts.first(), n.child("size")) {
+        let r = size.num(1).max(size.num(2)) + n.child_num("text_height").unwrap_or(0.0);
+        pts.push(at + Vec2::splat(r));
+        pts.push(at - Vec2::splat(r));
+    }
     let mut bbox = Box2::default();
     for p in pts {
         bbox.add(p);
@@ -498,7 +504,7 @@ fn read_footprint(n: &Node, board: &mut Board) {
                 read_text(it, idx, &xf, board);
             }
             "fp_text_box" => read_text_box(it, idx, &xf, board),
-            "dimension" | "table" | "target" => read_plotted_item(it, idx, &xf, board),
+            "dimension" | "table" | "target" | "barcode" => read_plotted_item(it, idx, &xf, board),
             "pad" => read_pad(it, &xf, idx, board),
             "model" => fp.models.push(read_model(it)),
             "zone" => read_zone(it, board),
@@ -657,7 +663,7 @@ pub fn load_board(file: &Path) -> Result<Board, LoadError> {
         if matches!(tag, "general" | "layers" | "setup") {
             setup_key += &to_hex(hash);
         }
-        let is_item = matches!(tag, "footprint" | "module" | "segment" | "arc" | "via" | "zone" | "dimension" | "table" | "target") || tag.starts_with("gr_");
+        let is_item = matches!(tag, "footprint" | "module" | "segment" | "arc" | "via" | "zone" | "dimension" | "table" | "target" | "barcode") || tag.starts_with("gr_");
         let mark = mark_of(&board);
         match tag {
             "setup" => read_setup(it, &mut board),
@@ -692,7 +698,7 @@ pub fn load_board(file: &Path) -> Result<Board, LoadError> {
             "zone" => read_zone(it, &mut board),
             "gr_text" => read_text(it, None, &ident, &mut board),
             "gr_text_box" => read_text_box(it, None, &ident, &mut board),
-            "dimension" | "table" | "target" => read_plotted_item(it, None, &ident, &mut board),
+            "dimension" | "table" | "target" | "barcode" => read_plotted_item(it, None, &ident, &mut board),
             _ => {
                 if let Some(kind) = tag.strip_prefix("gr_") {
                     if let Some(g) = read_graphic(it, kind, &ident, None) {
