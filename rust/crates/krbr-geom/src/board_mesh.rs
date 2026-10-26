@@ -399,7 +399,8 @@ pub fn build_board_geometry(board: &Board, opts: &BoardBuildOptions) -> BoardGeo
         geo.hole_count += 1;
     }
     for v in &board.vias {
-        if v.drill <= 0.0 {
+        // ブラインド・ベリッドのビアは基板を貫通しない（外に届く面のランドとくぼみは relief が作る）
+        if v.drill <= 0.0 || !v.is_through() {
             continue;
         }
         holes.add(v.pos, 0.0, Vec2::splat(v.drill), false, true);

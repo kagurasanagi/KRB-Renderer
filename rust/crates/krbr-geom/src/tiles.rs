@@ -167,7 +167,14 @@ impl ReliefTileCache {
 
 /// ディスクのキャッシュの版：タイルの作り方（relief.rs・raster.rs・このファイル）を変えたら上げる。
 /// krbr.exe を作り直すとキー（tile_keys）が変わるので、開発中は上げ忘れても古いタイルは使わない
-const TILE_KEY_VERSION: u32 = 1;
+const TILE_KEY_VERSION: u32 = 2;
+
+/// ビアの穴が、その面のパッドのレジスト開口にかかっているか（パッドの中のビア。KiCad と同じく開口の側が優先する）
+fn via_in_mask_opening(board: &Board, v: &krbr_kicad::Via, side: Side) -> bool {
+    let mask = side.mask_layer();
+    let hole = disc(v.pos, v.drill / 2.0);
+    board.pads.iter().any(|p| p.on_layer(mask) && p.extent(&board.setup).intersects(&v.bbox()) && !intersect(&hole, &pad_to_paths(p, p.mask_expansion(&board.setup))).is_empty())
+}
 
 fn hash_paths(h: &mut Vec<u8>, p: &Paths) {
     for path in p.iter() {
@@ -270,7 +277,9 @@ pub fn build_relief_tiles(cache: &mut ReliefTileCache, board: &Board, geo: &Boar
     for side in Side::BOTH {
         let mut tented = Paths::new(Vec::new());
         for v in &board.vias {
-            if v.tented(side, &board.setup) && v.drill > 0.0 {
+            // くぼみは、その面に届くビア（ブラインドビアは片面だけ）で、パッドのレジスト開口に入っていないもの
+            // （パッドの中のビアは、開口の側が優先して穴が見える）
+            if v.reaches(side) && v.tented(side, &board.setup) && v.drill > 0.0 && !via_in_mask_opening(board, v, side) {
                 append(&mut tented, disc(v.pos, v.drill / 2.0));
                 tented_vias[side as usize].push(ReliefDimple { pos: v.pos, radius: v.drill / 2.0, build: true });
             }

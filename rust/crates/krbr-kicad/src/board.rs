@@ -350,9 +350,20 @@ pub struct Via {
 }
 
 impl Via {
-    /// 銅のランドの外接矩形（ビアのレジスト開口はランドと同じ大きさで、穴はランドの内側）
+    /// 銅のランドの外接矩形（ビアのレジスト開口はランドとレジストの広がりの分の大きさで、穴はランドの内側）
     pub fn bbox(&self) -> Box2 {
         Box2::around(self.pos, self.size / 2.0)
+    }
+
+    /// その面の銅箔まで届いているか（貫通ビアは両面、ブラインドビアは片面、ベリッドビアはどちらにも届かない）
+    pub fn reaches(&self, side: Side) -> bool {
+        let cu = side.copper_layer();
+        self.layer_from == cu || self.layer_to == cu
+    }
+
+    /// 基板を貫通する穴か（ブラインド・ベリッドのビアは、外から見て穴にならない）
+    pub fn is_through(&self) -> bool {
+        self.reaches(Side::Front) && self.reaches(Side::Back)
     }
 
     /// その面でレジストにふさがれているか（ビアごとの指定が無ければ基板の既定）

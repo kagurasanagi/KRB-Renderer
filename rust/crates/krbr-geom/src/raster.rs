@@ -1,7 +1,7 @@
 //! 層ごとの多角形の集め方（銅・レジスト開口・シルク）、被覆率のラスタライズ、縁からの距離場
 
 use clipper2::FillRule;
-use krbr_kicad::{Board, Box2, Pad, PadType, Via};
+use krbr_kicad::{Board, Box2, Pad, PadType};
 /// 基板の面（krbr-kicad に移した。ここからも使えるように残す）
 pub use krbr_kicad::Side;
 
@@ -38,10 +38,6 @@ fn pad_has_copper(p: &Pad) -> bool {
     p.size.x > p.drill.size.x + 1e-6 || p.size.y > p.drill.size.y + 1e-6
 }
 
-fn via_on_side(v: &Via, cu: &str) -> bool {
-    v.layer_from == cu || v.layer_to == cu
-}
-
 fn path_box(p: &Path) -> Box2 {
     let mut b = Box2::default();
     for q in path_points(p) {
@@ -75,12 +71,16 @@ pub fn collect_side_paths(board: &Board, side: Side, opts: &LayerArtOptions, cli
         }
     }
     for v in &board.vias {
-        if !via_on_side(v, cu) || !near(&v.bbox()) {
+        if !v.reaches(side) || !near(&v.bbox()) {
             continue;
         }
         append(&mut sp.copper, disc(v.pos, v.size / 2.0));
         if !v.tented(side, &board.setup) {
-            append(&mut sp.mask_open, disc(v.pos, v.size / 2.0));
+            // KiCad 7 以降、ビアの開口も基板のレジストの広がり（pad_to_mask_clearance）だけ広げる
+            let r = v.size / 2.0 + board.setup.pad_to_mask_clearance;
+            if r > 0.0 {
+                append(&mut sp.mask_open, disc(v.pos, r));
+            }
         }
     }
     for z in &board.zones {

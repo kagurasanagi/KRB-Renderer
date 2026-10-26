@@ -172,7 +172,8 @@ fn stroke_text_box(n: &Node, text: &str, pos: Vec2) -> Box2 {
 }
 
 /// 文字（property / fp_text / gr_text）。render_cache があれば多角形として取り込む。
-/// xf は部品の位置と向き（部品の文字の位置と角度は、部品に対する値で保存されている。基板直下の文字は恒等変換）
+/// xf は部品の位置と向き（部品の文字の位置は部品に対する値、角度は基板に対する値（読める向きにそろえた絶対の角度）で
+/// 保存されている。基板直下の文字は恒等変換）
 fn read_text(n: &Node, fp: Option<usize>, xf: &Xform, board: &mut Board) {
     if is_hidden(n) {
         return;
@@ -188,7 +189,8 @@ fn read_text(n: &Node, fp: Option<usize>, xf: &Xform, board: &mut Board) {
         let text_graphic = |pts: Vec<Vec2>, cutouts: Vec<Vec<Vec2>>| Graphic { kind: GrKind::Poly, layer: layer.to_string(), filled: true, footprint: fp, from_text: true, pts, cutouts, ..Default::default() };
         if knockout && !glyphs.is_empty() {
             let (height, _, thickness) = font_metrics(n);
-            let angle = n.child("at").map(|a| a.num_or(3, 0.0)).unwrap_or(0.0) + xf.angle;
+            // 部品の文字でも (at x y 角度) の角度は基板に対する値（部品の回転を足すと二重になる。180° の部品の文字は 0°）
+            let angle = n.child("at").map(|a| a.num_or(3, 0.0)).unwrap_or(0.0);
             let hull = knockout_box(&glyphs, angle, (0.5 * thickness).max(height / 9.0));
             board.graphics.push(text_graphic(hull, glyphs));
         } else {
@@ -378,6 +380,7 @@ fn read_footprint(n: &Node, board: &mut Board) {
     }
     let idx = Some(board.footprints.len());
     let xf = Xform { pos: fp.pos, angle: fp.angle_deg };
+    let first_pad = board.pads.len();
 
     for it in &n.items {
         if !it.is_list {
@@ -413,6 +416,12 @@ fn read_footprint(n: &Node, board: &mut Board) {
                     }
                 }
             }
+        }
+    }
+    // レジストの広がりは パッド → 部品 → 基板 の順に継ぐ（部品の指定が無いパッドに部品の値を入れる）
+    if let Some(m) = n.child_num("solder_mask_margin") {
+        for p in board.pads[first_pad..].iter_mut().filter(|p| p.mask_margin.is_none()) {
+            p.mask_margin = Some(m);
         }
     }
     board.footprints.push(fp);
@@ -770,5 +779,37 @@ mod tests {
         let (lo, hi) = k.pts.iter().fold((Vec2::splat(99.0), Vec2::splat(-99.0)), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
         assert!((lo - Vec2::new(9.9, 9.9)).length() < 1e-9 && (hi - Vec2::new(10.3, 11.1)).length() < 1e-9, "{lo} {hi}");
         assert!(b.graphics[3].cutouts.is_empty() && b.graphics[3].pts.len() == 4);
+    }
+
+    /// レジストの広がりは パッド → 部品 → 基板 の順に継ぐ（以前は部品の指定を読まず、基板の既定に飛んでいた）
+    #[test]
+    fn footprint_solder_mask_margin_is_inherited() {
+        let text = r#"(kicad_pcb (version 20260206) (generator "pcbnew")
+  (setup (pad_to_mask_clearance 0.02))
+  (footprint "Test:M" (layer "F.Cu") (uuid "f1") (at 10 10 0) (solder_mask_margin 0.05)
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask") (uuid "p1"))
+    (pad "2" smd rect (at 2 0) (size 1 1) (layers "F.Cu" "F.Mask") (solder_mask_margin 0.1) (uuid "p2")))
+  (footprint "Test:N" (layer "F.Cu") (uuid "f2") (at 20 10 0)
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask") (uuid "p3")))
+)"#;
+        let b = load_text("mask_margin.kicad_pcb", text);
+        let m: Vec<f64> = b.pads.iter().map(|p| p.mask_expansion(&b.setup)).collect();
+        assert_eq!(m, vec![0.05, 0.1, 0.02]);
+    }
+
+    /// 部品の中の knockout の文字：角度は基板に対する値なので、45° の部品の 0° の文字は、軸にそろった四角形で抜く
+    /// （以前は部品の角度を足して、45° 傾いた大きな四角形になっていた）
+    #[test]
+    fn knockout_text_in_a_rotated_footprint() {
+        let text = r#"(kicad_pcb (version 20260206) (generator "pcbnew")
+  (footprint "Test:K" (layer "F.Cu") (uuid "f1") (at 10 10 45)
+    (property "Reference" "I" (at 0 0 0) (layer "F.Mask" knockout) (uuid "p1")
+      (effects (font (size 0.9 0.9) (thickness 0.2)))
+      (render_cache "I" 0 (polygon (pts (xy 10 10) (xy 10.2 10) (xy 10.2 11) (xy 10 11))))))
+)"#;
+        let b = load_text("knockout_fp.kicad_pcb", text);
+        let k = b.graphics.iter().find(|g| !g.cutouts.is_empty()).expect("knockout text");
+        let (lo, hi) = k.pts.iter().fold((Vec2::splat(99.0), Vec2::splat(-99.0)), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+        assert!((lo - Vec2::new(9.9, 9.9)).length() < 1e-9 && (hi - Vec2::new(10.3, 11.1)).length() < 1e-9, "{lo} {hi}");
     }
 }
