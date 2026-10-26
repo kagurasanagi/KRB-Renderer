@@ -480,7 +480,7 @@ bump_scale = 0.1
 
 **KiCad のプラグイン**：ビューアのメニューの「設定 → KiCad プラグイン...」で、PCB エディタのツールバーに「KRB Render でプレビュー」のボタンを足します。KiCad は版ごとに別のユーザーフォルダを使うので、見つかった版（9.0、10.0、nightly など）ごとに状態（未登録・登録済み・別の `krbr.exe` を指している・指している `krbr.exe` が無い・ファイルが古い）を出し、版ごとに登録・解除します。版は、ユーザーフォルダ（`KICAD_DOCUMENTS_HOME`、無ければ `ドキュメント\KiCad\<版>`。ドキュメントを OneDrive などへ移していればその場所）、レジストリのアンインストールの情報（`KiCad <版>` の `InstallLocation`）、`Program Files\KiCad\<版>` から探します。登録すると、その版の `scripting\plugins\krbr_preview` に、exe に埋め込んだ `kicad_plugin/krbr_preview` の中身と、この `krbr.exe` の場所を書きます。ビューアは起動のたびに、登録済みの版のうち、指している `krbr.exe` が無くなった版（フォルダを移した）と、ファイルが古い版（`krbr.exe` を更新した）を直します（未登録の版と、まだ有る別の `krbr.exe` を指している版には触らない）。コマンドラインでは `krbr kicad-plugin status`／`install`／`uninstall`（`--kicad 10.0` で版を、`--dir` で場所を指定。省くとすべての版）。登録の後は KiCad を開き直すか、PCB エディタの「ツール → 外部プラグイン → プラグインを再読み込み」で出ます。押すと、開いている基板のファイルをビューアで開きます（コンソールは出さず、ログは基板ごとに `%TEMP%\krbr_preview_<基板のパスのハッシュ>.log`。同じ基板のビューアが開いていれば二重には開かない。ビューアが起動の直後に終わってしまったときは、ログの場所を添えてメッセージを出す）。ビューアは保存を監視しているので、KiCad で保存するたびに描き直されます。旧来の Action Plugin（SWIG の `pcbnew`）を使っています。KiCad 9 で非推奨になり、KiCad 11 で無くなる予定なので、そのときは IPC API のプラグイン（`plugin.json`）に移します。
 
-**配布用の一式**：`powershell -ExecutionPolicy Bypass -File scripts\make_dist.ps1`（ビルド済みなら `-NoBuild`）で、`dist\KRB-Renderer-<版>-win64\` と、その zip を作ります（約 100 MB、zip で約 65 MB。`dist/` は git に入れない）。集めるのは `rust\target\release`（krbr.exe とシェーダ）、`build\release\step`（STEP 変換器）、`third_party\oidn\bin`（OIDN）、Visual Studio の再頒布用の Visual C++ ランタイムです。フォルダごとどこへ置いても動きます（exe と同じフォルダのものだけを使う）。中身は次のとおりです。
+**配布用の一式**：`powershell -ExecutionPolicy Bypass -File scripts\make_dist.ps1`（ビルド済みなら `-NoBuild`。Rust のクレートのライセンスの全文を作るのに `cargo install cargo-about --locked --features cli` が要る。設定は `rust\about.toml`、書式は `scripts\rust_licenses.hbs`）で、`dist\KRB-Renderer-<版>-win64\` と、その zip を作ります（約 100 MB、zip で約 65 MB。`dist/` は git に入れない）。集めるのは `rust\target\release`（krbr.exe とシェーダ）、`build\release\step`（STEP 変換器）、`third_party\oidn\bin`（OIDN）、Visual Studio の再頒布用の Visual C++ ランタイムです。フォルダごとどこへ置いても動きます（exe と同じフォルダのものだけを使う）。中身は次のとおりです。
 
 | 中身 | 内容 |
 |---|---|
@@ -489,7 +489,9 @@ bump_scale = 0.1
 | `dll\step\` | STEP 変換器（`krbr_step.dll`）と OpenCASCADE の DLL |
 | `dll\oidn\` | ノイズ除去（`OpenImageDenoise*.dll`、`tbb12.dll`。CPU と CUDA のデバイス） |
 | `dll\vcruntime\` | Visual C++ ランタイム（`msvcp140*.dll`、`vcruntime140*.dll`、`concrt140.dll` の再頒布用ファイル。インストール不要） |
-| `README.txt`、`licenses\` | 使い方と、同梱物のライセンス（OIDN・oneTBB・OpenCASCADE） |
+| `KRB-Renderer.exe` | コンソールを出さずにビューアを開く起動役 |
+| `bench\` | `krbr bench` の基板と、その 3D モデル |
+| `README.txt`、`licenses\` | 使い方と、同梱物のライセンス（本体・OIDN・oneTBB・OpenCASCADE、krbr.exe に入る Rust のクレートの全文） |
 
 直下には DLL を置きません。`krbr.exe` は Visual C++ ランタイムを静的に組み込み（`rust\.cargo\config.toml` の `+crt-static`）、起動の直後に `dll\vcruntime` を DLL の探し先に足してから、`dll\step`・`dll\oidn` の DLL を読みます（どちらも無ければ、従来の `step\`・exe の横、開発中の `build\release\step`・`third_party\oidn\bin` を探す）。
 

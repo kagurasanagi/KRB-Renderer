@@ -3,7 +3,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\make_dist.ps1            # ビルドしてからまとめる
 #   powershell -ExecutionPolicy Bypass -File scripts\make_dist.ps1 -NoBuild   # ビルド済みのものをまとめる
 # 中身：krbr.exe、shaders\、dll\（step：STEP 変換器と OpenCASCADE、oidn：ノイズ除去、vcruntime：Visual C++ ランタイム）、
-#       使い方、ライセンス（KiCad のプラグインは krbr.exe に埋め込んであり、ビューアの「設定 → KiCad プラグイン」で入れる）
+#       使い方、ライセンス（Rust のクレートの分は cargo-about で作る。KiCad のプラグインは krbr.exe に埋め込んであり、ビューアの「設定 → KiCad プラグイン」で入れる）
 # 直下には DLL を置かない。krbr.exe は Visual C++ ランタイムを静的に組み込んでいて（rust\.cargo\config.toml）、
 # 起動の直後に dll\vcruntime を DLL の探し先に足す（STEP 変換器・OIDN の DLL が使う）
 param(
@@ -63,13 +63,27 @@ Copy-Item "$repo\bench\krbr_bench.kicad_pcb", "$repo\bench\LICENSE.md" "$dst\ben
 Copy-Item "$repo\bench\3dmodels" "$dst\bench" -Recurse
 # ライセンス
 Copy-Item "$repo\third_party\oidn\doc\LICENSE.txt" "$dst\licenses\OpenImageDenoise-LICENSE.txt"
+Copy-Item "$repo\third_party\oidn\doc\third-party-programs.txt" "$dst\licenses\OpenImageDenoise-third-party-programs.txt"
 Copy-Item "$repo\third_party\oidn\doc\third-party-programs-oneTBB.txt" "$dst\licenses\oneTBB-third-party-programs.txt"
 $occt = Get-ChildItem "$repo\build\vcpkg_installed\*\share\opencascade\copyright" | Select-Object -First 1
-if ($occt) { Copy-Item $occt.FullName "$dst\licenses\OpenCASCADE-LICENSE.txt" }
-if (Test-Path "$repo\LICENSE") { Copy-Item "$repo\LICENSE" "$dst\licenses\KRB-Renderer-LICENSE.txt" }
+if (-not $occt) { throw "OpenCASCADE のライセンス（build\vcpkg_installed\*\share\opencascade\copyright）が見つかりません" }
+Copy-Item $occt.FullName "$dst\licenses\OpenCASCADE-LICENSE.txt"
+Copy-Item "$repo\LICENSE" "$dst\licenses\KRB-Renderer-LICENSE.txt"
+# krbr.exe に入る Rust のクレートのライセンスの全文（cargo-about。設定は rust\about.toml）
+if (-not (Get-Command cargo-about -ErrorAction SilentlyContinue)) { throw "cargo-about がありません（cargo install cargo-about --locked）" }
+Push-Location (Join-Path $repo "rust")
+cargo about generate --fail -o "$dst\licenses\Rust-crates-LICENSES.txt" (Join-Path $PSScriptRoot "rust_licenses.hbs")
+$aboutExit = $LASTEXITCODE
+Pop-Location
+if ($aboutExit -ne 0) { throw "cargo about generate に失敗（認めていないライセンスの依存があれば rust\about.toml の accepted に足す）" }
 # 使い方（メモ帳で読めるよう UTF-8 の BOM 付き）
 $readme = @"
-KRB-Renderer $version（Rust 版）  KiCad の基板の物理ベースのレンダラー
+KRB-Renderer $version  KiCad の基板の物理ベースのレンダラー
+
+■ 最初に
+・zip を展開したフォルダのまま使えます（インストールは要りません）。
+・初めて起動するとき、Windows の「PC が保護されました」（SmartScreen）が出ることがあります。
+  署名のないアプリなので出るもので、「詳細情報」→「実行」で起動できます。
 
 ■ 使い方
 ・KRB-Renderer.exe をダブルクリックするとビューアが開きます（前に開いた基板を開く）。KRB-Renderer.exe のアイコンや
@@ -97,11 +111,17 @@ KRB-Renderer $version（Rust 版）  KiCad の基板の物理ベースのレン�
 
 ■ 動かすのに必要なもの
 ・Windows 10 / 11（64 bit）、Vulkan 1.3 とレイトレーシングに対応した GPU（NVIDIA GTX 10 系以降など）。
+・画面のメニューやパネルには WebView2 Runtime を使います（Windows 11 には最初から入っています。
+  無いときは 3D 表示とキーの操作だけになり、入れ方を画面に出します）。
 ・3D モデルは KiCad のインストール先から読みます（KiCad 10 なら C:\Program Files\KiCad\10.0）。
-・線フォントのシルクの文字には kicad-cli（KiCad に付属）を使います。
+・線フォントの文字（シルク・銅箔・ソルダーマスク）には kicad-cli（KiCad に付属）を使います。
 
 ■ 同梱物のライセンス（licenses フォルダ）
-・Intel Open Image Denoise（Apache-2.0）、oneTBB（Apache-2.0）、Open CASCADE Technology（LGPL-2.1、例外条項付き）。
+・KRB-Renderer 本体（MIT）。
+・Intel Open Image Denoise（Apache-2.0）、oneTBB（Apache-2.0）。
+・Open CASCADE Technology（LGPL-2.1、例外条項付き。dll\step\TK*.dll。ソースは https://github.com/Open-Cascade-SAS/OCCT 、
+  手元でビルドし直した DLL に差し替えて使えます）。
+・krbr.exe に組み込まれている Rust のクレート（MIT、Apache-2.0 など。Rust-crates-LICENSES.txt に全文）。
 ・Microsoft Visual C++ ランタイム（再頒布用ファイル）。
 ・bench\3dmodels の STEP：KiCad の標準ライブラリ（CC-BY-SA 4.0、例外条項付き。bench\LICENSE.md）。
 "@
@@ -110,6 +130,9 @@ KRB-Renderer $version（Rust 版）  KiCad の基板の物理ベースのレン�
 Write-Host "== zip にする"
 $zip = Join-Path $OutDir "$name.zip"
 if (Test-Path $zip) { Remove-Item $zip }
-Compress-Archive -Path $dst -DestinationPath $zip
+# Compress-Archive と .NET Framework の ZipFile（Windows PowerShell 5.1）はパスの区切りを \ で書き、7-Zip や unzip で困るので、
+# Windows 付属の tar.exe（bsdtar。区切りは /）で作る
+& "$env:SystemRoot\System32\tar.exe" -a -c -f $zip -C $OutDir $name
+if ($LASTEXITCODE -ne 0) { throw "tar で zip を作れませんでした" }
 $size = (Get-ChildItem $dst -Recurse | Measure-Object Length -Sum).Sum / 1MB
 Write-Host ("完成: {0}（{1:N0} MB）、{2}（{3:N0} MB）" -f $dst, $size, $zip, ((Get-Item $zip).Length / 1MB))

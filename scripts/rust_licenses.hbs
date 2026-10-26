@@ -1,0 +1,17 @@
+KRB-Renderer (krbr.exe) に組み込まれている Rust のクレートのライセンス
+Licenses of the Rust crates built into krbr.exe
+
+{{#each overview}}
+{{{name}}} ({{{id}}}): {{count}}
+{{/each}}
+{{#each licenses}}
+
+================================================================================
+{{{name}}} ({{{id}}})
+Used by:
+{{#each used_by}}
+  {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}}  {{{crate.repository}}}{{/if}}
+{{/each}}
+--------------------------------------------------------------------------------
+{{{text}}}
+{{/each}}
