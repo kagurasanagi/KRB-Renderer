@@ -250,6 +250,8 @@ struct PartView {
 #[derive(Default)]
 pub struct MaterialEditor {
     pub open: bool,
+    /// egui の画面：3D 表示の領域（窓を初めに置く所。ボタン列に重ねない）
+    pub area: Option<egui::Rect>,
     egui: Option<egui::Context>,
     light: Option<Arc<PreviewLight>>,
     swatch: Option<Preview>,
@@ -347,7 +349,7 @@ impl MaterialEditor {
         self.sync_selection(part, &mut actions);
         self.shortcuts(ctx);
         let mut open = self.open;
-        egui::Window::new(fl!("mated-title")).id(egui::Id::new("material_editor")).open(&mut open).default_pos([40.0, 60.0]).default_size([900.0, 780.0]).min_width(640.0).resizable(true).collapsible(true).show(ctx, |ui| {
+        egui::Window::new(fl!("mated-title")).id(egui::Id::new("material_editor")).open(&mut open).default_pos(self.area.map_or(egui::pos2(40.0, 60.0), |a| a.min + egui::vec2(20.0, 20.0))).default_size(self.area.map_or(egui::vec2(900.0, 780.0), |a| egui::vec2((a.width() - 40.0).clamp(640.0, 900.0), (a.height() - 40.0).clamp(300.0, 780.0)))).min_width(640.0).resizable(true).collapsible(true).show(ctx, |ui| {
             ui.columns_const(|[left, right]| {
                 self.browser_ui(left, lib, part, &mut actions);
                 egui::ScrollArea::vertical().id_salt("mated_right").auto_shrink([false, false]).show(right, |ui| {

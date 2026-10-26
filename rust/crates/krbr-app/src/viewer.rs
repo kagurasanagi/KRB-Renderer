@@ -3652,6 +3652,7 @@ impl App {
                 };
             } else {
                 let shadow = self.selected.as_ref().and_then(|s| self.scope_shadow_note(s));
+                self.editor.area = Some(central);
                 let scope = &mut self.assign_scope;
                 let actions = self.editor.ui(root.ctx(), &self.library, info.as_ref(), &mut |ui| {
                     scope_radios(ui, scope);
