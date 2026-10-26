@@ -89,9 +89,9 @@ fn parse_hex(s: &str) -> Option<[u8; 3]> {
     Some([b(0)?, b(2)?, b(4)?])
 }
 
-/// 部位のキー（部位の行の part_keys の最初の 1 つ。空なら部品全体）
+/// 部位のキー（空なら部品全体）。部位の名前に空白があっても、そのまま書き込めるキー
 fn part_key(r: &MaterialAssignment) -> String {
-    r.part_keys.split(' ').next().unwrap_or("").to_string()
+    r.part_key.clone()
 }
 
 impl App {
@@ -158,14 +158,10 @@ impl App {
         };
         let model_file = fp.and_then(|f| f.models.get(mi)).map(|m| Path::new(&m.path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()).unwrap_or_default();
         items.push(tip(note(model_file.clone(), "muted"), model_file));
-        let scope = self.assign_scope;
         items.push(self.scope_json());
         let rows = self.selection_rows(&sel);
-        let decided_by = |stage: MaterialStage| rows.iter().any(|r| r.stage() == Some(stage));
-        if scope != AssignScope::Part && decided_by(MaterialStage::ProjectRef) {
-            items.push(note(fl!("sel-shadowed-ref"), "warn"));
-        } else if scope == AssignScope::ModelGlobal && decided_by(MaterialStage::ProjectModel) {
-            items.push(note(fl!("sel-shadowed-project"), "warn"));
+        if let Some(n) = self.scope_shadow_note(&sel) {
+            items.push(note(n, "warn"));
         }
         let part_rows: Vec<Value> = rows
             .iter()
@@ -206,6 +202,20 @@ impl App {
             items.push(note(self.material_error.clone(), "error"));
         }
         section(fl!("sel-title"), items)
+    }
+
+    /// 書き込む先の材質が、より優先する上書きに隠れて効かないときの知らせ（設定パネルと材質エディタで共通。
+    /// 例：部品番号ごとの上書きがあるのに「このモデル」に書く）
+    pub(super) fn scope_shadow_note(&self, sel: &Selected) -> Option<String> {
+        let rows = self.selection_rows(sel);
+        let decided_by = |stage: MaterialStage| rows.iter().any(|r| r.stage() == Some(stage));
+        if self.assign_scope != AssignScope::Part && decided_by(MaterialStage::ProjectRef) {
+            Some(fl!("sel-shadowed-ref"))
+        } else if self.assign_scope == AssignScope::ModelGlobal && decided_by(MaterialStage::ProjectModel) {
+            Some(fl!("sel-shadowed-project"))
+        } else {
+            None
+        }
     }
 
     /// 設定パネルの JSON（egui の App::panel と同じ項目）

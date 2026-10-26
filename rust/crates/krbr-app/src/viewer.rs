@@ -18,7 +18,7 @@ use krbr_render::vk::{image_barrier, memory_barrier, Buffer};
 use krbr_render::studio_env::STUDIO;
 use krbr_render::{build_env_distribution, describe_environment, is_builtin, load_environment_map, Context, ContextOptions, DenoiseQuality, Denoiser, EnvDistribution, EnvironmentName, GpuScene, Progressive};
 use krbr_scene::config::apply_mask_color_spec;
-use krbr_scene::scene::{load_material_setup, raycast_pick_visible, update_mask_material, update_substrate_material, visibility, MaterialAssignment};
+use krbr_scene::scene::{load_material_setup, raycast_pick_visible, MaterialFilesWatch, update_mask_material, update_substrate_material, visibility, MaterialAssignment};
 use krbr_scene::{mask_presets, orbit_camera, Camera, InstanceOwner, IntegratorKind, LensModel, MaterialLibrary, MaterialStage, Scene, SceneOptions};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::application::ApplicationHandler;
@@ -36,7 +36,7 @@ mod web_panel;
 use crate::i18n;
 use crate::kicad_cli::StrokeTextJob;
 use crate::kicad_plugin::{self, PluginWindow};
-use crate::material_cmd::{clear_material, set_material, MaterialSetOptions};
+use crate::material_cmd::{clear_material, forget_material, set_material, MaterialSetOptions};
 use crate::selection::{unproject, Outline, Selected};
 use krbr_scene::board_file;
 use krbr_scene::material_library::{save_user_material, split_variant, with_emission, with_smooth, Emission, Variant};
@@ -1033,6 +1033,8 @@ struct App {
     outline: Option<Outline>,
     /// 材質の割り当てを書き換えた（材質の設定を読み直して組み直す）
     materials_dirty_files: bool,
+    /// 材質の設定のファイルを、ほかから書き換えたか（手で直した設定ファイル、別に実行した krbr material set）
+    material_files: MaterialFilesWatch,
     /// 選んだ部品の材質を書き込む先
     assign_scope: AssignScope,
     /// 材質ライブラリの写し（パネルと材質エディタの一覧。自分の材質を書いたらここも直す）
@@ -1910,6 +1912,10 @@ impl App {
         // 保存を待たずに読み直す要求（テスト）も、保存と同じに扱う
         let saved = self.watcher.as_mut().is_some_and(|w| w.poll()) | std::mem::take(&mut self.st.req.reload);
         let models_done = src.library.completed();
+        if !self.materials_dirty_files && self.material_files.poll(&self.prep.board.file, &src.materials).is_some() {
+            info!("material settings changed on disk; rebuilding the scene");
+            self.materials_dirty_files = true;
+        }
         let text = self.text_dirty;
         let materials = self.materials_dirty_files;
         if !saved && !text && !materials && models_done == self.models_seen {
@@ -2108,7 +2114,7 @@ impl App {
                 let start = assignments as usize;
                 if let Some(first) = a.get(start) {
                     for (k, r) in a[start..].iter().take_while(|r| r.reference == sel.reference && r.model_spec == first.model_spec).enumerate() {
-                        rows.push(PartRow { key: r.part_keys.split(' ').next().unwrap_or("").to_string(), material: r.material.clone(), scene_material: inst.material_base + k as u32 });
+                        rows.push(PartRow { key: r.part_key.clone(), material: r.material.clone(), scene_material: inst.material_base + k as u32 });
                     }
                 }
             }
@@ -2151,6 +2157,16 @@ impl App {
     /// 材質ライブラリとシーンにも反映する
     fn save_user_material(&mut self, name: &str, m: Option<(krbr_scene::Material, String)>) {
         let dir = krbr_core::platform::config_dir();
+        // 消せるのは材質エディタのファイル（materials/user.toml）の材質だけ。ほかのファイルの材質は、user.toml から消しても
+        // 次に起動したときに戻ってしまう
+        if m.is_none() {
+            let source = self.library.source_of(name).to_string();
+            let from_editor = Path::new(&source).file_name().is_some_and(|f| f == krbr_scene::material_library::USER_MATERIALS_FILE);
+            if !source.is_empty() && !from_editor {
+                self.last_update = fl!("mated-delete-other-file", name = material_editor::material_label(&self.library, name), file = source);
+                return;
+            }
+        }
         let shown = match &m {
             Some((_, label)) => label.clone(),
             None => material_editor::material_label(&self.library, name),
@@ -2175,6 +2191,13 @@ impl App {
                 self.library.remove(name);
                 info!("material {name}: removed from {source}");
                 self.last_update = fl!("mated-deleted", name = shown.as_str());
+                // この材質への割り当て（この基板と全体の対応表）も外す
+                if self.has_board() {
+                    match forget_material(&self.prep.board.file, name) {
+                        Ok(files) => files.iter().for_each(|f| info!("material {name}: assignments removed from {}", f.display())),
+                        Err(e) => warn!("material {name}: {e}"),
+                    }
+                }
             }
         }
         // 組み立ての状態のライブラリも直す（読み直し中なら、終わってからファイルを読み直す）
@@ -2336,7 +2359,7 @@ impl App {
         let mut emit_changes: Vec<(String, String)> = Vec::new();
         egui::Grid::new("parts").num_columns(4).spacing([8.0, 4.0]).show(ui, |ui| {
             for (i, r) in rows.iter().enumerate() {
-                let key = r.part_keys.split(' ').next().unwrap_or("").to_string();
+                let key = r.part_key.clone();
                 let material = match &pending {
                     Some((part, m)) if *part == key => m.clone(),
                     _ => r.material.clone(),
@@ -2384,7 +2407,7 @@ impl App {
             let mut pattern = !all_smooth;
             if ui.checkbox(&mut pattern, fl!("part-pattern")).on_hover_text(fl!("parts-pattern-all-tip")).changed() {
                 for r in &rows {
-                    let key = r.part_keys.split(' ').next().unwrap_or("").to_string();
+                    let key = r.part_key.clone();
                     actions.push((key, with_smooth(&r.material, !pattern), false));
                 }
             }
@@ -2448,7 +2471,8 @@ impl App {
             }
         };
         self.reload_job = None;
-        self.library = d.source.materials.library.clone();
+        let old = std::mem::replace(&mut self.library, d.source.materials.library.clone());
+        self.editor.library_reloaded(&old, &self.library);
         self.prep.source = Some(d.source);
         if d.saved {
             self.saved_reloads += 1;
@@ -3445,7 +3469,11 @@ impl App {
         let plugin = rects[7].is_some().then(|| self.plugin_window.json());
         let editor = rects[4].is_some().then(|| {
             let info = self.part_info();
-            let scope = self.scope_json();
+            let mut scope = self.scope_json();
+            // 書き込む先の材質が、より優先する上書きに隠れるなら知らせる（設定パネルと同じ）
+            if let Some(n) = self.selected.as_ref().and_then(|s| self.scope_shadow_note(s)) {
+                scope["warn"] = serde_json::Value::String(n);
+            }
             self.editor.web_json(&self.library, info.as_ref(), scope)
         });
         let toolbar = self.toolbar_json();
@@ -3623,8 +3651,14 @@ impl App {
                     egui::Rect::NOTHING
                 };
             } else {
+                let shadow = self.selected.as_ref().and_then(|s| self.scope_shadow_note(s));
                 let scope = &mut self.assign_scope;
-                let actions = self.editor.ui(root.ctx(), &self.library, info.as_ref(), &mut |ui| scope_radios(ui, scope));
+                let actions = self.editor.ui(root.ctx(), &self.library, info.as_ref(), &mut |ui| {
+                    scope_radios(ui, scope);
+                    if let Some(n) = &shadow {
+                        ui.colored_label(egui::Color32::from_rgb(255, 204, 77), n);
+                    }
+                });
                 self.editor_actions.extend(actions);
             }
             if self.web.is_none() {
@@ -4567,6 +4601,7 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         info!("watching {} for saves", prep.board.file.display());
     }
     let models_seen = prep.source.as_ref().map(|s| s.library.completed()).unwrap_or(0);
+    let material_files = MaterialFilesWatch::new(&prep.board.file);
     let library = prep.source.as_ref().map(|s| s.materials.library.clone()).unwrap_or_else(MaterialLibrary::builtin);
     let text_job = StrokeTextJob::new(prep.kicad_cli.clone(), &prep.board.file, &prep.board.project_name);
     let test = TestHooks { o: std::mem::take(&mut vo.test), ..Default::default() };
@@ -4614,6 +4649,7 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         selected: None,
         outline: None,
         materials_dirty_files: false,
+        material_files,
         assign_scope: AssignScope::Part,
         library,
         editor: MaterialEditor::default(),

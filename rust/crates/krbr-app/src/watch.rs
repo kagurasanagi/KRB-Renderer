@@ -8,6 +8,7 @@ use krbr_core::{info, warn, FileWatcher};
 use krbr_render::tonemapper::{DisplayMode, Tonemapper};
 use krbr_render::vk::memory_barrier;
 use krbr_render::{image_io, Context, DenoiseQuality, Denoiser, FrameParams, GpuScene};
+use krbr_scene::scene::MaterialFilesWatch;
 use krbr_scene::IntegratorKind;
 
 use crate::kicad_cli::StrokeTextJob;
@@ -81,6 +82,7 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
     }
 
     let mut models_seen = prep.source.as_ref().map(|s| s.library.completed()).unwrap_or(0);
+    let mut material_files = MaterialFilesWatch::new(&prep.board.file);
     let mut idle_since = Instant::now();
     // 線フォントの文字の書き出し（kicad-cli、裏のスレッド）
     let mut text_job = StrokeTextJob::new(prep.kicad_cli.clone(), &prep.board.file, &prep.board.project_name);
@@ -93,7 +95,16 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
         let source = prep.source.as_mut().unwrap();
         let saved = watcher.poll();
         let models_done = source.library.completed() != models_seen;
-        if !saved && !models_done && !stroke_text {
+        // 材質の設定（基板の設定ファイルの [ref.*] / [[model]]、model_map.toml、materials/*.toml）を書き換えたら組み直す
+        let materials = match material_files.poll(&prep.board.file, &source.materials) {
+            Some(m) => {
+                info!("watch: material settings changed; rebuilding");
+                source.materials = m;
+                true
+            }
+            None => false,
+        };
+        if !saved && !models_done && !stroke_text && !materials {
             if idle_since.elapsed() >= poll {
                 if !on_event(WatchEvent::Idle) {
                     return Ok(());
@@ -147,6 +158,8 @@ pub fn run_watch(o: &WatchOptions, poll: Duration, mut on_event: impl FnMut(Watc
             );
         } else if stroke_text {
             info!("watch: updated (background stroke-font text plot finished)");
+        } else if materials {
+            info!("watch: updated (material settings)");
         } else {
             info!("watch: updated (background model meshing finished, {} pending)", u.pending_models);
         }

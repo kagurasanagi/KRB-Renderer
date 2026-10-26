@@ -399,6 +399,17 @@ impl MaterialEditor {
         painter.galley(at, galley, egui::Color32::WHITE);
     }
 
+    /// 材質ライブラリを読み直した：値の変わった材質の見本を描き直す（見本は材質名で覚えているので、
+    /// 手で直した materials/*.toml を読み直しても、古い絵のままになっていた）
+    pub fn library_reloaded(&mut self, old: &MaterialLibrary, new: &MaterialLibrary) {
+        let same = |k: &str| {
+            let base = Variant::parse(k).0;
+            old.find(base) == new.find(base) && old.label(base) == new.label(base)
+        };
+        self.thumbs.retain(|k, _| same(k));
+        self.thumb_urls.retain(|k, _| same(k));
+    }
+
     /// 書き込むのを待っている編集を、今すぐ書き込む（ビューアを終えるとき）
     pub fn flush_now(&mut self, part: Option<&PartInfo>) -> Vec<Action> {
         let mut actions = Vec::new();

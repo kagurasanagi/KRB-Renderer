@@ -461,6 +461,7 @@ matname-glass_soda_lime = ソーダ石灰ガラス
 matname-glass_sapphire = サファイア（無色）
 mated-saved = 材質 { $name } を保存した（{ $file }）
 mated-deleted = 材質 { $name } を削除した
+mated-delete-other-file = { $name } は { $file } にある材質なので、そのファイルから消す
 mated-save-failed = 材質を書けなかった：{ $error }
 
 ## 基板を開く

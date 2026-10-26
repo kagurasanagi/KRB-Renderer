@@ -194,6 +194,48 @@ pub fn clear_material(o: &MaterialSetOptions) -> Result<Option<PathBuf>, String>
     Ok(Some(file))
 }
 
+/// 割り当て a から、材質 name（変種 "+…" を付けたものも）を使う指定を外す。外したら true
+fn forget_in(a: &mut PartAssignment, name: &str) -> bool {
+    let uses = |m: &str| krbr_scene::material_library::Variant::parse(m).0 == name;
+    let mut changed = false;
+    if uses(&a.material) {
+        a.material.clear();
+        changed = true;
+    }
+    let before = a.parts.len();
+    a.parts.retain(|_, m| !uses(m));
+    changed || a.parts.len() != before
+}
+
+/// 消した自分の材質 name への割り当てを、基板の設定ファイル（[ref.*] / [[model]]）と全体の model_map.toml から外す
+/// （残すと、組み立てのたびに「ライブラリに無い」と警告して規則の材質に戻っていた）。戻り値は書き直したファイル
+pub fn forget_material(pcb: &Path, name: &str) -> Result<Vec<PathBuf>, String> {
+    let mut ms = load_material_setup(pcb);
+    let mut written = Vec::new();
+    let mut project_changed = false;
+    for a in ms.project.refs.values_mut().chain(ms.project.models.iter_mut().map(|e| &mut e.assign)) {
+        project_changed |= forget_in(a, name);
+    }
+    if project_changed {
+        check_readable(&ms.project_file, ProjectOverrides::load)?;
+        ms.project.refs.retain(|_, a| !a.is_empty());
+        ms.project.models.retain(|e| !e.assign.is_empty());
+        ms.project.save(&ms.project_file)?;
+        written.push(ms.project_file.clone());
+    }
+    let mut global_changed = false;
+    for e in &mut ms.global.models {
+        global_changed |= forget_in(&mut e.assign, name);
+    }
+    if global_changed {
+        check_readable(&ms.global_file, GlobalModelMap::load)?;
+        ms.global.models.retain(|e| !e.assign.is_empty());
+        ms.global.save(&ms.global_file)?;
+        written.push(ms.global_file.clone());
+    }
+    Ok(written)
+}
+
 /// 部品・部位ごとの材質と、どの段階で決まったか（3D モデルを読む。キャッシュが無ければ分割するので時間がかかる）
 pub fn compute_assignments(pcb: &Path) -> Result<Vec<MaterialAssignment>, String> {
     let board = load_board_or_report(pcb).ok_or("cannot load board")?;
@@ -224,6 +266,7 @@ pub fn compute_assignments(pcb: &Path) -> Result<Vec<MaterialAssignment>, String
                     model_file: model_file.clone(),
                     model_hash: lr.file_hash.clone(),
                     part_keys: part.keys().join(" "),
+                    part_key: part.keys().into_iter().next().unwrap_or_default(),
                     material: res.name,
                     source: res.source,
                 });

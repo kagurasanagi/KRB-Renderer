@@ -245,7 +245,8 @@ fn write_atomic(file: &Path, text: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, file)
 }
 
-/// 最上位の表 keys を src の内容で差し替える（src に無い鍵は消す）。差し替えた表はファイルの最後に置く。
+/// 最上位の表 keys を src の内容で差し替える（src に無い鍵は消す）。今ある表は、その場で値だけを変える（表・項目に
+/// 手で書いたコメントと、表の場所は残る）。新しい表はファイルの最後に置く。
 /// 新しい内容を作れなかったとき（実際にはまず起きない）は、doc に触らずにエラーを記録する。
 /// 失敗をファイルを書く側に伝えるには try_replace_tables と try_edit_toml を使う
 pub fn replace_tables(doc: &mut DocumentMut, src: &toml::Table, keys: &[&str]) {
@@ -268,7 +269,18 @@ pub fn try_replace_tables(doc: &mut DocumentMut, src: &toml::Table, keys: &[&str
         let text = toml::to_string(&part).map_err(|e| format!("cannot write the tables [{}]: {e}", keys.join("], [")))?;
         Some(text.parse::<DocumentMut>().map_err(|e| format!("cannot write the tables [{}]: {e}", keys.join("], [")))?)
     };
+    let mut next = max_position(doc.as_item()) + 1;
+    let mut appended = Vec::new();
     for k in keys {
+        let new = src_doc.as_ref().and_then(|d| d.get(k));
+        // 今ある表と新しい表が同じ種類（表どうし・表の配列どうし）なら、その場で差し替える
+        // （以前は表ごと作り直して最後に置いたので、[ref.D1] などの中に書いたコメントが消えていた）
+        if let (Some(old), Some(new)) = (doc.get_mut(k), new) {
+            if same_kind(old, new) {
+                merge_item(old, new, &mut next);
+                continue;
+            }
+        }
         if let Some(item) = doc.remove(k) {
             // 足したときに前に付けた、ファイルの最後のコメントは残す
             let prefix = first_table_prefix(&item);
@@ -277,11 +289,78 @@ pub fn try_replace_tables(doc: &mut DocumentMut, src: &toml::Table, keys: &[&str
                 doc.set_trailing(t);
             }
         }
+        if let Some(new) = new {
+            appended.push((k.to_string(), new.clone()));
+        }
     }
-    if let Some(src_doc) = src_doc {
-        append_items(doc, src_doc.iter().map(|(k, i)| (k.to_string(), i.clone())).collect());
+    if !appended.is_empty() {
+        append_items(doc, appended);
     }
     Ok(())
+}
+
+fn same_kind(a: &Item, b: &Item) -> bool {
+    (a.is_table() && b.is_table()) || (a.is_array_of_tables() && b.is_array_of_tables())
+}
+
+/// 値の見た目（前後の空白・コメントを除いたもの）
+fn value_text(v: &toml_edit::Value) -> String {
+    let mut v = v.clone();
+    v.decor_mut().clear();
+    v.to_string()
+}
+
+/// dst を src の内容にする。残る鍵・表は、付いているコメント（decor）と場所を保つ。新しく足す表は next からの番号で後ろに置く
+fn merge_item(dst: &mut Item, src: &Item, next: &mut usize) {
+    match (dst, src) {
+        (Item::Table(d), Item::Table(s)) => merge_table(d, s, next),
+        (Item::ArrayOfTables(d), Item::ArrayOfTables(s)) => {
+            while d.len() > s.len() {
+                d.remove(d.len() - 1);
+            }
+            for (i, st) in s.iter().enumerate() {
+                match d.get_mut(i) {
+                    Some(dt) => merge_table(dt, st, next),
+                    None => {
+                        let mut it = Item::Table(st.clone());
+                        renumber(&mut it, next);
+                        if let Item::Table(t) = it {
+                            d.push(t);
+                        }
+                    }
+                }
+            }
+        }
+        (Item::Value(d), Item::Value(s)) => {
+            if value_text(d) != value_text(s) {
+                let decor = d.decor().clone();
+                *d = s.clone();
+                *d.decor_mut() = decor;
+            }
+        }
+        (d, s) => {
+            let mut it = s.clone();
+            renumber(&mut it, next);
+            *d = it;
+        }
+    }
+}
+
+fn merge_table(d: &mut toml_edit::Table, s: &toml_edit::Table, next: &mut usize) {
+    let gone: Vec<String> = d.iter().map(|(k, _)| k.to_string()).filter(|k| !s.contains_key(k)).collect();
+    for k in gone {
+        d.remove(&k);
+    }
+    for (k, si) in s.iter() {
+        match d.get_mut(k) {
+            Some(di) => merge_item(di, si, next),
+            None => {
+                let mut it = si.clone();
+                renumber(&mut it, next);
+                d.insert(k, it);
+            }
+        }
+    }
 }
 
 fn raw(r: &toml_edit::RawString) -> String {
@@ -290,6 +369,8 @@ fn raw(r: &toml_edit::RawString) -> String {
 
 fn first_table_prefix(item: &Item) -> String {
     match item {
+        // 値の無い暗黙の表は見出しが出ないので、最初の子の表（set_lead が付けた所）を見る
+        Item::Table(t) if t.is_implicit() => t.iter().find(|(_, i)| i.is_table() || i.is_array_of_tables()).map(|(_, i)| first_table_prefix(i)).unwrap_or_default(),
         Item::Table(t) => t.decor().prefix().map(raw).unwrap_or_default(),
         Item::ArrayOfTables(a) => a.iter().next().and_then(|t| t.decor().prefix().map(raw)).unwrap_or_default(),
         _ => String::new(),
@@ -305,22 +386,35 @@ fn append_items(doc: &mut DocumentMut, items: Vec<(String, Item)>) {
     for (k, mut item) in items {
         renumber(&mut item, &mut next);
         let lead = if trailing.trim().is_empty() { "\n".to_string() } else { format!("{}\n", trailing.trim_end_matches('\n').to_string() + "\n") };
-        // 表に付いていたコメント（ひな形の説明など）は残す
-        let with_own = |t: &mut toml_edit::Table, lead: &str| {
-            let own = t.decor().prefix().map(raw).unwrap_or_default();
-            t.decor_mut().set_prefix(format!("{lead}{}", own.trim_start_matches('\n')));
-        };
-        match &mut item {
-            Item::Table(t) => with_own(t, &lead),
-            Item::ArrayOfTables(a) => {
-                for (i, t) in a.iter_mut().enumerate() {
-                    with_own(t, if i == 0 { &lead } else { "\n" });
-                }
-            }
-            _ => {}
-        }
+        set_lead(&mut item, &lead);
         trailing.clear();
         doc.insert(&k, item);
+    }
+}
+
+/// 表の前に lead（ファイルの最後のコメントと空行）を付ける。表に付いていたコメント（ひな形の説明など）は残す。
+/// 値の無い暗黙の表（[ref] の下の [ref.U1] だけ、など）は見出しが出ず、付けたコメントも出ないので、最初の子の表に付ける
+/// （以前は暗黙の表に付けて、ファイルの最後のコメントが消えていた）
+fn set_lead(item: &mut Item, lead: &str) {
+    let with_own = |t: &mut toml_edit::Table, lead: &str| {
+        let own = t.decor().prefix().map(raw).unwrap_or_default();
+        t.decor_mut().set_prefix(format!("{lead}{}", own.trim_start_matches('\n')));
+    };
+    match item {
+        Item::Table(t) if t.is_implicit() => {
+            let first = t.iter().find(|(_, i)| i.is_table() || i.is_array_of_tables()).map(|(k, _)| k.to_string());
+            match first {
+                Some(k) => set_lead(t.get_mut(&k).unwrap(), lead),
+                None => with_own(t, lead),
+            }
+        }
+        Item::Table(t) => with_own(t, lead),
+        Item::ArrayOfTables(a) => {
+            for (i, t) in a.iter_mut().enumerate() {
+                with_own(t, if i == 0 { lead } else { "\n" });
+            }
+        }
+        _ => {}
     }
 }
 
@@ -419,6 +513,34 @@ pub(crate) mod tests {
         std::fs::write(&f, "[broken").unwrap();
         assert!(edit(&pcb, |_| {}).is_err());
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "[broken");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// 差し替える表の中のコメントは残る（[ref.D1] の見出しと項目のコメント）。新しく足す表が値の無い暗黙の表
+    /// （[ref] の下の [ref.U5] だけ）でも、ファイルの最後のコメントは消えない
+    #[test]
+    fn replaced_tables_keep_their_comments() {
+        let _g = config_lock();
+        let (proj, ws) = workspace("ref_comments");
+        let pcb = proj.join("b.kicad_pcb");
+        let f = proj.join("b.krbr");
+        std::fs::write(&f, "[render]\nspp = 16\n\n[ref.D1]  # status LED\nmaterial = \"led\"  # keep me\n\n# the end\n").unwrap();
+        let src: toml::Table = toml::from_str("[ref.D1]\nmaterial = \"led\"\n[ref.U5]\nmaterial = \"abs\"\n").unwrap();
+        edit(&pcb, |doc| replace_tables(doc, &src, &["ref"])).unwrap();
+        let text = std::fs::read_to_string(&f).unwrap();
+        assert!(text.contains("[ref.D1]  # status LED\nmaterial = \"led\"  # keep me\n") && text.contains("[ref.U5]\nmaterial = \"abs\"") && text.contains("# the end"), "{text}");
+        // 値を変えても、項目のコメントは残る。消した表は無くなる
+        let src: toml::Table = toml::from_str("[ref.D1]\nmaterial = \"glass\"\n").unwrap();
+        edit(&pcb, |doc| replace_tables(doc, &src, &["ref"])).unwrap();
+        let text = std::fs::read_to_string(&f).unwrap();
+        assert!(text.contains("material = \"glass\"  # keep me") && !text.contains("U5") && text.contains("# the end"), "{text}");
+
+        // 表の無いファイルに、値の無い暗黙の表を足しても、最後のコメントは残る
+        std::fs::write(&f, "[render]\nspp = 16\n# the end\n").unwrap();
+        let src: toml::Table = toml::from_str("[ref.U5]\nmaterial = \"abs\"\n").unwrap();
+        edit(&pcb, |doc| replace_tables(doc, &src, &["ref"])).unwrap();
+        let text = std::fs::read_to_string(&f).unwrap();
+        assert!(text.contains("# the end") && text.contains("[ref.U5]"), "{text}");
         let _ = std::fs::remove_dir_all(&ws);
     }
 

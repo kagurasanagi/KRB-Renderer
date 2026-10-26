@@ -290,6 +290,8 @@ function partView(m) {
       seg.append(b);
     }
     sec.append(seg);
+    // より優先する上書きに隠れて、書いても見た目が変わらないときの知らせ
+    if (p.scope.warn) sec.append(el("div", "note-text warn", p.scope.warn));
   }
   // 割り当て先の部位
   sec.append(el("div", "sub-title", p.targetLabel));

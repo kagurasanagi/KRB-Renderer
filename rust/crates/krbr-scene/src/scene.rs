@@ -94,8 +94,10 @@ pub struct MaterialAssignment {
     pub model_spec: String,
     pub model_file: String,
     pub model_hash: String,
-    /// 部位のキー（空白区切り）
+    /// 部位のキー（空白区切り。表示用。部位の名前に空白があることもあるので、ここから切り出さない）
     pub part_keys: String,
+    /// 部位の材質を書き込むときのキー（キーの候補の最初。部品全体なら空）
+    pub part_key: String,
     pub material: String,
     /// どの段階で決まったか（表示用。MaterialStage::label）
     pub source: String,
@@ -908,6 +910,7 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
                     model_file: model_file.clone(),
                     model_hash: lr.file_hash.clone(),
                     part_keys: part.map(|p| p.keys().join(" ")).unwrap_or_default(),
+                    part_key: part.and_then(|p| p.keys().into_iter().next()).unwrap_or_default(),
                     material: r.name.clone(),
                     source: r.source.clone(),
                 });
@@ -1059,11 +1062,64 @@ pub struct MaterialSetup {
 }
 
 impl MaterialSetup {
+    /// 材質・全体の対応表・プロジェクトの上書きの中身が同じか
+    pub fn same_content(&self, other: &MaterialSetup) -> bool {
+        self.library.same_materials(&other.library)
+            && self.global.models == other.global.models
+            && self.global.rules == other.global.rules
+            && self.project.refs == other.project.refs
+            && self.project.models == other.project.models
+    }
+
     /// 組み込みの材質だけで、対応表も上書きも無いもの（krbr bench の同梱の基板：全体設定で結果が変わらないように）。
     /// 書き込み先のファイルは無い（空のパス）
     pub fn builtin_only() -> Self {
         MaterialSetup { library: crate::material_library::MaterialLibrary::builtin(), global: Default::default(), project: Default::default(), global_file: PathBuf::new(), project_file: PathBuf::new() }
     }
+}
+
+/// 材質の設定のファイル（materials/*.toml、model_map.toml、基板の設定ファイル）の書き換えを見る。
+/// 更新時刻が変わったら読み直し、中身（材質・対応表・上書き）が変わっていれば新しい設定を返す（ビューアが覚えた設定を
+/// 書いただけなら返さない）。手で直した設定ファイルや、別に実行した krbr material set を組み直しに反映する
+/// （以前はビューアも krbr watch も、自分で書き込んだときと基板を保存したときしか材質の設定を読まなかった）
+#[derive(Default)]
+pub struct MaterialFilesWatch {
+    stamp: Vec<(PathBuf, Option<std::time::SystemTime>)>,
+    checked: Option<std::time::Instant>,
+}
+
+impl MaterialFilesWatch {
+    pub fn new(pcb: &std::path::Path) -> Self {
+        Self { stamp: material_files_stamp(pcb), checked: Some(std::time::Instant::now()) }
+    }
+
+    /// 1 秒に 1 回まで調べる。current は今使っている設定
+    pub fn poll(&mut self, pcb: &std::path::Path, current: &MaterialSetup) -> Option<MaterialSetup> {
+        if pcb.as_os_str().is_empty() || self.checked.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1)) {
+            return None;
+        }
+        self.checked = Some(std::time::Instant::now());
+        let stamp = material_files_stamp(pcb);
+        if stamp == self.stamp {
+            return None;
+        }
+        self.stamp = stamp;
+        let new = load_material_setup(pcb);
+        (!new.same_content(current)).then_some(new)
+    }
+}
+
+fn material_files_stamp(pcb: &std::path::Path) -> Vec<(PathBuf, Option<std::time::SystemTime>)> {
+    let dir = krbr_core::platform::config_dir();
+    let mut files = vec![dir.join("model_map.toml"), crate::board_file::resolve(pcb)];
+    if let Ok(entries) = std::fs::read_dir(dir.join("materials")) {
+        files.extend(entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "toml")));
+    }
+    files.sort();
+    files.into_iter().map(|f| {
+        let t = std::fs::metadata(&f).and_then(|m| m.modified()).ok();
+        (f, t)
+    }).collect()
 }
 
 /// 材質ライブラリ（組み込み＋全体設定 materials/*.toml）、全体の対応表、プロジェクトの上書きを読む

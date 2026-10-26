@@ -461,6 +461,7 @@ matname-glass_soda_lime = Soda-lime glass
 matname-glass_sapphire = Sapphire (colorless)
 mated-saved = Saved the material { $name } ({ $file })
 mated-deleted = Deleted the material { $name }
+mated-delete-other-file = { $name } is defined in { $file }; delete it from that file
 mated-save-failed = Could not write the material: { $error }
 
 ## Opening a board

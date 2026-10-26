@@ -302,7 +302,9 @@ impl MaterialLibrary {
         let dir = config_dir.join("materials");
         let Ok(entries) = std::fs::read_dir(&dir) else { return lib };
         let mut files: Vec<_> = entries.flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().map(|e| e == "toml").unwrap_or(false)).collect();
-        files.sort();
+        // 名前の順。ただし材質エディタのファイル（user.toml）は最後：エディタで編集した値が、ほかのファイルの同じ材質に勝つ
+        let is_user = |p: &std::path::PathBuf| p.file_name().is_some_and(|f| f == USER_MATERIALS_FILE);
+        files.sort_by(|a, b| (is_user(a), a).cmp(&(is_user(b), b)));
         for f in files {
             match lib.load_file(&f) {
                 Ok(()) => krbr_core::info!("materials: {}", f.display()),
@@ -314,10 +316,18 @@ impl MaterialLibrary {
 
     pub fn load_file(&mut self, p: &Path) -> Result<(), String> {
         let text = std::fs::read_to_string(p).map_err(|_| "cannot read".to_string())?;
-        self.load_text(&text, &p.to_string_lossy())
+        // user.toml は材質エディタが材質を丸ごと（既定値との差だけ）書くので、前のファイルの同じ材質に重ねず置き換える
+        // （重ねると、エディタで既定値に戻した項目が、前のファイルの値のまま残る）
+        let replace = p.file_name().is_some_and(|f| f == USER_MATERIALS_FILE);
+        self.load_text_with(&text, &p.to_string_lossy(), replace)
     }
 
     pub fn load_text(&mut self, text: &str, source: &str) -> Result<(), String> {
+        self.load_text_with(text, source, false)
+    }
+
+    /// replace なら、同じ名前の材質を既定値から読み直す（false なら前の値に重ねる）
+    fn load_text_with(&mut self, text: &str, source: &str, replace: bool) -> Result<(), String> {
         let root: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
         let Some(toml::Value::Table(mats)) = root.get("material") else { return Ok(()) };
         for (name, node) in mats {
@@ -334,7 +344,9 @@ impl MaterialLibrary {
                 }
             }
             let t = &t;
-            let mut m = match self.materials.get(name) {
+            // 組み込みの材質の名前なら、置き換えずに重ねる（手で一部の値だけを上書きする書き方）
+            let overlay = !replace || self.sources.get(name).is_some_and(|s| s == "builtin");
+            let mut m = match self.materials.get(name).filter(|_| overlay) {
                 Some(existing) => existing.clone(),
                 None => Material { name: name.clone(), ..Default::default() },
             };
@@ -390,6 +402,11 @@ impl MaterialLibrary {
 
     pub fn source_of(&self, name: &str) -> &str {
         self.sources.get(name).map(|s| s.as_str()).unwrap_or("")
+    }
+
+    /// 材質の値と表示名が同じか（どのファイルから読んだかは比べない）
+    pub fn same_materials(&self, other: &MaterialLibrary) -> bool {
+        self.materials == other.materials && self.labels == other.labels
     }
 }
 
@@ -519,6 +536,29 @@ mod tests {
         assert_eq!(lib.find("x").unwrap().name, "x");
         lib.remove("x");
         assert!(lib.find("x").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 材質エディタの user.toml は最後に読み、ほかのファイルの同じ材質を置き換える（重ねない）。
+    /// 以前は名前の順に重ねたので、エディタで既定値に戻した項目や、user.toml より後ろのファイルの値が勝っていた
+    #[test]
+    fn user_toml_wins_over_other_files() {
+        let dir = std::env::temp_dir().join(format!("krbr_user_mat_order_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("materials")).unwrap();
+        std::fs::write(dir.join("materials").join("mine.toml"), "[material.my_red]
+base_color = [1, 0, 0]
+coat_weight = 0.8
+").unwrap();
+        std::fs::write(dir.join("materials").join("zz.toml"), "[material.my_red]
+base_color = [0, 0, 1]
+").unwrap();
+        // エディタで編集して保存：coat_weight を既定値（0）に戻した（既定値の項目は書かれない）
+        save_user_material(&dir, "my_red", Some((&Material { base_color: glam::Vec3::new(0.0, 1.0, 0.0), ..Default::default() }, "my red"))).unwrap();
+        let lib = MaterialLibrary::load(&dir);
+        let m = lib.find("my_red").unwrap();
+        assert_eq!((m.base_color, m.coat_weight), (glam::Vec3::new(0.0, 1.0, 0.0), 0.0));
+        assert!(lib.source_of("my_red").ends_with(USER_MATERIALS_FILE));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
