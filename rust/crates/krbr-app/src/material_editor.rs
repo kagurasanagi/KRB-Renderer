@@ -143,6 +143,9 @@ pub struct PartInfo {
 pub enum Action {
     /// 部位（空なら全部位）に材質を書き込む
     Assign { part: String, material: String },
+    /// 部品 reference（3D モデルの番号 model）の部位に材質を書き込む。止まってから書く調整は、その間に選んだ部品が
+    /// 変わっていても、調整した部品に書く
+    AssignTo { reference: String, model: Option<usize>, part: String, material: String },
     /// 自分の材質を書く（name は ID。同じ ID があれば置き換え）。label は表示名
     SaveUser { name: String, material: Box<Material>, label: String },
     DeleteUser(String),
@@ -153,6 +156,8 @@ pub enum Action {
 /// 部位の色・粗さの調整（止まってから書き込む）
 struct Adjust {
     reference: String,
+    /// 調整した部品の 3D モデルの番号（書き込む先を「このモデル」にしたときに使う）
+    model: Option<usize>,
     part: String,
     material: String,
     changed_at: Instant,
@@ -304,12 +309,16 @@ impl MaterialEditor {
         }
     }
 
-    /// 選んだ部品が変わった・シーンを組み直した（調整の書き込みが反映された）ときの片付け
-    fn sync_selection(&mut self, part: Option<&PartInfo>) {
+    /// 選んだ部品が変わった・シーンを組み直した（調整の書き込みが反映された）ときの片付け。
+    /// 書き込む前に別の部品を選んだら、調整はその場で前の部品に書く（以前は書かずに捨てていた）
+    fn sync_selection(&mut self, part: Option<&PartInfo>, actions: &mut Vec<Action>) {
         let reference = part.map(|p| p.reference.as_str());
         if let Some(a) = &self.adjust {
             let reflected = part.is_some_and(|p| p.rows.iter().any(|r| r.key == a.part && r.material == a.material));
             if Some(a.reference.as_str()) != reference || (a.written && reflected) {
+                if !a.written {
+                    actions.push(Action::AssignTo { reference: a.reference.clone(), model: a.model, part: a.part.clone(), material: a.material.clone() });
+                }
                 self.adjust = None;
             }
         }
@@ -331,9 +340,11 @@ impl MaterialEditor {
         self.wanted.clear();
         let mut actions = Vec::new();
         if !self.open {
+            // 閉じた：止まるのを待っていた編集を書く（閉じたまま捨てない）
+            self.flush(part, &mut actions, true);
             return actions;
         }
-        self.sync_selection(part);
+        self.sync_selection(part, &mut actions);
         self.shortcuts(ctx);
         let mut open = self.open;
         egui::Window::new(fl!("mated-title")).id(egui::Id::new("material_editor")).open(&mut open).default_pos([40.0, 60.0]).default_size([900.0, 780.0]).min_width(640.0).resizable(true).collapsible(true).show(ctx, |ui| {
@@ -388,11 +399,18 @@ impl MaterialEditor {
         painter.galley(at, galley, egui::Color32::WHITE);
     }
 
-    /// 止まった編集を書き込む（now なら待たずに）
-    fn flush(&mut self, part: Option<&PartInfo>, actions: &mut Vec<Action>, now: bool) {
+    /// 書き込むのを待っている編集を、今すぐ書き込む（ビューアを終えるとき）
+    pub fn flush_now(&mut self, part: Option<&PartInfo>) -> Vec<Action> {
+        let mut actions = Vec::new();
+        self.flush(part, &mut actions, true);
+        actions
+    }
+
+    /// 止まった編集を書き込む（now なら待たずに）。調整は、調整した部品に書く（今選んでいる部品でなくても）
+    fn flush(&mut self, _part: Option<&PartInfo>, actions: &mut Vec<Action>, now: bool) {
         if let Some(a) = &mut self.adjust {
-            if !a.written && (now || a.changed_at.elapsed() >= EDIT_DELAY) && part.is_some_and(|p| p.reference == a.reference) {
-                actions.push(Action::Assign { part: a.part.clone(), material: a.material.clone() });
+            if !a.written && (now || a.changed_at.elapsed() >= EDIT_DELAY) {
+                actions.push(Action::AssignTo { reference: a.reference.clone(), model: a.model, part: a.part.clone(), material: a.material.clone() });
                 a.written = true;
             }
         }
@@ -794,13 +812,15 @@ impl MaterialEditor {
     fn adjust_to(&mut self, part: Option<&PartInfo>, reference: &str, key: &str, name: String, actions: &mut Vec<Action>) {
         match &mut self.adjust {
             Some(a) if a.reference == reference && a.part == key => {
+                a.model = part.filter(|p| p.reference == reference).and_then(|p| p.model).or(a.model);
                 a.material = name;
                 a.changed_at = Instant::now();
                 a.written = false;
             }
             _ => {
                 self.flush(part, actions, true);
-                self.adjust = Some(Adjust { reference: reference.to_string(), part: key.to_string(), material: name, changed_at: Instant::now(), written: false });
+                let model = part.filter(|p| p.reference == reference).and_then(|p| p.model);
+                self.adjust = Some(Adjust { reference: reference.to_string(), model, part: key.to_string(), material: name, changed_at: Instant::now(), written: false });
             }
         }
     }
@@ -831,7 +851,7 @@ impl MaterialEditor {
     /// 部位の材質を書き込み、組み直しが終わるまで表示にその名前を使う
     fn write_row(&mut self, reference: &str, key: &str, material: String, actions: &mut Vec<Action>) {
         actions.push(Action::Assign { part: key.to_string(), material: material.clone() });
-        self.adjust = Some(Adjust { reference: reference.to_string(), part: key.to_string(), material, changed_at: Instant::now(), written: true });
+        self.adjust = Some(Adjust { reference: reference.to_string(), model: None, part: key.to_string(), material, changed_at: Instant::now(), written: true });
     }
 
     /// 部位の色・粗さの調整を材質の値にして、部位の調整を外す（組み込みの材質ならコピーを作って、それにする）
@@ -1013,7 +1033,7 @@ impl MaterialEditor {
         actions.push(Action::SaveUser { name: name.clone(), material: Box::new(m.clone()), label: label.clone() });
         if let (Some((part_key, keep)), Some(p)) = (n.assign_to, part) {
             actions.push(Action::Assign { part: part_key.clone(), material: keep.name(&name) });
-            self.adjust = Some(Adjust { reference: p.reference.clone(), part: part_key, material: keep.name(&name), changed_at: Instant::now(), written: true });
+            self.adjust = Some(Adjust { reference: p.reference.clone(), model: p.model, part: part_key, material: keep.name(&name), changed_at: Instant::now(), written: true });
         }
         self.browsing = Some(name.clone());
         self.notice.clear();

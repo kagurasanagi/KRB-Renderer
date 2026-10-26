@@ -362,9 +362,11 @@ impl MaterialEditor {
     pub fn web_update(&mut self, lib: &MaterialLibrary, part: Option<&PartInfo>) -> Vec<Action> {
         let mut actions = Vec::new();
         if !self.open {
+            // 閉じた：止まるのを待っていた編集を書く（閉じたまま捨てない）
+            self.flush(part, &mut actions, true);
             return actions;
         }
-        self.sync_selection(part);
+        self.sync_selection(part, &mut actions);
         if let Some(p) = part.filter(|p| !p.rows.is_empty()) {
             if p.rows.len() == 1 && self.target.is_none() {
                 self.target = Some(p.rows[0].key.clone());

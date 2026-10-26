@@ -1367,7 +1367,8 @@ impl App {
             self.view_seen = cur;
             self.view_changed_at = Instant::now();
         }
-        if self.has_board() && self.view_seen != self.view_saved && (now || self.view_changed_at.elapsed() >= Duration::from_secs(1)) {
+        // テストでは基板の設定ファイルに書かない（後の krbr render が、テストの操作の値で描くことになる）
+        if self.has_board() && !self.test.active() && self.view_seen != self.view_saved && (now || self.view_changed_at.elapsed() >= Duration::from_secs(1)) {
             remember::remember_view(&self.prep.board.file, &self.view_seen, &self.prep.config_view);
             self.view_saved = self.view_seen.clone();
         }
@@ -1375,7 +1376,7 @@ impl App {
 
     /// パネルの設定をすべて既定（設定ファイルとコマンドライン）に戻し、この基板について覚えたものを忘れる
     fn reset_all_settings(&mut self) {
-        if self.has_board() {
+        if self.has_board() && !self.test.active() {
             remember::forget_board(&self.prep.board.file);
         }
         let c = self.prep.configured.clone();
@@ -2045,6 +2046,11 @@ impl App {
     /// 選んだ部品の部位（空なら全部位）に材質を書き込む。clear なら上書きを消す
     fn assign_material(&mut self, part: &str, material: &str, clear: bool) {
         let Some(sel) = self.selected.clone() else { return };
+        self.assign_material_to(&sel, part, material, clear);
+    }
+
+    /// 部品 sel の部位（空なら全部位）に材質を書き込む。clear なら上書きを消す
+    fn assign_material_to(&mut self, sel: &Selected, part: &str, material: &str, clear: bool) {
         // 代わりの箱にはモデルが無いので、部品番号に書く
         let scope = if sel.model.is_none() { AssignScope::Part } else { self.assign_scope };
         let model_spec = sel.model.and_then(|mi| self.prep.board.footprints.iter().find(|f| f.reference == sel.reference).and_then(|f| f.models.get(mi)).map(|m| m.path.clone()));
@@ -2110,6 +2116,16 @@ impl App {
         Some(PartInfo { reference: sel.reference.clone(), model: sel.model, instances, rows })
     }
 
+    /// 書き込むのを待っている編集（材質エディタの調整・自分の材質、設定パネルの発光）を今すぐ書く。
+    /// ビューアを終えるとき・別の基板に切り替えるとき（待っている間に終えると、編集が失われていた）
+    fn flush_pending_edits(&mut self) {
+        let info = self.part_info();
+        let actions = self.editor.flush_now(info.as_ref());
+        self.editor_actions.extend(actions);
+        self.apply_editor_actions();
+        self.flush_emit_edit(true);
+    }
+
     /// 材質エディタの頼みごと（割り当て、自分の材質の保存・削除）
     fn apply_editor_actions(&mut self) {
         for a in std::mem::take(&mut self.editor_actions) {
@@ -2119,6 +2135,11 @@ impl App {
                     self.flush_emit_edit(true);
                     self.emit_edit = None;
                     self.assign_material(&part, &material, false);
+                }
+                EditorAction::AssignTo { reference, model, part, material } => {
+                    self.flush_emit_edit(true);
+                    self.emit_edit = None;
+                    self.assign_material_to(&Selected { reference, model }, &part, &material, false);
                 }
                 EditorAction::SaveUser { name, material, label } => self.save_user_material(&name, Some((*material, label))),
                 EditorAction::DeleteUser(name) => self.save_user_material(&name, None),
@@ -2589,7 +2610,7 @@ impl App {
     /// 読み込んだ基板に切り替える：起動し直したのと同じ状態を作り、ウィンドウ・GPU・egui・材質エディタは引き継ぐ。
     /// startup（起動時に指定された基板）なら、コマンドラインの指定を持ち越す
     fn switch_board(&mut self, prep: PreparedScene, startup: bool) -> Result<(), String> {
-        self.flush_emit_edit(true);
+        self.flush_pending_edits();
         self.save_view(true); // 前の基板のパネルの設定を覚える
         let pcb = prep.board.file.clone();
         if !self.test.active() {
@@ -3725,7 +3746,7 @@ impl App {
             Ok(()) => {
                 self.env_path = remember::normalize_hdr(&d.path);
                 // 基板を開いていなければ、覚える先（基板の設定ファイル）が無い
-                if remember_it && !self.prep.board.file.as_os_str().is_empty() {
+                if remember_it && !self.prep.board.file.as_os_str().is_empty() && !self.test.active() {
                     remember::remember_hdr(&self.prep.board.file, &self.env_path, &self.prep.config_hdr);
                 }
                 info!("environment: {} ({}x{})", self.env_path, d.image.width, d.image.height);
@@ -4676,6 +4697,7 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
     // WebView の操作と、基板の保存の通知で、眠っているイベントループを起こす
     app.proxy = Some(event_loop.create_proxy());
     event_loop.run_app(&mut app).map_err(|e| anyhow::anyhow!("event loop: {e}"))?;
+    app.flush_pending_edits();
     // GPU の資源はコンテキストより先に捨てる
     if let Some(g) = app.gpu.take() {
         let ctx = g.ctx;
