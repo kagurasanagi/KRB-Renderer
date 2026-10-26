@@ -399,7 +399,8 @@ pub fn apply_view_values(cfg: &mut ProjectConfig, v: &ViewValues) {
     if let Some(s) = v.get("substrate").and_then(|x| x.as_str()) {
         cfg.scene.substrate = s.to_string();
     }
-    if let Some(m) = v.get("mask").and_then(|x| x.as_str()).filter(|m| !m.is_empty()) {
+    // 設定ファイルと同じ色なら当て直さない（プリセットを当て直すと、設定ファイルに書いた粗さ・散乱がプリセットの値に戻る）
+    if let Some(m) = v.get("mask").and_then(|x| x.as_str()).filter(|m| !m.is_empty() && *m != mask_spec(&cfg.scene)) {
         if let Err(e) = apply_mask_color_spec(&mut cfg.scene, m) {
             warn!("remembered mask color {}: {}", m, e);
         }
