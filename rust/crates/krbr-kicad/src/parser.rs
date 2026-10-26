@@ -210,6 +210,41 @@ fn read_text(n: &Node, fp: Option<usize>, xf: &Xform, board: &mut Board) {
     board.stroke_texts.push(StrokeText { text: text.to_string(), layer: layer.to_string(), pos, footprint: fp, bbox: stroke_text_box(n, text, pos) });
 }
 
+/// 寸法線・表・ターゲット。krbr は形を作らず、銅箔・マスク・シルクの層のものは kicad-cli に描かせる（文字の枠と同じく
+/// 線フォントの文字の一覧に入れて、kicad-cli を呼ぶかの判定と差分の検出に含める）。範囲は中の点すべて（部品内なら、
+/// 部品に対する座標と見たときの基板座標も含める）に、矢印・文字のはみ出しを見込んだ余白を足したもの
+fn read_plotted_item(n: &Node, fp: Option<usize>, xf: &Xform, board: &mut Board) {
+    let layer = n.child_str("layer").unwrap_or("");
+    if layer.is_empty() {
+        return;
+    }
+    fn collect(n: &Node, out: &mut Vec<Vec2>) {
+        for c in n.items.iter().filter(|c| c.is_list) {
+            if matches!(c.tag(), "xy" | "start" | "end" | "at" | "center" | "mid") {
+                out.push(Vec2::new(c.num(1), c.num(2)));
+            }
+            collect(c, out);
+        }
+    }
+    let mut pts = Vec::new();
+    collect(n, &mut pts);
+    let mut bbox = Box2::default();
+    for p in pts {
+        bbox.add(p);
+        if fp.is_some() {
+            bbox.add(xf.apply(p));
+        }
+    }
+    if bbox.lo.x > bbox.hi.x {
+        return;
+    }
+    let bbox = Box2 { lo: bbox.lo - Vec2::splat(PLOTTED_ITEM_MARGIN), hi: bbox.hi + Vec2::splat(PLOTTED_ITEM_MARGIN) };
+    board.stroke_texts.push(StrokeText { text: n.tag().to_string(), layer: layer.to_string(), pos: bbox.center(), footprint: fp, bbox });
+}
+
+/// 寸法線などの範囲に足す余白（mm）：矢印・文字・寸法の延長線のはみ出し
+const PLOTTED_ITEM_MARGIN: f64 = 3.0;
+
 /// 文字の枠（gr_text_box / fp_text_box）。krbr は枠も中の文字も描かない（シルクのものは kicad-cli に描かせる）ので、
 /// 線フォントの文字と同じ一覧に入れて、kicad-cli を呼ぶかの判定と差分の検出に含める。
 /// 枠は (start)(end) か、回した枠なら (pts) の 4 隅で、部品内なら部品に対する座標
@@ -406,6 +441,7 @@ fn read_footprint(n: &Node, board: &mut Board) {
                 read_text(it, idx, &xf, board);
             }
             "fp_text_box" => read_text_box(it, idx, &xf, board),
+            "dimension" | "table" | "target" => read_plotted_item(it, idx, &xf, board),
             "pad" => read_pad(it, &xf, idx, board),
             "model" => fp.models.push(read_model(it)),
             "zone" => read_zone(it, board),
@@ -564,7 +600,7 @@ pub fn load_board(file: &Path) -> Result<Board, LoadError> {
         if matches!(tag, "general" | "layers" | "setup") {
             setup_key += &to_hex(hash);
         }
-        let is_item = matches!(tag, "footprint" | "module" | "segment" | "arc" | "via" | "zone") || tag.starts_with("gr_");
+        let is_item = matches!(tag, "footprint" | "module" | "segment" | "arc" | "via" | "zone" | "dimension" | "table" | "target") || tag.starts_with("gr_");
         let mark = mark_of(&board);
         match tag {
             "setup" => read_setup(it, &mut board),
@@ -599,6 +635,7 @@ pub fn load_board(file: &Path) -> Result<Board, LoadError> {
             "zone" => read_zone(it, &mut board),
             "gr_text" => read_text(it, None, &ident, &mut board),
             "gr_text_box" => read_text_box(it, None, &ident, &mut board),
+            "dimension" | "table" | "target" => read_plotted_item(it, None, &ident, &mut board),
             _ => {
                 if let Some(kind) = tag.strip_prefix("gr_") {
                     if let Some(g) = read_graphic(it, kind, &ident, None) {

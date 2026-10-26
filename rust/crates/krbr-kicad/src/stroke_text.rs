@@ -1,5 +1,5 @@
 //! kicad-cli に渡す基板のコピー：krbr が描く層（シルク・銅箔・ソルダーマスク）には、krbr が自分では描けないもの
-//! （KiCad の線フォントの文字と、文字の枠）だけを残す。
+//! （KiCad の線フォントの文字、文字の枠、寸法線・表・ターゲット）だけを残す。
 //! TrueType の文字（render_cache があるもの）・線・図形・パッドは krbr が描くので、kicad-cli には描かせない（同じものが
 //! わずかに違う形で重なって太ったり二重になったりしないように）
 
@@ -43,6 +43,8 @@ pub(crate) fn needs_kicad_cli(n: &Node) -> bool {
     match n.tag() {
         "property" | "fp_text" | "gr_text" => !is_truetype(n),
         "fp_text_box" | "gr_text_box" => true,
+        // 寸法線・表・ターゲット（krbr は形を作らない。以前はどの経路でも描かれず、消えていた）
+        "dimension" | "table" | "target" => true,
         _ => false,
     }
 }
@@ -91,13 +93,13 @@ fn filter_footprint(fp: &Node) -> Node {
                 }
                 out.items.push(t);
             }
-            "fp_text_box" => {
+            "fp_text_box" | "dimension" | "table" | "target" => {
                 if plotted_by_kicad_cli(it) {
                     out.items.push(it.clone());
                 }
             }
             // 図形・パッド・ゾーン・3D モデルなどは要らない
-            "pad" | "zone" | "model" | "group" | "dimension" | "image" | "barcode" => {}
+            "pad" | "zone" | "model" | "group" | "image" | "barcode" => {}
             t if t.starts_with("fp_") => {}
             _ => out.items.push(it.clone()),
         }
@@ -128,7 +130,7 @@ pub fn stroke_text_only_board(text: &str) -> Result<String, String> {
                 out.items.push(l);
             }
             "footprint" | "module" => out.items.push(filter_footprint(it)),
-            "gr_text" | "gr_text_box" => {
+            "gr_text" | "gr_text_box" | "dimension" | "table" | "target" => {
                 if plotted_by_kicad_cli(it) {
                     out.items.push(it.clone());
                 }
@@ -222,6 +224,40 @@ mod tests {
         // 部品の文字の位置も基板座標：(0, -2) を 90° 回すと (-2, 0)
         let u1 = b.stroke_texts.iter().find(|t| t.text == "U1").unwrap();
         assert!((u1.pos - crate::board::Vec2::new(8.0, 20.0)).length() < 1e-9, "{}", u1.pos);
+    }
+
+    /// 寸法線・表・ターゲット：シルク・銅箔・マスクの層のものは kicad-cli に描かせ、パーサも数える（以前はどこにも描かれなかった）
+    const BOARD_WITH_DIMENSIONS: &str = r#"(kicad_pcb (version 20260206) (generator "pcbnew")
+  (layers (0 "F.Cu" signal) (37 "F.SilkS" user "F.Silkscreen") (49 "F.Fab" user))
+  (footprint "Lib:Part" (layer "F.Cu") (uuid "fp1") (at 10 20 90)
+    (dimension (type aligned) (layer "F.SilkS") (uuid "fd1") (pts (xy -1 0) (xy 1 0)) (height 1)
+      (gr_text "2 mm" (at 0 -1.5 0) (layer "F.SilkS") (effects (font (size 0.5 0.5) (thickness 0.1)))))
+    (dimension (type aligned) (layer "F.Fab") (uuid "fd2") (pts (xy -1 0) (xy 1 0)) (height 1)))
+  (dimension (type aligned) (layer "F.SilkS") (uuid "d1") (pts (xy 110 150) (xy 150 150)) (height -5)
+    (gr_text "40 mm" (at 130 143.85 0) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15)))))
+  (table (column_count 1) (layer "F.SilkS") (uuid "tb1") (cells (table_cell "A" (start 10 10) (end 20 15) (layer "F.SilkS") (effects (font (size 1 1))))))
+  (target plus (at 5 5) (size 5) (width 0.1) (layer "Edge.Cuts") (uuid "tg1"))
+)"#;
+
+    #[test]
+    fn dimensions_and_tables_are_plotted_and_counted() {
+        let out = parse(&stroke_text_only_board(BOARD_WITH_DIMENSIONS).unwrap()).unwrap();
+        let fp = out.child("footprint").unwrap();
+        assert_eq!(fp.children("dimension").count(), 1); // 部品図の層のものは渡さない
+        assert_eq!(out.children("dimension").count(), 1);
+        assert_eq!(out.children("table").count(), 1);
+        assert!(!out.has("target")); // 外形の層は描かせない
+
+        let dir = std::env::temp_dir().join(format!("krbr_rust_dimension_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("dims.kicad_pcb");
+        std::fs::write(&file, BOARD_WITH_DIMENSIONS).unwrap();
+        let b = crate::parser::load_board(&file);
+        let _ = std::fs::remove_dir_all(&dir);
+        let b = b.unwrap();
+        assert_eq!(b.stroke_text_count(), 3);
+        let d1 = b.items.iter().find(|it| it.key == "d1").unwrap();
+        assert!(d1.stroke_text && d1.bbox.lo.x <= 110.0 && d1.bbox.hi.x >= 150.0 && d1.bbox.lo.y <= 143.85);
     }
 
     /// 銅箔・マスク・内層・部品図の層の文字を含む基板
