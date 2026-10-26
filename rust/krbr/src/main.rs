@@ -342,10 +342,7 @@ struct ViewArgs {
     /// else the language chosen in KiCad, else the OS language
     #[arg(long)]
     lang: Option<String>,
-    /// use the built-in (egui) UI instead of the WebView2 one (menus, toolbar, panels, material editor)
-    #[arg(long)]
-    egui_ui: bool,
-    /// the WebView2 UI (now the default; kept so that old command lines still work)
+    /// the WebView2 UI (always used; kept so that old command lines still work)
     #[arg(long, hide = true)]
     web_ui: bool,
 }
@@ -675,7 +672,7 @@ fn main() {
                 render_ratio: args.render_ratio,
                 paused: args.paused,
                 language: args.lang.clone(),
-                web_ui: !args.egui_ui || args.web_ui,
+                web_ui: true,
                 test: TestOptions {
                     frames: args.test_frames,
                     screenshot: args.screenshot.clone(),

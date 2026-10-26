@@ -61,8 +61,8 @@ pub struct ViewOptions {
     pub render_ratio: Option<f32>,
     /// 表示の言語（--lang。"ja" など）。None なら環境変数 KRBR_LANG、メニューで選んだもの、KiCad、OS の順
     pub language: Option<String>,
-    /// メニュー・ボタン列・パネル・材質エディタを WebView（WebView2）で描く（既定。--egui-ui なら egui）。
-    /// 隠したウィンドウ（テスト）では作らない。作れなければ egui の画面にする
+    /// メニュー・ボタン列・パネル・材質エディタを WebView（WebView2）で描く。隠したウィンドウ（テスト）では作らない。
+    /// 作れなければ 3D 表示とキーの操作だけになる（WebView2 Runtime の入れ方を知らせる）
     pub web_ui: bool,
     /// 開発用のテストの操作（--test-*）
     pub test: TestOptions,
@@ -714,16 +714,6 @@ impl ViewerSettings {
     }
 }
 
-/// 設定のレジストの色に当たるプリセット（無ければ None ＝「設定どおり」）
-/// 材質を書き込む先（この部品・このモデル・全基板）を選ぶ。設定パネルと材質エディタで同じものを出す
-fn scope_radios(ui: &mut egui::Ui, scope: &mut AssignScope) {
-    ui.horizontal(|ui| {
-        ui.radio_value(scope, AssignScope::Part, fl!("scope-part")).on_hover_text(fl!("scope-part-tip"));
-        ui.radio_value(scope, AssignScope::ModelProject, fl!("scope-model")).on_hover_text(fl!("scope-model-tip"));
-        ui.radio_value(scope, AssignScope::ModelGlobal, fl!("scope-all-boards")).on_hover_text(fl!("scope-all-boards-tip"));
-    });
-}
-
 fn mask_choice_of(s: &SceneOptions) -> Option<usize> {
     if s.mask_preset.is_empty() {
         None
@@ -927,16 +917,6 @@ fn install_fonts(ctx: &egui::Context, lang: &str) {
     ctx.set_fonts(fonts);
 }
 
-/// パネルを閉じるボタン（egui の Window の × と同じ描き方）
-fn close_button(ui: &mut egui::Ui) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::Vec2::splat(ui.spacing().icon_width), egui::Sense::click());
-    let vis = ui.style().interact(&resp);
-    let r = rect.shrink(2.0).expand(vis.expansion);
-    ui.painter().line_segment([r.left_top(), r.right_bottom()], vis.fg_stroke);
-    ui.painter().line_segment([r.right_top(), r.left_bottom()], vis.fg_stroke);
-    resp
-}
-
 /// GPU 側の資源一式（ウィンドウができてから作る）
 struct Gpu {
     ctx: &'static Context,
@@ -975,6 +955,8 @@ struct App {
     web_started: Option<Instant>,
     /// WebView を作れなかった回数と、次に試す時刻（前に開いていた krbr の WebView2 が終わりきる前だと、作れないことがある）
     web_failures: (u32, Option<Instant>),
+    /// WebView2 を作れなかった（メニュー・パネルは出せない。3D 表示に WebView2 Runtime の入れ方を出す）
+    web_missing: bool,
     /// 起動中の画面（GPU・画面・基板の用意ができるまで、ウィンドウ全体に進み具合のバーと今の段階を出す）を出している
     splash: bool,
     /// 最近使った基板（メニューを開いたときに読み直す）
@@ -1182,35 +1164,6 @@ fn ratio_label(r: f32) -> String {
         fl!("ratio-native")
     };
     fl!("ratio-label", ratio = r.to_string(), what = what)
-}
-
-/// 設定パネルの「表示」の欄：描画のサイズとレンダリングの比率
-fn size_controls(ui: &mut egui::Ui, st: &mut ViewState) {
-    let current = match st.size_mode {
-        None => fl!("size-fit-window"),
-        Some((w, h)) => size_label(w, h),
-    };
-    egui::ComboBox::from_id_salt("render_size").width(200.0).selected_text(current).show_ui(ui, |ui| {
-        if ui.selectable_label(st.size_mode.is_none(), fl!("size-fit-window")).clicked() {
-            st.size_mode = None;
-        }
-        for (w, h) in SIZE_PRESETS {
-            if ui.selectable_label(st.size_mode == Some((w, h)), size_label(w, h)).clicked() && st.size_mode != Some((w, h)) {
-                st.size_mode = Some((w, h));
-                st.req.fit_window = true;
-            }
-        }
-    });
-    ui.weak(fl!("size-hint"));
-    egui::ComboBox::from_id_salt("render_ratio").width(200.0).selected_text(ratio_label(st.render_ratio)).show_ui(ui, |ui| {
-        for r in RATIOS {
-            if ui.selectable_label(st.render_ratio == r, ratio_label(r)).clicked() && st.render_ratio != r {
-                st.render_ratio = r;
-                st.req.fit_window = st.size_mode.is_some();
-            }
-        }
-    });
-    ui.weak(fl!("ratio-hint"));
 }
 
 fn display_mode_name(m: DisplayMode) -> &'static str {
@@ -1625,284 +1578,6 @@ impl App {
         Ok(())
     }
 
-    fn panel(&mut self, ui: &mut egui::Ui) {
-        self.selection_panel(ui);
-
-        let cam = self.view_camera();
-        let board_center = self.prep.scene.board.center;
-        let board_half_thickness = 0.5 * self.prep.scene.board.thickness;
-        let has_board = self.has_board();
-        let st = &mut self.st;
-        ui.separator();
-        ui.strong(fl!("panel-environment"));
-        let mut chosen: Option<String> = None;
-        let mut open_dialog = false;
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("hdr").width(220.0).selected_text(env_label(&self.env_path)).show_ui(ui, |ui| {
-                for (gi, group) in self.env_list.iter().enumerate() {
-                    if gi > 0 {
-                        ui.separator();
-                    }
-                    for p in group {
-                        if ui.selectable_label(remember::same_hdr(p, &self.env_path), env_label(p)).on_hover_text(env_tip(p)).clicked() {
-                            chosen = Some(p.clone());
-                        }
-                    }
-                }
-            });
-            if ui.add_enabled(self.open_dialog.is_none(), egui::Button::new(fl!("env-open"))).on_hover_text(fl!("env-open-tip")).clicked() {
-                open_dialog = true;
-            }
-        });
-        ui.weak(fl!("env-remember-hint"));
-        if let Some(job) = &self.env_job {
-            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), fl!("env-loading", path = job.path.as_str()));
-        }
-        if !self.env_error.is_empty() {
-            ui.colored_label(egui::Color32::from_rgb(255, 102, 102), &self.env_error);
-        }
-        if ui.add(egui::Slider::new(&mut st.env_intensity, 0.05..=8.0).logarithmic(true).text(fl!("env-intensity"))).changed() {
-            st.changed.frame = true;
-        }
-        if ui.add(egui::Slider::new(&mut st.env_rotation_deg, -180.0..=180.0).suffix("°").text(fl!("env-rotation"))).changed() {
-            st.changed.frame = true;
-        }
-
-        ui.separator();
-        ui.strong(fl!("panel-exposure"));
-        ui.horizontal(|ui| {
-            ui.add(egui::Slider::new(&mut st.exposure, -6.0..=6.0).text("EV"));
-            if ui.button(fl!("exposure-auto")).clicked() {
-                st.req.auto_exposure = true;
-            }
-            if ui.button("0").clicked() {
-                st.exposure = 0.0;
-            }
-        });
-        ui.add(egui::Slider::new(&mut st.glow, 0.0..=4.0).text(fl!("glow")))
-            .on_hover_text(fl!("glow-tip"));
-        if st.glow > 0.0 {
-            ui.add(egui::Slider::new(&mut st.glow_threshold, 0.5..=20.0).logarithmic(true).text(fl!("glow-threshold")))
-                .on_hover_text(fl!("glow-threshold-tip"));
-            ui.add(egui::Slider::new(&mut st.glow_spread, 0.0..=1.0).text(fl!("glow-spread")))
-                .on_hover_text(fl!("glow-spread-tip"));
-        }
-        {
-            let on_cpu = self.gpu.as_ref().and_then(|g| g.denoiser.as_ref()).is_some_and(|d| d.device_name() == "CPU");
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut st.denoise, fl!("denoise"));
-                if let Some(d) = self.gpu.as_ref().and_then(|g| g.denoiser.as_ref()) {
-                    ui.weak(format!("{}, {:.0} ms", d.device_name(), self.last_denoise_ms));
-                    if on_cpu && ui.button(fl!("denoise-now")).clicked() {
-                        st.req.denoise_now = true;
-                    }
-                } else if self.denoiser_tried && st.denoise {
-                    ui.weak(fl!("denoise-unavailable"));
-                }
-            });
-            if st.denoise {
-                ui.add(egui::Slider::new(&mut st.denoise_strength, 0.0..=1.0).text(fl!("denoise-strength"))).on_hover_text(fl!("denoise-strength-tip"));
-                if on_cpu {
-                    ui.weak(fl!("denoise-cpu-hint"));
-                }
-                if !self.denoise_error.is_empty() {
-                    ui.colored_label(egui::Color32::from_rgb(255, 102, 102), &self.denoise_error);
-                }
-            }
-        }
-
-        ui.separator();
-        ui.strong(fl!("panel-integrator"));
-        let mut kind = self.prep.cfg.integrator;
-        ui.horizontal(|ui| {
-            for k in IntegratorKind::ALL {
-                ui.radio_value(&mut kind, k, k.as_str().to_uppercase());
-            }
-        });
-        if kind != self.prep.cfg.integrator {
-            self.prep.cfg.integrator = kind;
-            st.changed.integrator = true;
-        }
-        ui.weak(match kind {
-            IntegratorKind::Pt => fl!("integrator-pt-hint"),
-            IntegratorKind::Bdpt => fl!("integrator-bdpt-hint"),
-            IntegratorKind::Vcm => fl!("integrator-vcm-hint"),
-        });
-
-        ui.separator();
-        ui.strong(fl!("panel-lens"));
-        {
-            let l = &mut self.prep.cfg.lens;
-            let mut ch = false;
-            ui.horizontal(|ui| {
-                ch |= ui.radio_value(&mut l.model, LensModel::Pinhole, fl!("lens-pinhole")).changed();
-                ch |= ui.radio_value(&mut l.model, LensModel::Thin, fl!("lens-thin")).changed();
-                ch |= ui.radio_value(&mut l.model, LensModel::Realistic, fl!("lens-realistic")).changed();
-            });
-            if l.model != LensModel::Pinhole {
-                ch |= ui.add(egui::Slider::new(&mut l.f_number, 0.7..=22.0).logarithmic(true).text(fl!("lens-f-number"))).changed();
-                // ピントの距離は、決めた点までの今の距離（無ければ注視点までの距離）。スライダーで変えたら、視線の上のその距離の点にする
-                let mut focus = st.focus_point.map(|p| focus_distance_to(p, &cam)).unwrap_or(st.distance);
-                ui.horizontal(|ui| {
-                    if ui.add(egui::Slider::new(&mut focus, 5.0..=5000.0).logarithmic(true).text(fl!("lens-focus"))).changed() {
-                        st.focus_point = Some(cam.position + cam.forward * focus);
-                        ch = true;
-                    }
-                    if ui.add_enabled(st.focus_point.is_some(), egui::Button::new(fl!("lens-focus-auto"))).on_hover_text(fl!("lens-focus-auto-tip")).clicked() {
-                        st.focus_point = None;
-                        ch = true;
-                    }
-                });
-                ui.weak(if st.focus_point.is_some() { fl!("lens-focus-point-hint") } else { fl!("lens-focus-hint") });
-            }
-            if l.model == LensModel::Thin {
-                ch |= ui.add(egui::Slider::new(&mut l.focal_length_mm, 10.0..=300.0).logarithmic(true).text(fl!("lens-focal-length"))).changed();
-                ch |= ui.add(egui::Slider::new(&mut l.blades, 0..=12).text(fl!("lens-blades"))).changed();
-                if l.blades >= 3 {
-                    ch |= ui.add(egui::Slider::new(&mut l.blade_rotation_deg, 0.0..=360.0).suffix("°").text(fl!("lens-blade-rotation"))).changed();
-                    ch |= ui.add(egui::Slider::new(&mut l.blade_roundness, 0.0..=1.0).text(fl!("lens-blade-roundness"))).changed();
-                }
-                ch |= ui.checkbox(&mut l.natural_vignetting, fl!("lens-natural-vignetting")).changed();
-                ch |= ui.add(egui::Slider::new(&mut l.optical_vignetting, 0.0..=1.0).text(fl!("lens-optical-vignetting"))).changed();
-                ch |= ui.add(egui::Slider::new(&mut l.abbe_number, 0.0..=80.0).text(fl!("lens-axial-ca"))).changed();
-                ch |= ui.add(egui::Slider::new(&mut l.lateral_ca, 0.0..=0.02).text(fl!("lens-lateral-ca"))).changed();
-                if (l.abbe_number > 0.0 || l.lateral_ca > 0.0) && !st.spectral {
-                    ui.weak(fl!("lens-ca-hint"));
-                }
-            }
-            if ch {
-                st.changed.frame = true;
-            }
-        }
-
-        ui.separator();
-        ui.strong(fl!("panel-color"));
-        let mut spectral = st.spectral;
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut spectral, false, "RGB");
-            ui.radio_value(&mut spectral, true, fl!("color-spectral"));
-        });
-        if spectral != st.spectral {
-            st.spectral = spectral;
-            st.changed.frame = true;
-        }
-
-        ui.separator();
-        ui.strong(fl!("panel-surface"));
-        if ui.add(egui::Slider::new(&mut st.bump_intensity, 0.0..=2.0).text(fl!("bump-intensity"))).changed() {
-            st.changed.materials = true;
-        }
-        {
-            let presets = mask_presets();
-            let current = st.mask_choice.map(|i| presets[i].name.to_string()).unwrap_or_else(|| fl!("mask-as-configured"));
-            egui::ComboBox::from_id_salt("mask").width(200.0).selected_text(current).show_ui(ui, |ui| {
-                if ui.selectable_label(st.mask_choice.is_none(), fl!("mask-as-configured")).clicked() && st.mask_choice.is_some() {
-                    st.mask_choice = None;
-                    st.changed.mask = true;
-                }
-                for (i, p) in presets.iter().enumerate() {
-                    let sel = st.mask_choice == Some(i);
-                    let note = i18n::get(&format!("mask-note-{}", p.name)).unwrap_or_else(|| p.note.to_string());
-                    if ui.selectable_label(sel, p.name).on_hover_text(note).clicked() && !sel {
-                        st.mask_choice = Some(i);
-                        st.changed.mask = true;
-                    }
-                }
-            });
-            ui.weak(fl!("mask-hint"));
-        }
-        {
-            // 基材：FR4 か、材質ライブラリの透明な材質・セラミック・宝石
-            let current = self.prep.cfg.scene.substrate.clone();
-            let label = if current.is_empty() { fl!("substrate-fr4") } else { material_editor::material_label(&self.library, &current) };
-            let mut chosen: Option<String> = None;
-            ui.horizontal(|ui| {
-                ui.label(fl!("substrate"));
-                egui::ComboBox::from_id_salt("substrate").width(180.0).selected_text(label).height(480.0).show_ui(ui, |ui| {
-                    if ui.selectable_label(current.is_empty(), fl!("substrate-fr4")).clicked() {
-                        chosen = Some(String::new());
-                    }
-                    for (cat, names) in material_editor::grouped_names(&self.library) {
-                        if !matches!(cat, krbr_scene::Category::Glass | krbr_scene::Category::Gem | krbr_scene::Category::Ceramic) {
-                            continue;
-                        }
-                        ui.weak(material_editor::category_label(cat));
-                        for n in names {
-                            if ui.selectable_label(n == current, material_editor::material_label(&self.library, &n)).on_hover_text(n.as_str()).clicked() {
-                                chosen = Some(n.clone());
-                            }
-                        }
-                    }
-                });
-            });
-            if let Some(n) = chosen.filter(|n| *n != current) {
-                self.prep.cfg.scene.substrate = n;
-                update_substrate_material(&mut self.prep.scene, &self.prep.cfg.scene, &self.library);
-                st.changed.materials = true;
-                self.scene_epoch += 1;
-            }
-            let clear = self.library.find(&self.prep.cfg.scene.substrate).is_some_and(|m| m.transmission_weight > 0.0);
-            if clear && self.prep.cfg.scene.mask_preset != "clear" {
-                ui.weak(fl!("substrate-clear-hint"));
-            }
-        }
-
-        ui.separator();
-        ui.strong(fl!("panel-display"));
-        size_controls(ui, st);
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut st.mode, DisplayMode::Beauty, fl!("mode-image"));
-            ui.radio_value(&mut st.mode, DisplayMode::Albedo, fl!("mode-albedo"));
-            ui.radio_value(&mut st.mode, DisplayMode::Normal, fl!("mode-normal"));
-        });
-        {
-            let mut e = 4u32;
-            while (1u32 << e) < st.max_spp && e < 16 {
-                e += 1;
-            }
-            if ui.add(egui::Slider::new(&mut e, 4..=16).custom_formatter(|v, _| format!("2^{} = {}", v as u32, 1u32 << (v as u32))).text(fl!("max-spp"))).changed() {
-                st.max_spp = 1 << e;
-            }
-        }
-
-        ui.separator();
-        ui.strong(fl!("panel-camera"));
-        let mut fov = st.fov as f32;
-        if ui.add(egui::Slider::new(&mut fov, 5.0..=90.0).suffix("°").text(fl!("camera-fov"))).changed() {
-            st.fov = fov as f64;
-            st.changed.frame = true;
-        }
-        ui.label(fl!("camera-angles", elevation = format!("{:.0}", st.elevation), azimuth = format!("{:.0}", st.azimuth.rem_euclid(360.0))));
-        if has_board {
-            // KiCad の座標（mm）と、基板の上面からの高さ
-            let (cx, cy) = (board_center.x, board_center.y);
-            let t = st.target;
-            ui.label(fl!("camera-target", x = format_length(t.x as f64 + cx), y = format_length(t.z as f64 + cy), distance = format_length(st.distance as f64)));
-            let p = cam.position;
-            ui.label(fl!("camera-position", x = format_length(p.x as f64 + cx), y = format_length(p.z as f64 + cy), height = format_length(p.y as f64 - board_half_thickness)));
-        }
-        ui.horizontal(|ui| {
-            if ui.add_enabled(has_board, egui::Button::new(fl!("camera-fit"))).on_hover_text(fl!("toolbar-fit-tip")).clicked() {
-                st.req.fit_view = true;
-            }
-            if ui.button(fl!("camera-reset")).clicked() {
-                st.req.reset_view = true;
-            }
-            if ui.button(fl!("camera-save")).clicked() {
-                st.req.save = true;
-            }
-        });
-        ui.separator();
-        ui.weak(fl!("panel-help-mouse"));
-        ui.weak(fl!("panel-help-toggle"));
-        if let Some(p) = chosen {
-            self.start_env_load(p, true);
-        }
-        if open_dialog {
-            self.start_open_dialog();
-        }
-    }
-
     /// 保存（または裏での 3D モデルの分割の完了）を見つけたら、裏のスレッドで基板を読み直す（C++ 版 viewer の reloadJob）
     fn start_reload_if_needed(&mut self) {
         if self.reload_job.is_some() {
@@ -2264,189 +1939,6 @@ impl App {
         }
     }
 
-    /// 選んだ部品の欄：部位ごとの材質と、決まった段階。材質を選ぶと設定ファイルに書いて描き直す
-    fn selection_panel(&mut self, ui: &mut egui::Ui) {
-        ui.strong(fl!("sel-title"));
-        let Some(sel) = self.selected.clone() else {
-            ui.weak(fl!("sel-none-hint"));
-            return;
-        };
-        let mut deselect = false;
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(&sel.reference).strong().color(egui::Color32::from_rgb(255, 170, 40)));
-            deselect = ui.small_button(fl!("sel-deselect")).clicked();
-            ui.checkbox(&mut self.show_outline, fl!("sel-outline")).on_hover_text(fl!("sel-outline-tip"));
-        });
-        if ui.button(fl!("sel-open-editor")).on_hover_text(fl!("sel-open-editor-tip")).clicked() {
-            self.editor.open = true;
-        }
-        if deselect {
-            self.flush_emit_edit(true);
-            self.emit_edit = None;
-            self.selected = None;
-            self.outline = None;
-        }
-        let fp = self.prep.board.footprints.iter().find(|f| f.reference == sel.reference);
-        // 長い名前はパネルの幅で切り詰める（カーソルを乗せると全体が出る）
-        let lib_id = fp.map(|f| f.lib_id.clone()).unwrap_or_default();
-        ui.add(egui::Label::new(egui::RichText::new(&lib_id).weak()).truncate()).on_hover_text(&lib_id);
-        if self.selected.is_none() {
-            return;
-        }
-        if self.prep.cfg.lens.model == LensModel::Realistic {
-            ui.weak(fl!("sel-no-outline"));
-        }
-        let Some(mi) = sel.model else {
-            // 代わりの箱：3D モデルが無い理由
-            let missing: Vec<_> = self.prep.scene.missing.iter().filter(|m| m.reference == sel.reference).collect();
-            if missing.is_empty() {
-                ui.colored_label(egui::Color32::from_rgb(255, 204, 77), fl!("sel-meshing"));
-            } else {
-                ui.colored_label(egui::Color32::from_rgb(255, 204, 77), fl!("sel-missing"));
-                for m in missing {
-                    ui.weak(fl!("sel-missing-model", spec = m.spec.as_str(), resolved = m.resolved.as_str(), reason = m.reason.as_str()));
-                }
-                ui.weak(fl!("sel-missing-hint"));
-            }
-            return;
-        };
-        let model_file = fp.and_then(|f| f.models.get(mi)).map(|m| std::path::Path::new(&m.path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()).unwrap_or_default();
-        ui.add(egui::Label::new(egui::RichText::new(&model_file).weak()).truncate()).on_hover_text(&model_file);
-        // このインスタンスの部位の行
-        let rows: Vec<MaterialAssignment> = sel
-            .find_instance(&self.prep.scene, &self.prep.board)
-            .and_then(|i| match self.prep.scene.instances[i].owner {
-                InstanceOwner::Model { assignments, .. } => {
-                    let a = &self.prep.scene.assignments;
-                    let start = assignments as usize;
-                    let spec = &a.get(start)?.model_spec;
-                    Some(a[start..].iter().take_while(|r| r.reference == sel.reference && &r.model_spec == spec).cloned().collect())
-                }
-                _ => None,
-            })
-            .unwrap_or_default();
-        scope_radios(ui, &mut self.assign_scope);
-        // 書き込む先より優先される上書きがあると、書いても見た目は変わらない
-        let decided_by = |stage: MaterialStage| rows.iter().any(|r| r.stage() == Some(stage));
-        let shadowed_by_ref = self.assign_scope != AssignScope::Part && decided_by(MaterialStage::ProjectRef);
-        let shadowed_by_project = self.assign_scope == AssignScope::ModelGlobal && decided_by(MaterialStage::ProjectModel);
-        if shadowed_by_ref {
-            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), fl!("sel-shadowed-ref"));
-        } else if shadowed_by_project {
-            ui.colored_label(egui::Color32::from_rgb(255, 204, 77), fl!("sel-shadowed-project"));
-        }
-        // 書き込むもの：(部位（空なら全部位）, 材質, 上書きを消すか)
-        let mut actions: Vec<(String, String, bool)> = Vec::new();
-        let groups = material_editor::grouped_names(&self.library);
-        let combo = |ui: &mut egui::Ui, id: String, current: &str, label: String| -> Option<String> {
-            let mut chosen = None;
-            egui::ComboBox::from_id_salt(id).width(105.0).selected_text(label).height(480.0).show_ui(ui, |ui| {
-                for (cat, names) in &groups {
-                    ui.weak(material_editor::category_label(*cat));
-                    for n in names {
-                        if ui.selectable_label(n == current, material_editor::material_label(&self.library, n)).on_hover_text(n.as_str()).clicked() {
-                            chosen = Some(n.clone());
-                        }
-                    }
-                }
-            });
-            chosen
-        };
-        let (pattern_tip, emit_tip) = (fl!("part-pattern-tip"), fl!("part-emit-tip"));
-        // 発光の色・明るさを編集中なら、その値を表示に使う（書き込んで組み直しが終わるまで）
-        let pending = self.emit_edit.as_ref().filter(|e| e.reference == sel.reference).map(|e| (e.part.clone(), e.material.clone()));
-        // 色・明るさの変更：(部位, 材質)。止まってから書き込む
-        let mut emit_changes: Vec<(String, String)> = Vec::new();
-        egui::Grid::new("parts").num_columns(4).spacing([8.0, 4.0]).show(ui, |ui| {
-            for (i, r) in rows.iter().enumerate() {
-                let key = r.part_key.clone();
-                let material = match &pending {
-                    Some((part, m)) if *part == key => m.clone(),
-                    _ => r.material.clone(),
-                };
-                let (base, variant) = Variant::parse(&material);
-                let (smooth, emission) = (variant.smooth, variant.emission);
-                // 表示では "kicad:" を省く（カーソルを乗せると全体が出る）
-                let shown = if key.is_empty() { fl!("part-whole") } else { key.strip_prefix("kicad:").unwrap_or(&key).to_string() };
-                ui.label(shown).on_hover_text(fl!("part-source-tip", keys = r.part_keys.as_str(), source = r.source.as_str()));
-                // 材質を選び直しても、模様のあり・なしと発光は保つ
-                if let Some(m) = combo(ui, format!("part{i}"), base, material_editor::material_label(&self.library, base)) {
-                    // 色・粗さの調整は前の材質に合わせたものなので外す
-                    actions.push((key.clone(), with_emission(&with_smooth(&m, smooth), emission), false));
-                }
-                let mut pattern = !smooth;
-                if ui.checkbox(&mut pattern, fl!("part-pattern")).on_hover_text(&pattern_tip).changed() {
-                    actions.push((key.clone(), with_smooth(&material, !pattern), false));
-                }
-                let mut emit = emission.is_some();
-                if ui.checkbox(&mut emit, fl!("part-emit")).on_hover_text(&emit_tip).changed() {
-                    let e = emit.then(|| Emission { srgb: emission_color_of_part(&r.part_keys), luminance: DEFAULT_EMISSION_LUMINANCE });
-                    actions.push((key.clone(), with_emission(&material, e), false));
-                }
-                ui.end_row();
-                if let Some(e) = emission {
-                    ui.label("");
-                    let mut srgb = e.srgb;
-                    let mut luminance = e.luminance;
-                    let mut changed = ui.color_edit_button_srgb(&mut srgb).on_hover_text(fl!("emit-color-tip")).changed();
-                    let speed = (luminance * 0.01).max(1.0);
-                    let drag = egui::DragValue::new(&mut luminance).range(0.0..=1.0e6).speed(speed).max_decimals(0).suffix(" cd/m²");
-                    changed |= ui.add(drag).on_hover_text(fl!("emit-luminance-tip")).changed();
-                    ui.label("");
-                    ui.end_row();
-                    if changed {
-                        emit_changes.push((key.clone(), with_emission(&material, Some(Emission { srgb, luminance: luminance.round() }))));
-                    }
-                }
-            }
-            let all_smooth = !rows.is_empty() && rows.iter().all(|r| split_variant(&r.material).1);
-            ui.label(fl!("parts-all"));
-            if let Some(m) = combo(ui, "all".into(), "", fl!("parts-choose-all")) {
-                actions.push((String::new(), with_smooth(&m, all_smooth), false));
-            }
-            let mut pattern = !all_smooth;
-            if ui.checkbox(&mut pattern, fl!("part-pattern")).on_hover_text(fl!("parts-pattern-all-tip")).changed() {
-                for r in &rows {
-                    let key = r.part_key.clone();
-                    actions.push((key, with_smooth(&r.material, !pattern), false));
-                }
-            }
-            ui.label("");
-            ui.end_row();
-        });
-        for (part, material) in emit_changes {
-            // 別の部位の編集が残っていれば先に書く
-            if self.emit_edit.as_ref().is_some_and(|e| e.part != part || e.reference != sel.reference) {
-                self.flush_emit_edit(true);
-            }
-            self.emit_edit = Some(EmitEdit { reference: sel.reference.clone(), part, material, changed_at: Instant::now(), written: false });
-        }
-        // 決まった段階（部位ごとに違えば、部位の名前にカーソルを乗せると出る）
-        let mut sources: Vec<&str> = rows.iter().map(|r| r.source.as_str()).collect();
-        sources.dedup();
-        if let [one] = sources.as_slice() {
-            ui.weak(fl!("sel-source", source = one.to_string()));
-        } else if !sources.is_empty() {
-            ui.weak(fl!("sel-source-varies"));
-        }
-        if ui.button(fl!("sel-clear-override")).on_hover_text(fl!("sel-clear-override-tip")).clicked() {
-            actions.push((String::new(), String::new(), true));
-        }
-        if !self.material_error.is_empty() {
-            ui.colored_label(egui::Color32::from_rgb(255, 102, 102), &self.material_error);
-        }
-        if !actions.is_empty() {
-            // 同じ部位の編集中の発光の値は、表示に使っていたので actions の材質名に入っている。ほかの部位のものは先に書く
-            if self.emit_edit.as_ref().is_some_and(|e| !actions.iter().any(|(p, _, _)| *p == e.part)) {
-                self.flush_emit_edit(true);
-            }
-            self.emit_edit = None;
-        }
-        for (part, m, clear) in actions {
-            self.assign_material(&part, &m, clear);
-        }
-    }
-
     /// 書き出しが終わっていれば、新しいシルクを設定に入れる（次の組み立てでタイルを全部作り直す）
     fn poll_silk(&mut self) {
         if let Some(plot) = self.text_job.poll() {
@@ -2730,123 +2222,6 @@ impl App {
         self.save_dialog = Some((format, rx));
     }
 
-    /// ウィンドウ上端のメニュー
-    /// メニューの下のボタン列：一時停止、真上から・真裏から、表面実装・スルーホールの部品の表示、ノイズ除去
-    fn tool_bar(&mut self, root: &mut egui::Ui) {
-        use crate::toolbar::{button, Icon};
-        if self.web.is_some() {
-            self.web_rects[0] = egui::Panel::top("toolbar").exact_size(WEB_TOOLBAR_HEIGHT).frame(egui::Frame::NONE).show(root, |ui| ui.allocate_space(ui.available_size())).response.rect;
-            return;
-        }
-        // 最大 spp に達したら、止めるものが無いので「完了」にして押せなくする（視点などを変えて累積をやり直すと元に戻る）
-        let done = self.gpu.as_ref().is_some_and(|g| g.prog.samples() >= self.st.max_spp);
-        let board = self.has_board();
-        let st = &mut self.st;
-        // グループの見出し（ボタンの並びの幅の中央。空なら高さだけ取る）と、その下のボタン
-        let group = |ui: &mut egui::Ui, title: String, add: &mut dyn FnMut(&mut egui::Ui)| {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                let (head, _) = ui.allocate_exact_size(egui::vec2(1.0, 16.0), egui::Sense::hover());
-                let row = ui.horizontal(|ui| add(ui)).response.rect;
-                if !title.is_empty() {
-                    ui.painter().text(egui::pos2(row.center().x, head.center().y), egui::Align2::CENTER_CENTER, title, egui::FontId::proportional(11.0), ui.visuals().weak_text_color());
-                }
-            });
-        };
-        egui::Panel::top("toolbar").show(root, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                group(ui, String::new(), &mut |ui| {
-                    if done {
-                        button(ui, Icon::Done, &fl!("toolbar-done"), false, false, false).on_hover_text(fl!("toolbar-done-tip"));
-                    } else {
-                        let (icon, label) = if st.paused { (Icon::Resume, fl!("toolbar-resume")) } else { (Icon::Pause, fl!("toolbar-pause")) };
-                        if button(ui, icon, &label, st.paused, false, true).on_hover_text(fl!("toolbar-pause-tip")).clicked() {
-                            st.paused = !st.paused;
-                        }
-                    }
-                });
-                ui.separator();
-                group(ui, fl!("toolbar-group-camera"), &mut |ui| {
-                    if button(ui, Icon::TopView, &fl!("toolbar-top"), false, false, board).on_hover_text(fl!("toolbar-top-tip")).clicked() {
-                        st.req.view_preset = Some(TOP_VIEW);
-                    }
-                    if button(ui, Icon::BottomView, &fl!("toolbar-bottom"), false, false, board).on_hover_text(fl!("toolbar-bottom-tip")).clicked() {
-                        st.req.view_preset = Some(BOTTOM_VIEW);
-                    }
-                    if button(ui, Icon::Fit, &fl!("toolbar-fit"), false, false, board).on_hover_text(fl!("toolbar-fit-tip")).clicked() {
-                        st.req.fit_view = true;
-                    }
-                });
-                ui.separator();
-                group(ui, fl!("toolbar-group-visibility"), &mut |ui| {
-                    if button(ui, Icon::Smd, &fl!("toolbar-smd"), st.show_smd, !st.show_smd, board).on_hover_text(fl!("toolbar-smd-tip")).clicked() {
-                        st.show_smd = !st.show_smd;
-                        st.changed.visibility = true;
-                    }
-                    if button(ui, Icon::ThroughHole, &fl!("toolbar-tht"), st.show_tht, !st.show_tht, board).on_hover_text(fl!("toolbar-tht-tip")).clicked() {
-                        st.show_tht = !st.show_tht;
-                        st.changed.visibility = true;
-                    }
-                });
-                ui.separator();
-                group(ui, fl!("toolbar-group-effects"), &mut |ui| {
-                    if button(ui, Icon::Denoise, &fl!("toolbar-denoise"), st.denoise, false, true).on_hover_text(fl!("toolbar-denoise-tip")).clicked() {
-                        st.denoise = !st.denoise;
-                    }
-                });
-            });
-        });
-    }
-
-    /// 画面の下端のステータスバー：状態、spp と進み具合、経過時間、1 サンプルあたりの平均、残りの予想、描画の条件。
-    /// 読み直しなどの知らせがあれば 2 行目に出す
-    fn status_bar(&mut self, root: &mut egui::Ui) {
-        if self.web.is_some() {
-            self.web_rects[1] = egui::Panel::bottom("status").exact_size(WEB_STATUS_HEIGHT).frame(egui::Frame::NONE).show(root, |ui| ui.allocate_space(ui.available_size())).response.rect;
-            return;
-        }
-        let Some(t) = self.status_texts() else { return };
-        let yellow = egui::Color32::from_rgb(255, 204, 77);
-        // 2 行とも折り返さない（高さを中身で変えない）。折り返すと、表示の倍率などの文字の長さでバーの高さが変わり、
-        // 3D 表示の大きさが変わって倍率の文字がまた変わる、を毎フレーム繰り返して画面が揺れる。入らない分は切る
-        egui::Panel::bottom("status").show(root, |ui| {
-            ui.horizontal(|ui| {
-                match t.state {
-                    StatusState::Paused => ui.colored_label(yellow, &t.state_text),
-                    StatusState::Done => ui.colored_label(egui::Color32::from_rgb(120, 200, 120), &t.state_text),
-                    StatusState::Rendering => ui.label(&t.state_text),
-                };
-                ui.add(egui::ProgressBar::new((t.samples as f32 / t.max_spp.max(1) as f32).min(1.0)).desired_width(140.0).text(format!("{} / {} spp", t.samples, t.max_spp)));
-                ui.separator();
-                ui.label(&t.elapsed).on_hover_text(&t.elapsed_tip);
-                if let Some(a) = &t.average {
-                    ui.label(a).on_hover_text(&t.average_tip);
-                }
-                if let Some(r) = &t.remaining {
-                    ui.label(r);
-                }
-            });
-            // 2 行目：描画の条件と、読み直しなどの知らせ（入らなければ「…」で切り、マウスを載せると全文）
-            ui.horizontal(|ui| {
-                for (i, (text, tip)) in t.chips.iter().enumerate() {
-                    if i > 0 {
-                        ui.separator();
-                    }
-                    let r = ui.weak(text);
-                    if let Some(tip) = tip {
-                        r.on_hover_text(tip);
-                    }
-                }
-                for (text, busy) in &t.notes {
-                    ui.separator();
-                    let rich = if *busy { egui::RichText::new(text).color(yellow) } else { egui::RichText::new(text).weak() };
-                    ui.add(egui::Label::new(rich).truncate()).on_hover_text(text);
-                }
-            });
-        });
-    }
-
     /// ステータスバーに出す文字（egui と WebView で共通）。GPU の準備の前は None
     fn status_texts(&self) -> Option<StatusTexts> {
         let g = self.gpu.as_ref()?;
@@ -2906,240 +2281,20 @@ impl App {
         })
     }
 
-    fn menu_bar(&mut self, root: &mut egui::Ui) {
-        // --web-ui のときは、メニューの見出しはボタン列（WebView）の上端にある
-        if self.web.is_some() {
+    /// WebView（ボタン列・ステータスバー・設定パネル）を置く場所を、egui の画面の端に取っておく（3D 表示はその残り）。
+    /// WebView が無いとき（画面を出さないテスト、WebView2 を作れなかったとき）は取らず、3D 表示をウィンドウ全体にする
+    fn reserve_web_areas(&mut self, root: &mut egui::Ui) {
+        self.web_rects[0] = egui::Rect::NOTHING;
+        self.web_rects[1] = egui::Rect::NOTHING;
+        self.web_rects[2] = egui::Rect::NOTHING;
+        if self.web.is_none() {
             return;
         }
-        let language_choice = self.language_choice.clone();
-        let editor_open = self.editor.open;
-        let mut toggle_editor = false;
-        let mut open_about = false;
-        let board = self.has_board();
-        let st = &mut self.st;
-        egui::Panel::top("menu").show(root, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button(fl!("menu-file"), |ui| {
-                    if ui.add(egui::Button::new(fl!("menu-open-board")).shortcut_text("O")).on_hover_text(fl!("menu-open-board-tip")).clicked() {
-                        st.req.open_board = true;
-                        ui.close();
-                    }
-                    ui.menu_button(fl!("menu-recent"), |ui| {
-                        let recent = remember::recent_boards();
-                        if recent.is_empty() {
-                            ui.weak(fl!("menu-recent-empty"));
-                        }
-                        for p in &recent {
-                            let name = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                            let tip = if p.is_file() { p.display().to_string() } else { fl!("menu-recent-missing", path = p.display().to_string()) };
-                            if ui.add_enabled(p.is_file(), egui::Button::new(name)).on_hover_text(tip).clicked() {
-                                st.req.open_path = Some(p.clone());
-                                ui.close();
-                            }
-                        }
-                        if !recent.is_empty() {
-                            ui.separator();
-                            if ui.button(fl!("menu-recent-clear")).clicked() {
-                                remember::clear_recent_boards();
-                                ui.close();
-                            }
-                        }
-                    });
-                    ui.separator();
-                    if ui.add(egui::Button::new(fl!("menu-save-image")).shortcut_text("S")).on_hover_text(fl!("menu-save-image-tip")).clicked() {
-                        st.req.save = true;
-                        ui.close();
-                    }
-                    if ui.button(fl!("menu-save-png")).on_hover_text(fl!("menu-save-png-tip")).clicked() {
-                        st.req.save_as = Some(SaveFormat::Png);
-                        ui.close();
-                    }
-                    if ui.button(fl!("menu-save-exr")).on_hover_text(fl!("menu-save-exr-tip")).clicked() {
-                        st.req.save_as = Some(SaveFormat::Exr);
-                        ui.close();
-                    }
-                    ui.separator();
-                    ui.menu_button(fl!("menu-settings-location"), |ui| {
-                        let now = board_file::location();
-                        let choices = [
-                            (board_file::Location::NextToBoard, fl!("loc-next-to-board"), fl!("loc-next-to-board-tip")),
-                            (board_file::Location::ConfigDir, fl!("loc-config-dir"), fl!("loc-config-dir-tip")),
-                        ];
-                        for (loc, label, tip) in choices {
-                            if ui.add(egui::Button::new(label).selected(now == loc)).on_hover_text(tip).clicked() {
-                                st.req.settings_location = Some(loc);
-                                ui.close();
-                            }
-                        }
-                        ui.weak(fl!("loc-hint"));
-                    });
-                    if ui.button(fl!("menu-reveal-settings")).on_hover_text(fl!("menu-reveal-settings-tip")).clicked() {
-                        st.req.reveal_settings = true;
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.add(egui::Button::new(fl!("menu-quit")).shortcut_text("Esc")).clicked() {
-                        st.req.quit = true;
-                        ui.close();
-                    }
-                });
-                ui.menu_button(fl!("menu-view"), |ui| {
-                    if ui.add(egui::Button::new(fl!("menu-settings-panel")).selected(st.show_panel).shortcut_text("F1 / Tab")).clicked() {
-                        st.show_panel = !st.show_panel;
-                        ui.close();
-                    }
-                    if ui.add(egui::Button::new(fl!("menu-material-editor")).selected(editor_open).shortcut_text("M")).clicked() {
-                        toggle_editor = true;
-                        ui.close();
-                    }
-                    if ui.add(egui::Button::new(fl!("menu-pause")).selected(st.paused).shortcut_text("P")).clicked() {
-                        st.paused = !st.paused;
-                        ui.close();
-                    }
-                    if ui.add(egui::Button::new(fl!("menu-lock")).selected(st.locked).shortcut_text("L")).on_hover_text(fl!("toolbar-lock-tip")).clicked() {
-                        st.locked = !st.locked;
-                        ui.close();
-                    }
-                    if ui.add(egui::Button::new(fl!("denoise")).selected(st.denoise)).clicked() {
-                        st.denoise = !st.denoise;
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.add_enabled(board, egui::Button::new(fl!("menu-top-view"))).clicked() {
-                        st.req.view_preset = Some(TOP_VIEW);
-                        ui.close();
-                    }
-                    if ui.add_enabled(board, egui::Button::new(fl!("menu-bottom-view"))).clicked() {
-                        st.req.view_preset = Some(BOTTOM_VIEW);
-                        ui.close();
-                    }
-                    if ui.add_enabled(board, egui::Button::new(fl!("menu-fit-view")).shortcut_text("F")).clicked() {
-                        st.req.fit_view = true;
-                        ui.close();
-                    }
-                    if ui.add_enabled(board, egui::Button::new(fl!("menu-show-smd")).selected(st.show_smd)).clicked() {
-                        st.show_smd = !st.show_smd;
-                        st.changed.visibility = true;
-                        ui.close();
-                    }
-                    if ui.add_enabled(board, egui::Button::new(fl!("menu-show-tht")).selected(st.show_tht)).clicked() {
-                        st.show_tht = !st.show_tht;
-                        st.changed.visibility = true;
-                        ui.close();
-                    }
-                    ui.separator();
-                    ui.menu_button(fl!("menu-render-size"), |ui| {
-                        if ui.add(egui::Button::new(fl!("size-fit-window")).selected(st.size_mode.is_none())).clicked() {
-                            st.size_mode = None;
-                            ui.close();
-                        }
-                        for (w, h) in SIZE_PRESETS {
-                            if ui.add(egui::Button::new(size_label(w, h)).selected(st.size_mode == Some((w, h)))).clicked() {
-                                st.size_mode = Some((w, h));
-                                st.req.fit_window = true;
-                                ui.close();
-                            }
-                        }
-                    });
-                    ui.menu_button(fl!("menu-render-ratio"), |ui| {
-                        for r in RATIOS {
-                            if ui.add(egui::Button::new(ratio_label(r)).selected(st.render_ratio == r)).clicked() {
-                                st.render_ratio = r;
-                                st.req.fit_window = st.size_mode.is_some();
-                                ui.close();
-                            }
-                        }
-                    });
-                    ui.separator();
-                    for (mode, name, key) in [(DisplayMode::Beauty, fl!("mode-image"), "1"), (DisplayMode::Albedo, fl!("mode-albedo"), "2"), (DisplayMode::Normal, fl!("mode-normal"), "3")] {
-                        if ui.add(egui::Button::new(name).selected(st.mode == mode).shortcut_text(key)).clicked() {
-                            st.mode = mode;
-                            ui.close();
-                        }
-                    }
-                    ui.separator();
-                    if ui.add(egui::Button::new(fl!("menu-reset-view")).shortcut_text("R")).clicked() {
-                        st.req.reset_view = true;
-                        ui.close();
-                    }
-                    if ui.button(fl!("menu-auto-exposure")).clicked() {
-                        st.req.auto_exposure = true;
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button(fl!("menu-reset-all")).on_hover_text(fl!("menu-reset-all-tip")).clicked() {
-                        st.req.reset_all = true;
-                        ui.close();
-                    }
-                });
-                ui.menu_button(fl!("menu-settings"), |ui| {
-                    ui.menu_button(fl!("menu-language"), |ui| {
-                        if ui.add(egui::Button::new(fl!("language-auto")).selected(language_choice.is_none())).on_hover_text(fl!("language-auto-tip")).clicked() {
-                            st.req.language = Some(None);
-                            ui.close();
-                        }
-                        ui.separator();
-                        for (tag, name) in i18n::LANGUAGES {
-                            if ui.add(egui::Button::new(*name).selected(language_choice.as_deref() == Some(*tag))).clicked() {
-                                st.req.language = Some(Some(tag.to_string()));
-                                ui.close();
-                            }
-                        }
-                    });
-                    ui.separator();
-                    if ui.button(fl!("menu-kicad-plugin")).on_hover_text(fl!("menu-kicad-plugin-tip")).clicked() {
-                        st.req.kicad_plugin = true;
-                        ui.close();
-                    }
-                });
-                ui.menu_button(fl!("menu-help"), |ui| {
-                    ui.label(fl!("help-rotate"));
-                    ui.label(fl!("help-select"));
-                    ui.label(fl!("help-pan"));
-                    ui.label(fl!("help-zoom"));
-                    ui.label(fl!("help-focus"));
-                    ui.separator();
-                    for b in KEY_BINDINGS {
-                        ui.label(format!("{}: {}", b.label, i18n::get(b.help).unwrap_or_else(|| b.log.to_string())));
-                    }
-                    ui.separator();
-                    if ui.button(fl!("menu-about")).clicked() {
-                        open_about = true;
-                        ui.close();
-                    }
-                });
-            });
-        });
-        if toggle_editor {
-            self.editor.open = !self.editor.open;
-        }
-        if open_about {
-            self.about_open = true;
-        }
-    }
-
-    /// 右端に上下いっぱいで固定する設定パネル（幅は境目のドラッグで変えられる、× で閉じる）
-    fn side_panel(&mut self, root: &mut egui::Ui) {
-        if self.web.is_some() {
-            self.web_rects[2] = egui::Panel::right("settings").exact_size(self.panel_width).frame(egui::Frame::NONE).show(root, |ui| ui.allocate_space(ui.available_size())).response.rect;
-            return;
-        }
-        let mut close = false;
-        let shown = egui::Panel::right("settings").resizable(true).default_size(self.panel_width).size_range(300.0..=640.0).show(root, |ui| {
-            ui.horizontal(|ui| {
-                ui.strong(fl!("panel-settings"));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if close_button(ui).on_hover_text(fl!("panel-close-tip")).clicked() {
-                        close = true;
-                    }
-                });
-            });
-            ui.separator();
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.panel(ui));
-        });
-        self.panel_width = shown.response.rect.width();
-        if close {
-            self.st.show_panel = false;
+        let reserve = |panel: egui::Panel, root: &mut egui::Ui| panel.frame(egui::Frame::NONE).show(root, |ui| ui.allocate_space(ui.available_size())).response.rect;
+        self.web_rects[0] = reserve(egui::Panel::top("toolbar").exact_size(WEB_TOOLBAR_HEIGHT), root);
+        self.web_rects[1] = reserve(egui::Panel::bottom("status").exact_size(WEB_STATUS_HEIGHT), root);
+        if self.st.show_panel {
+            self.web_rects[2] = reserve(egui::Panel::right("settings").exact_size(self.panel_width), root);
         }
     }
 
@@ -3352,8 +2507,9 @@ impl App {
                 if web.core_ready() {
                     warn!("web UI: {e}; some pages are missing");
                 } else {
-                    warn!("web UI: {e} (after {:.0} ms); using the built-in UI", t0.elapsed().as_secs_f64() * 1000.0);
+                    warn!("web UI: {e} (after {:.0} ms); WebView2 is not available - only the 3D view and the keys work", t0.elapsed().as_secs_f64() * 1000.0);
                     self.web = None;
+                    self.web_missing = true;
                 }
             }
         }
@@ -3571,13 +2727,7 @@ impl App {
                 self.draw_splash(root.ctx());
                 return;
             }
-            self.menu_bar(root);
-            self.tool_bar(root);
-            self.status_bar(root);
-            self.web_rects[2] = egui::Rect::NOTHING;
-            if self.st.show_panel {
-                self.side_panel(root);
-            }
+            self.reserve_web_areas(root);
             central = root.available_rect_before_wrap();
             self.draw_outline(root, central);
             let lost = if self.has_board() { self.board_visibility() } else { BoardInView::Visible };
@@ -3650,21 +2800,13 @@ impl App {
                 } else {
                     egui::Rect::NOTHING
                 };
-            } else {
-                let shadow = self.selected.as_ref().and_then(|s| self.scope_shadow_note(s));
-                self.editor.area = Some(central);
-                let scope = &mut self.assign_scope;
-                let actions = self.editor.ui(root.ctx(), &self.library, info.as_ref(), &mut |ui| {
-                    scope_radios(ui, scope);
-                    if let Some(n) = &shadow {
-                        ui.colored_label(egui::Color32::from_rgb(255, 204, 77), n);
-                    }
-                });
-                self.editor_actions.extend(actions);
-            }
-            if self.web.is_none() {
-                self.plugin_window.ui(root.ctx());
-                self.about_egui(root.ctx());
+            } else if self.web_missing {
+                // WebView2 を作れなかった：メニュー・パネルは出せないので、入れ方を知らせる（キーの操作は使える）
+                let galley = root.painter().layout(fl!("webview-missing"), egui::FontId::proportional(15.0), egui::Color32::from_rgb(255, 204, 77), (central.width() - 60.0).max(100.0));
+                let pos = egui::pos2(central.center().x - galley.size().x / 2.0, central.bottom() - galley.size().y - 24.0);
+                let bg = egui::Rect::from_min_size(pos, galley.size()).expand(10.0);
+                root.painter().with_clip_rect(central).rect_filled(bg, 6.0, egui::Color32::from_black_alpha(200));
+                root.painter().with_clip_rect(central).galley(pos, galley, egui::Color32::from_rgb(255, 204, 77));
             }
         });
         self.egui_state.as_mut().unwrap().handle_platform_output(self.window.as_ref().unwrap(), full.platform_output);
@@ -4616,6 +3758,7 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         web: None,
         web_started: None,
         web_failures: (0, None),
+        web_missing: false,
         splash,
         recent_boards: Vec::new(),
         video: None,

@@ -115,30 +115,6 @@ impl App {
         .to_string()
     }
 
-    /// egui の画面のときの「について」（版・著作権・ライセンス・GitHub のページだけ）
-    pub(super) fn about_egui(&mut self, ctx: &egui::Context) {
-        if !self.about_open {
-            return;
-        }
-        let mut open = true;
-        egui::Window::new(fl!("about-title")).open(&mut open).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-            ui.heading("KRB Renderer");
-            ui.label(fl!("about-tagline"));
-            ui.label(fl!("about-version", version = env!("CARGO_PKG_VERSION")));
-            let hash = env!("KRBR_GIT_HASH");
-            if !hash.is_empty() {
-                ui.weak(fl!("about-commit", hash = hash, date = env!("KRBR_GIT_DATE")));
-            }
-            ui.separator();
-            ui.label(fl!("about-made-with"));
-            ui.label(fl!("about-copyright"));
-            ui.label(fl!("about-license-short"));
-            ui.hyperlink_to(fl!("about-github"), REPO_URL);
-            ui.hyperlink_to(fl!("about-releases"), format!("{REPO_URL}/releases"));
-        });
-        self.about_open = open;
-    }
-
     /// 「について」の窓からの操作
     pub(super) fn apply_about_click(&mut self, id: &str) {
         match id {

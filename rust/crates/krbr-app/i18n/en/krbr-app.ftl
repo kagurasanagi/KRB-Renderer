@@ -661,3 +661,4 @@ video-status = Exporting a video: frame { $frame } / { $total } (about { $remain
 video-done = Exported the video: { $path } ({ $size } MB, { $time })
 video-cancelled = Stopped the export ({ $done } of { $total } frames written to { $path })
 video-failed = Could not export the video: { $error }
+webview-missing = The menus and the settings panel need the Microsoft Edge WebView2 Runtime, which was not found. Install it from https://developer.microsoft.com/microsoft-edge/webview2/ and start KRB Renderer again. The keys still work.

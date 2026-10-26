@@ -661,3 +661,4 @@ video-status = 動画を書き出し中：{ $frame } / { $total } コマ（残�
 video-done = 動画を書き出しました：{ $path }（{ $size } MB、{ $time }）
 video-cancelled = 書き出しを中止しました（{ $total } コマのうち { $done } コマを { $path } に書きました）
 video-failed = 動画を書き出せませんでした：{ $error }
+webview-missing = メニューと設定パネルには Microsoft Edge WebView2 Runtime が必要ですが、見つかりませんでした。https://developer.microsoft.com/microsoft-edge/webview2/ から入れて、KRB Renderer を起動し直してください。キーの操作は使えます。
