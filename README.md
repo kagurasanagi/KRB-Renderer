@@ -13,7 +13,7 @@ Kicadの基板の3Dプレビューは素晴らしい機能だが、PCBの編集�
 
 ----
 
-本体は Rust（`rust/`）です。C++ は、OpenCASCADE を使う STEP 変換器 DLL（`step_dll/`）だけに残しています。以前の C++ 版の本体は、タグ `cpp-final` で見られます。
+本体は Rust（`rust/`）です。C++ は、OpenCASCADE を使う STEP 変換器 DLL（`step_dll/`）だけに残しています。
 
 ```
 # リアルタイム表示（既定。ウィンドウが開く。--hdr は省略できる）

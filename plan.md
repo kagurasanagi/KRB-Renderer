@@ -14,7 +14,7 @@
 - 分光モードとRGBモードの比較：分散なしのシーンで、両者の結果が許容誤差内で一致することを確認する
 
 ## C++ 版の廃止（済、2026-10-20）
-C++ 版の本体はタグ cpp-final（GitHub にも push 済み）。GPU の検証テストは rust/crates/krbr-render/tests/ に移し（C++ 版と同じ値）、シェーダは krbr-render の build.rs が作る。
+C++ 版の本体は git の履歴にだけ残す（タグ cpp-final は 2026-10-26 に削除）。GPU の検証テストは rust/crates/krbr-render/tests/ に移し（C++ 版と同じ値）、シェーダは krbr-render の build.rs が作る。
 C++ は STEP 変換器 DLL（step_dll/、CMake・vcpkg は OpenCASCADE と glm だけ）。層テクスチャ方式（[relief] enabled = false）は廃止した。
 ## 配布と KiCad 連携
 - 配布の形を決める：ポータブル版の zip（scripts\make_dist.ps1）に加えて、インストーラ、または KiCad のプラグインマネージャ（PCM）のパッケージを作るか
