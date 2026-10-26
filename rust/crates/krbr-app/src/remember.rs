@@ -785,6 +785,7 @@ mod tests {
     /// 基板の設定ファイルの [remembered] に書き、手で書いた表は残す。以前の state.toml の分は移す。忘れると [remembered] だけ消える
     #[test]
     fn remembered_settings_live_in_the_board_file() {
+        let _g = crate::config_lock();
         let ws = std::env::temp_dir().join(format!("krbr_remember_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&ws);
         std::fs::create_dir_all(&ws).unwrap();

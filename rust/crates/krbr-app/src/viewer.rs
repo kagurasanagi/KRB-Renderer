@@ -4834,4 +4834,154 @@ mod tests {
         let EnvironmentName::Builtin(id) = describe_environment(STUDIO) else { panic!("{STUDIO} is not built in") };
         assert!(i18n::english_has(&format!("env-builtin-{id}")) && i18n::english_has(&format!("env-builtin-{id}-tip")));
     }
+
+    /// パネルの部品（panel.html に渡す JSON）のうち、値を持つもの（id, 部品）と、ボタンの id
+    fn panel_controls(json: &str) -> (Vec<(String, serde_json::Value)>, Vec<String>) {
+        fn walk(v: &serde_json::Value, ctl: &mut Vec<(String, serde_json::Value)>, btn: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Object(o) => {
+                    let t = o.get("t").and_then(|t| t.as_str()).unwrap_or("");
+                    if let (true, Some(id)) = (matches!(t, "slider" | "check" | "radio" | "select"), o.get("id").and_then(|i| i.as_str())) {
+                        ctl.push((id.to_string(), v.clone()));
+                    }
+                    if t == "buttons" {
+                        btn.extend(o["items"].as_array().into_iter().flatten().filter_map(|b| b["id"].as_str().map(str::to_string)));
+                    }
+                    o.values().for_each(|c| walk(c, ctl, btn));
+                }
+                serde_json::Value::Array(a) => a.iter().for_each(|c| walk(c, ctl, btn)),
+                _ => {}
+            }
+        }
+        let (mut ctl, mut btn) = (Vec::new(), Vec::new());
+        walk(&serde_json::from_str(json).unwrap(), &mut ctl, &mut btn);
+        (ctl, btn)
+    }
+
+    /// 部品の今の値と違う値（スライダーは範囲の中ほど、チェックは反対、選択肢は別のもの）。違う値が無ければ None
+    fn another_value(c: &serde_json::Value) -> Option<serde_json::Value> {
+        let options = || -> Vec<serde_json::Value> {
+            match c["t"].as_str() {
+                Some("radio") => c["options"].as_array().cloned().unwrap_or_default().into_iter().map(|o| o["v"].clone()).collect(),
+                _ => c["groups"].as_array().into_iter().flatten().flat_map(|g| g["options"].as_array().cloned().unwrap_or_default()).map(|o| o["v"].clone()).collect(),
+            }
+        };
+        match c["t"].as_str()? {
+            "slider" => {
+                let (lo, hi, v) = (c["min"].as_f64()?, c["max"].as_f64()?, c["value"].as_f64()?);
+                let at = |f: f64| if c["log"].as_bool() == Some(true) { lo * (hi / lo).powf(f) } else { lo + (hi - lo) * f };
+                let pick = |f: f64| if c["int"].as_bool() == Some(true) { at(f).round() } else { at(f) };
+                let x = if (pick(0.6) - v).abs() > 1e-6 * hi.abs().max(1.0) { pick(0.6) } else { pick(0.3) };
+                Some(serde_json::json!(x))
+            }
+            "check" => Some(serde_json::json!(!c["value"].as_bool()?)),
+            _ => options().into_iter().find(|o| *o != c["value"]),
+        }
+    }
+
+    /// --web-ui の設定パネル：出ている部品をすべて操作すると、パネルの値が変わり、描き直すものは GPU へ送る印（changed）が立つ。
+    /// 処理し忘れた部品（apply_panel_set に無い id）は値が変わらないので見つかる。最後に、変えた値を覚えて読み直すと同じ値に戻ること
+    #[test]
+    fn every_web_panel_control_is_applied_and_remembered() {
+        let _g = crate::config_lock();
+        let ws = std::env::temp_dir().join(format!("krbr_web_panel_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::env::set_var("KRBR_CONFIG_DIR", ws.join("config"));
+        let prep = crate::prepare::prepare_placeholder(&RenderOptions::default());
+        let mut app = new_app(ViewOptions::default(), prep);
+
+        // 描き直すもの：その id を変えたら立つ印
+        let expect = |id: &str| -> &'static str {
+            match id {
+                "env.intensity" | "env.rotation" | "camera.fov" | "color.spectral" => "frame",
+                id if id.starts_with("lens.") => "frame",
+                "surface.bump" | "surface.substrate" => "materials",
+                "surface.mask" => "mask",
+                "integrator" => "integrator",
+                _ => "", // 表示だけのもの（露出・グロー・ノイズ除去・表示の種類・描画のサイズ・最大 spp）は、表示するときに読む
+            }
+        };
+        let mut tested = std::collections::BTreeSet::new();
+        let mut buttons = std::collections::BTreeSet::new();
+        // 部品は選んだものに応じて増える（薄レンズの細かい設定、羽根の枚数で出る項目など）ので、新しい部品が無くなるまで繰り返す
+        for _ in 0..6 {
+            let (controls, btn) = panel_controls(&app.panel_json());
+            buttons.extend(btn);
+            let new: Vec<_> = controls.into_iter().filter(|(id, _)| !tested.contains(id)).collect();
+            if new.is_empty() {
+                break;
+            }
+            for (id, c) in new {
+                tested.insert(id.clone());
+                let Some(v) = another_value(&c) else { continue }; // 選択肢が 1 つだけ（環境マップの一覧など）
+                app.st.changed = Changes::default();
+                app.apply_panel_set(&id, &v);
+                let flag = match expect(&id) {
+                    "frame" => app.st.changed.frame,
+                    "materials" => app.st.changed.materials,
+                    "mask" => app.st.changed.mask,
+                    "integrator" => app.st.changed.integrator,
+                    _ => true,
+                };
+                assert!(flag, "{id}: the change is not sent to the GPU ({})", expect(&id));
+                let (after, _) = panel_controls(&app.panel_json());
+                let Some((_, now)) = after.iter().find(|(i, _)| *i == id) else { continue }; // 変えた値でその部品が隠れた
+                let same = match (now["value"].as_f64(), v.as_f64()) {
+                    (Some(a), Some(b)) => (a - b).abs() <= 1e-3 * b.abs().max(1.0),
+                    _ => now["value"] == v,
+                };
+                assert!(same, "{id}: set {v}, the panel shows {}", now["value"]);
+            }
+        }
+        println!("web panel: {} controls, {} buttons: {:?}", tested.len(), buttons.len(), tested);
+        for id in ["lens.f", "lens.focus", "lens.blades", "lens.blade_rot", "env.intensity", "glow.threshold", "surface.mask", "display.max_spp", "integrator"] {
+            assert!(tested.contains(id), "{id} was never shown");
+        }
+
+        // ボタン：env.open はファイルを選ぶダイアログを開くので押さない（id は処理されている）
+        for id in &buttons {
+            if id == "env.open" {
+                continue;
+            }
+            assert!(app.apply_panel_click(id), "{id}: the button is not handled");
+        }
+        assert!(app.st.req.reset_view && app.st.req.fit_view && app.st.req.save && app.st.focus_point.is_none() && app.st.exposure == 0.0);
+
+        // 覚える値の往復：覚えた値を既定の設定に当てると、同じ値になる
+        let v = app.current_view();
+        let mut cfg = krbr_scene::ProjectConfig::default();
+        remember::apply_view_values(&mut cfg, &v);
+        for (k, val) in remember::ViewSettings::of(&cfg).values() {
+            if let Some(saved) = v.get(&k) {
+                assert_eq!(saved, &val, "{k}: remembered {saved}, read back {val}");
+            }
+        }
+        let viewer = remember::ViewerValues::of(&v);
+        assert_eq!((viewer.max_spp, viewer.denoise, viewer.render_ratio), (Some(app.st.max_spp), Some(app.st.denoise), Some(app.st.render_ratio)));
+        assert_eq!(viewer.display_mode.as_deref(), Some(display_mode_name(app.st.mode)));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// テストモード（--test-frames）では、パネルの設定を基板の設定ファイルに書かない（以前は書いて、後の krbr render の結果を変えていた）。
+    /// テストでなければ書く
+    #[test]
+    fn test_runs_do_not_remember_the_panel() {
+        let _g = crate::config_lock();
+        let ws = std::env::temp_dir().join(format!("krbr_test_mode_remember_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        std::env::set_var("KRBR_CONFIG_DIR", ws.join("config"));
+        let pcb = ws.join("b.kicad_pcb");
+        for test_mode in [true, false] {
+            let mut prep = crate::prepare::prepare_placeholder(&RenderOptions::default());
+            prep.board.file = pcb.clone();
+            let vo = ViewOptions { test: TestOptions { frames: u32::from(test_mode) * 10, ..Default::default() }, ..Default::default() };
+            let mut app = new_app(vo, prep);
+            app.st.exposure = 2.5;
+            app.save_view(true);
+            let text = std::fs::read_to_string(board_file::resolve(&pcb)).unwrap_or_default();
+            assert_eq!(text.contains("exposure_ev = 2.5"), !test_mode, "test mode {test_mode}: {text}");
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 }
