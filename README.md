@@ -37,9 +37,23 @@ KiCad の 3D ビューアは編集の邪魔をしない簡素な表示なので�
 
 ## 使い方
 
-1. `.kicad_pcb` を `KRB-Renderer.exe` かウィンドウにドラッグ＆ドロップ
-2. KiCad で編集して保存すると、自動で描き直す
-3. `S` で画像を保存（基板のフォルダへ）。動画は「ファイル → 動画を書き出す…」
+### KiCad から開く
+
+1. `KRB-Renderer.exe` を起動し、「設定 → KiCad プラグイン...」で、使っている KiCad の「登録」を押す
+
+   <img src="docs/images/kicad_plugin.png" width="60%" alt="KiCad プラグインの登録">
+
+2. KiCad を開き直すと、PCB エディタのツールバーにボタンが出ます。押すと、開いている基板がビューアで開きます
+
+   ![KiCad のツールバーに出るボタン](docs/images/kicad_toolbar.png)
+
+3. あとは KiCad で編集して保存するたびに、自動で描き直します
+
+KiCad を使わずに開くときは、`.kicad_pcb` を `KRB-Renderer.exe` かウィンドウにドラッグ＆ドロップします。
+
+### 画面の操作
+
+`S` で画像を保存します（基板のフォルダへ）。動画は「ファイル → 動画を書き出す…」です。
 
 ![画面の見方](docs/images/viewer_annotated.png)
 
@@ -65,15 +79,19 @@ KiCad の 3D ビューアは編集の邪魔をしない簡素な表示なので�
 
 ![材質エディタ](docs/images/material_editor.png)
 
-### KiCad から開く
+### 背景と照明を変える（HDR 画像）
 
-1. 「設定 → KiCad プラグイン...」で、使っている KiCad の「登録」を押す
+映り込みと光の当たり方は、周りの景色を写した HDR 画像（環境マップ）で決まります。最初は内蔵のスタジオです。
 
-   <img src="docs/images/kicad_plugin.png" width="60%" alt="KiCad プラグインの登録">
+`.hdr` / `.exr` をウィンドウにドラッグ＆ドロップするか、設定パネルの「照明」の「開く...」で選びます。明るさと向きも「照明」の「強さ」「回転」で変えられます（`[` / `]` でも回せます）。選んだものは基板ごとに覚えます。
 
-2. KiCad を開き直すと、PCB エディタのツールバーにボタンが出ます。押すとビューアが開きます
+無料で使える HDR 画像の配布先：
 
-   ![KiCad のツールバーに出るボタン](docs/images/kicad_toolbar.png)
+- [Poly Haven](https://polyhaven.com/hdris)：数百枚。CC0（商用も可、表記も不要）
+- [ambientCG](https://ambientcg.com/list?type=hdri)：空や屋外が中心。CC0
+- [HDRMAPS](https://hdrmaps.com/freebies/)：無料の分（Freebies）は商用も可。最大の解像度は有料
+
+解像度は 4K で十分です。8K は GPU のメモリを多く使います。
 
 ## 困ったとき
 
