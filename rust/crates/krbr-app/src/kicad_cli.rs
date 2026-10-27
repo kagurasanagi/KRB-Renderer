@@ -100,7 +100,8 @@ impl StrokeTextJob {
     }
 }
 
-/// kicad-cli を探す：設定のパス、Program Files\KiCad\*\bin（新しい版を優先）、PATH の順
+/// kicad-cli を探す：設定のパス、インストールされた KiCad の bin（新しい版を優先。プラグインの登録と同じ探し方で、
+/// レジストリの InstallLocation と Program Files\KiCad\<版>）、PATH の順
 pub fn find_kicad_cli(configured: &str) -> Option<PathBuf> {
     if !configured.is_empty() {
         let p = PathBuf::from(configured);
@@ -111,14 +112,9 @@ pub fn find_kicad_cli(configured: &str) -> Option<PathBuf> {
     }
     let exe = if cfg!(windows) { "kicad-cli.exe" } else { "kicad-cli" };
     if cfg!(windows) {
-        let mut found: Vec<PathBuf> = Vec::new();
-        for env in ["ProgramFiles", "ProgramW6432"] {
-            let Ok(pf) = std::env::var(env) else { continue };
-            let Ok(rd) = std::fs::read_dir(Path::new(&pf).join("KiCad")) else { continue };
-            found.extend(rd.flatten().map(|e| e.path().join("bin").join(exe)).filter(|c| c.is_file()));
-        }
-        found.sort();
-        if let Some(p) = found.pop() {
+        // 版は数で比べる（フォルダ名を文字列で並べると "10.0" が "9.0" より前になる）
+        let newest = crate::kicad_plugin::installed_programs().into_iter().map(|(v, dir)| (v, dir.join("bin").join(exe))).filter(|(_, c)| c.is_file()).max_by_key(|(v, _)| *v);
+        if let Some((_, p)) = newest {
             return Some(p);
         }
     } else {

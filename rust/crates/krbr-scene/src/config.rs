@@ -420,7 +420,8 @@ pub fn load_project_config(pcb: &Path) -> ProjectConfig {
     for f in &c.loaded_files {
         krbr_core::info!("config: {}", f.display());
     }
-    if c.loaded_files.is_empty() {
+    // ファイルはあるが読めないときは board_file::read が警告している
+    if c.loaded_files.is_empty() && !file.exists() {
         krbr_core::info!("config: no {} found, using defaults", file.display());
     }
     c

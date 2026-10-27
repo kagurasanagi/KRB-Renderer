@@ -109,7 +109,7 @@ fn documents_home() -> Option<PathBuf> {
 
 /// KiCad の本体のインストール先（版, フォルダ）：レジストリのアンインストールの情報（"KiCad 10.0" の InstallLocation。
 /// Program Files 以外に入れたものも見つかる）と、Program Files\KiCad\<版>
-fn installed_programs() -> Vec<([u32; 2], PathBuf)> {
+pub(crate) fn installed_programs() -> Vec<([u32; 2], PathBuf)> {
     let mut out = Vec::new();
     #[cfg(windows)]
     {

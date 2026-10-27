@@ -199,7 +199,15 @@ pub fn template() -> String {
 /// この基板の設定ファイルを読む。(ファイル, 中身)。無い・読めないときは中身が None（読めないときは警告）
 pub fn read(pcb: &Path) -> (PathBuf, Option<toml::Table>) {
     let file = resolve(pcb);
-    let t = std::fs::read_to_string(&file).ok().and_then(|s| match s.parse::<toml::Table>() {
+    let text = match std::fs::read_to_string(&file) {
+        Ok(s) => Some(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            krbr_core::warn!("{}: cannot read ({e}; save it as UTF-8) - ignored", file.display());
+            None
+        }
+    };
+    let t = text.and_then(|s| match s.parse::<toml::Table>() {
         Ok(t) => Some(t),
         Err(e) => {
             krbr_core::warn!("{}: {} - ignored", file.display(), e);
@@ -229,7 +237,9 @@ pub fn edit_toml(file: &Path, new_text: &str, f: impl FnOnce(&mut DocumentMut)) 
 pub fn try_edit_toml(file: &Path, new_text: &str, f: impl FnOnce(&mut DocumentMut) -> Result<(), String>) -> Result<(), String> {
     let mut doc: DocumentMut = match std::fs::read_to_string(file) {
         Ok(s) => s.parse().map_err(|e| format!("cannot read {} ({e}); not overwriting it - fix or remove the file first", file.display()))?,
-        Err(_) => new_text.parse().map_err(|e| format!("template: {e}"))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => new_text.parse().map_err(|e| format!("template: {e}"))?,
+        // UTF-8 でない（Shift-JIS で保存した）、使用中、権限が無い、など：ひな形で上書きしない
+        Err(e) => return Err(format!("cannot read {} ({e}); not overwriting it - save it as UTF-8 or remove it first", file.display())),
     };
     f(&mut doc).map_err(|e| format!("{}: {e}; not written", file.display()))?;
     write_atomic(file, &doc.to_string()).map_err(|e| format!("cannot write {}: {e}", file.display()))
@@ -513,6 +523,11 @@ pub(crate) mod tests {
         std::fs::write(&f, "[broken").unwrap();
         assert!(edit(&pcb, |_| {}).is_err());
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "[broken");
+        // UTF-8 でない（Shift-JIS で保存した）ファイルも、ひな形で上書きしない
+        let sjis = b"# \x8a\xee\x94\xc2\n[render]\nspp = 16\n";
+        std::fs::write(&f, sjis).unwrap();
+        assert!(edit(&pcb, |_| {}).is_err());
+        assert_eq!(std::fs::read(&f).unwrap(), sjis);
         let _ = std::fs::remove_dir_all(&ws);
     }
 

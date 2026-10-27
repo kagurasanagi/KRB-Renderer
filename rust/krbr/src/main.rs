@@ -187,22 +187,22 @@ struct RenderArgs {
     #[arg(long)]
     max_depth: Option<u32>,
     /// camera elevation above the board (deg, default 35)
-    #[arg(long)]
+    #[arg(long, allow_negative_numbers = true)]
     elevation: Option<f64>,
     /// camera azimuth (deg, default 45)
-    #[arg(long)]
+    #[arg(long, allow_negative_numbers = true)]
     azimuth: Option<f64>,
     /// vertical field of view (deg, default 30)
     #[arg(long)]
     fov: Option<f64>,
     /// look at this board point (KiCad X,Y in mm)
-    #[arg(long, value_delimiter = ',', num_args = 2)]
+    #[arg(long, value_delimiter = ',', num_args = 2, allow_negative_numbers = true)]
     look_at: Vec<f64>,
     /// zoom factor relative to the automatic framing (default 1; when given, the view remembered for the board is not used)
     #[arg(long, value_parser = parse_zoom)]
     zoom: Option<f64>,
     /// exposure (EV)
-    #[arg(long)]
+    #[arg(long, allow_negative_numbers = true)]
     exposure: Option<f32>,
     /// glow of bright light such as lit LEDs: strength (0 = off; default 1). Remembered per board
     #[arg(long)]
@@ -215,7 +215,7 @@ struct RenderArgs {
     glow_spread: Option<f32>,
     #[arg(long)]
     env_intensity: Option<f32>,
-    #[arg(long)]
+    #[arg(long, allow_negative_numbers = true)]
     env_rotation: Option<f32>,
     /// clamp indirect radiance per sample (default 10, 0 = off)
     #[arg(long)]
@@ -285,7 +285,7 @@ struct ViewArgs {
     #[arg(long)]
     hidden: bool,
     /// development: rotate the camera by this many degrees per frame
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
     test_orbit: f64,
     /// do not reload when the board file is saved
     #[arg(long)]
@@ -564,16 +564,19 @@ fn cmd_info(pcb: &PathBuf, models: bool) -> anyhow::Result<()> {
 }
 
 /// エクスプローラーから起動されたか（exe のアイコンへのドラッグ＆ドロップ、ダブルクリック）。
-/// そのときはコンソールを使っているのがこのプロセスだけになる
+/// そのときはコンソールを使っているのがこのプロセスだけになり、コンソールの窓もある。
+/// 他のプログラムが CREATE_NO_WINDOW で起動したとき（KiCad のプラグインなど）も使っているのは自分だけだが、
+/// 窓が無いので区別できる（起動し直すと出力の行き先を失い、Enter を待つと誰も押せない）
 #[cfg(windows)]
 fn launched_from_explorer() -> bool {
     #[link(name = "kernel32")]
     extern "system" {
         fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
+        fn GetConsoleWindow() -> isize;
     }
     let mut ids = [0u32; 4];
-    // 安全性：ids の長さを渡している
-    unsafe { GetConsoleProcessList(ids.as_mut_ptr(), ids.len() as u32) == 1 }
+    // 安全性：ids の長さを渡している。GetConsoleWindow は引数を取らない
+    unsafe { GetConsoleProcessList(ids.as_mut_ptr(), ids.len() as u32) == 1 && GetConsoleWindow() != 0 }
 }
 
 #[cfg(not(windows))]
