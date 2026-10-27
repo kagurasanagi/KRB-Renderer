@@ -1,12 +1,10 @@
-# KRB-Renderer
+# KRB Renderer
 
-KiCad の基板を、GPU でリアルタイムに写真のように描くビューアです。
-
-![ビューアの画面](docs/images/viewer.png)
+KiCad の基板を、GPU のレイトレーシングで写真のように描く Windows 用のビューアです。KiCad で保存するたびに描き直します。
 
 <p>
   <img src="docs/images/usbhub_cm1.jpg" width="49%" alt="レンダリングの例：白いレジストの USB ハブ基板">
-  <img src="docs/images/usbhub_cm2.jpg" width="49%" alt="レンダリングの例：同じ基板に寄った画">
+  <img src="docs/images/usbhub_cm2.jpg" width="49%" alt="レンダリングの例：同じ基板のアップ">
 </p>
 
 KiCad の 3D ビューアは編集の邪魔をしない簡素な表示なので、もっときれいに眺めたくて作りました。
@@ -22,64 +20,82 @@ KiCad の 3D ビューアは編集の邪魔をしない簡素な表示なので�
 ## 動作環境
 
 - Windows 10 / 11（64 bit）
-- レイトレーシング対応の GPU（NVIDIA GeForce GTX 10 系以降など）
-- KiCad 9 / 10（3D モデルと一部の文字に使う）
+- Vulkan のレイトレーシングに対応した GPU
+  - 快適に使えるのは NVIDIA GeForce RTX 20 系以降
+  - GTX 1060 6GB などの GTX 10 系も動きますが、描き直しに十数秒かかります
+- KiCad 9 / 10（同じ PC に入れてください。3D モデルと、文字を描く `kicad-cli` を使います）
 
 ## インストール
 
-1. [Releases](https://github.com/kagurasanagi/KRB-Renderer/releases) から zip をダウンロード
+1. [最新版の zip](https://github.com/kagurasanagi/KRB-Renderer/releases/latest) をダウンロード
 2. 好きな場所に展開（インストールは不要）
 3. `KRB-Renderer.exe` を起動
 
 「PC が保護されました」と出たら、「詳細情報」→「実行」で起動できます（署名のないアプリのため）。
 
+更新は、新しい zip を展開して置き換えるだけです。削除は、KiCad のボタンを外してから（下の「KiCad から開く」で「解除」）フォルダを消します。設定は `%APPDATA%\krbr` に残ります。
+
 ## 使い方
 
 1. `.kicad_pcb` を `KRB-Renderer.exe` かウィンドウにドラッグ＆ドロップ
 2. KiCad で編集して保存すると、自動で描き直す
-3. `S` で画像を保存（基板のフォルダへ）。動画は「ファイル → 動画を書き出す」
+3. `S` で画像を保存（基板のフォルダへ）。動画は「ファイル → 動画を書き出す…」
 
 ![画面の見方](docs/images/viewer_annotated.png)
 
 | 操作 | 内容 |
 |---|---|
 | 左ドラッグ | 回転 |
-| 右／中ドラッグ | 移動 |
+| 右・中ドラッグ | 移動 |
 | ホイール | 拡大・縮小 |
-| クリック | 部品を選ぶ（材質を変える） |
-| Ctrl ＋クリック | ピントを合わせる |
+| クリック | 部品を選ぶ |
+| Ctrl + クリック | その点にピントを合わせる |
 | `F` | 全体を表示 |
+| `S` | 画像を保存 |
 | `P` | 一時停止 |
+| `Esc` | 終了 |
+
+すべてのキーは「ヘルプ」メニューに出ています。
+
+`.kicad_pcb` は書き換えません。視点や材質は、基板の横の `<基板の名前>.krbr` に保存します（git で管理しているなら差分に出ます。「ファイル → 基板の設定ファイルの置き場所」で `%APPDATA%\krbr` に移せます）。
 
 ### 材質を変える
 
-部品をクリックし、設定の「材質エディタ...」で見本から選びます。
+部品をクリックし、右の設定パネルの「材質エディタ...」（または `M`）で見本から選びます。
 
 ![材質エディタ](docs/images/material_editor.png)
 
 ### KiCad から開く
 
-1. 「設定 → KiCad プラグイン」で、使っている KiCad の「登録」を押す
+1. 「設定 → KiCad プラグイン...」で、使っている KiCad の「登録」を押す
 
    <img src="docs/images/kicad_plugin.png" width="60%" alt="KiCad プラグインの登録">
 
-2. KiCad を開き直すと、PCB エディタのツールバーにボタンが出る。押すとビューアが開きます
+2. KiCad を開き直すと、PCB エディタのツールバーにボタンが出ます。押すとビューアが開きます
 
    ![KiCad のツールバーに出るボタン](docs/images/kicad_toolbar.png)
 
 ## 困ったとき
 
-- **部品が箱になる**：3D モデル（STEP）が見つかりません。KiCad の 3D モデルのライブラリを入れてください。
+- **部品が箱のまま**：3D モデル（STEP）が見つかりません。KiCad の 3D モデルのライブラリを入れてください（開いた直後は、読み込みが終わるまで箱で出ます）。
 - **文字や QR コードが出ない**：KiCad 付属の `kicad-cli` が見つかりません。KiCad を標準の場所に入れてください。
 - **操作が重い**：`P` で一時停止すると軽くなります。
 - **メニューが出ない**：[WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) を入れてください。
 
+解決しないときは [Issues](https://github.com/kagurasanagi/KRB-Renderer/issues) へどうぞ。
+
 ## 詳しい説明
 
-- [使い方の詳細](docs/usage.md)：全ての操作、コマンドライン、設定ファイル、材質
+- [使い方の詳細](docs/usage.md)：すべての操作、コマンドライン、設定ファイル、材質
 - [開発者向け](docs/development.md)：ビルド、テスト、配布の作り方
 - [内部の仕組み](docs/internals.md)：処理の流れ、描画のアルゴリズム
 
 ## ライセンス
 
 MIT。同梱のライブラリのライセンスは、zip の `licenses` フォルダにあります。
+
+## English
+
+A real-time, GPU ray-traced viewer for KiCad 9 / 10 boards on Windows 10 / 11. It re-renders every time you save in KiCad, and can add a button to the PCB Editor toolbar.
+Download the zip from [Releases](https://github.com/kagurasanagi/KRB-Renderer/releases/latest), unzip it, and run `KRB-Renderer.exe`. Needs a GPU with Vulkan ray tracing (GeForce RTX recommended).
+The UI is available in English (Settings → Language). License: MIT.
