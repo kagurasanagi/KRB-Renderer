@@ -1,6 +1,6 @@
 [package]
 name = "krbr"
-description = "KRB-Renderer (Rust): KiCad 連携 物理ベース レンダラー"
+description = "KRB Renderer (Rust): KiCad 連携 物理ベース レンダラー"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,4 +1,4 @@
-# KRB-Renderer のビューア：日本語（id は英語の krbr-app.ftl と同じものをそろえる）
+# KRB Renderer のビューア：日本語（id は英語の krbr-app.ftl と同じものをそろえる）
 
 ## メニュー：ファイル
 menu-file = ファイル
@@ -40,11 +40,11 @@ menu-language = 言語
 language-auto = 自動
 language-auto-tip = KiCad で選んだ言語、無ければ OS の言語
 menu-kicad-plugin = KiCad プラグイン...
-menu-kicad-plugin-tip = KiCad の PCB エディタのツールバーの「KRB Render でプレビュー」のボタンを、KiCad の版ごとに足す・消す
+menu-kicad-plugin-tip = KiCad の PCB エディタのツールバーの「KRB Renderer でプレビュー」のボタンを、KiCad の版ごとに足す・消す
 
 ## KiCad プラグインの窓
 kplug-title = KiCad プラグイン
-kplug-intro = KiCad の PCB エディタのツールバーに「KRB Render でプレビュー」のボタンを足します。プラグインは KiCad の版ごとに別なので、使う版ごとに登録してください。
+kplug-intro = KiCad の PCB エディタのツールバーに「KRB Renderer でプレビュー」のボタンを足します。プラグインは KiCad の版ごとに別なので、使う版ごとに登録してください。
 kplug-none = KiCad が見つかりません（ドキュメント\KiCad の下のユーザーフォルダも、インストール先もない）。
 kplug-no-program = 本体が見つからない（ユーザーフォルダだけが残っている）
 kplug-too-old = 対象外（KiCad 9 以降のみ）

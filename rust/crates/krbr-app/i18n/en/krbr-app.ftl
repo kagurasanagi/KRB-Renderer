@@ -1,4 +1,4 @@
-# KRB-Renderer viewer: English (the reference language; every message must be here)
+# KRB Renderer viewer: English (the reference language; every message must be here)
 
 ## Menu: File
 menu-file = File
@@ -40,11 +40,11 @@ menu-language = Language
 language-auto = Automatic
 language-auto-tip = The language chosen in KiCad, otherwise the language of the OS
 menu-kicad-plugin = KiCad plugin...
-menu-kicad-plugin-tip = Add or remove the "Preview in KRB Render" button on the KiCad PCB editor toolbar, for each KiCad version
+menu-kicad-plugin-tip = Add or remove the "Preview in KRB Renderer" button on the KiCad PCB editor toolbar, for each KiCad version
 
 ## KiCad plugin window
 kplug-title = KiCad plugin
-kplug-intro = Adds a "Preview in KRB Render" button to the KiCad PCB editor toolbar. Each KiCad version has its own plugins, so install it for each version you use.
+kplug-intro = Adds a "Preview in KRB Renderer" button to the KiCad PCB editor toolbar. Each KiCad version has its own plugins, so install it for each version you use.
 kplug-none = No KiCad was found (no user folder under Documents\KiCad and no installation).
 kplug-no-program = Program not found (only the user folder is left)
 kplug-too-old = Not supported (KiCad 9 or later)

@@ -1,6 +1,6 @@
 [package]
 name = "krbr-kicad"
-description = "KRB-Renderer: .kicad_pcb の読み込み（S 式、基板の構造、3D モデルのパス解決）"
+description = "KRB Renderer: .kicad_pcb の読み込み（S 式、基板の構造、3D モデルのパス解決）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,4 +1,4 @@
-# KRB-Renderer 使い方の詳細
+# KRB Renderer 使い方の詳細
 
 画面の操作・コマンドライン・設定ファイル・材質など、[README](../README.md) より詳しい説明です。
 
@@ -142,7 +142,7 @@
 | `krbr material show <pcb> [--ref U3]` | 部品・部位ごとの材質と、どの段階で決まったか |
 | `krbr material set <pcb> --ref U3 [--part K] --material M` | 部品番号ごとの上書き（基板の設定ファイル `<名前>.krbr` の `[ref.U3]`） |
 | `krbr material set <pcb> --model <パス/ファイル名> [--part K] --material M [--global]` | 3D モデルごとの設定（プロジェクト、または `--global` で全体設定） |
-| `krbr kicad-plugin status` / `install` / `uninstall` [`--kicad 10.0`] | KiCad の PCB エディタの「KRB Render でプレビュー」のボタン：版ごとの状態、足す・消す（ビューアの「設定 → KiCad プラグイン...」と同じ。下記「KiCad のプラグイン」） |
+| `krbr kicad-plugin status` / `install` / `uninstall` [`--kicad 10.0`] | KiCad の PCB エディタの「KRB Renderer でプレビュー」のボタン：版ごとの状態、足す・消す（ビューアの「設定 → KiCad プラグイン...」と同じ。下記「KiCad のプラグイン」） |
 | `krbr bench [<pcb>] [--spp 64] [--width 1920 --height 1080]` | 同じ条件でレンダリングの速さを測る（GPU・PC の比較用。基板を省くと同梱のベンチマークの基板。下記） |
 | `krbr geom <pcb>` / `krbr models <pcb>` | 開発用：基板の形状と凹凸タイル（GPU を使わない）／全 3D モデルの読み込みの統計 |
 | `krbr diff <a> <b>` | 開発用：2 枚の画像（PNG / EXR）の差の平均と最大 |
@@ -406,7 +406,7 @@ bump_scale = 0.1
 
 **一時停止**：ボタン列の「一時停止」（`P`、メニューの「表示」、起動時から止めるなら `--paused`）で、サンプルの積み足しを止めます。GPU の負荷がほぼ無くなるので、GPU の弱い PC でも操作できます。止めている間にカメラなどを変えたときは、表示のために 1 サンプルだけ描いて止まります。
 
-**KiCad のプラグイン**：ビューアのメニューの「設定 → KiCad プラグイン...」で、PCB エディタのツールバーに「KRB Render でプレビュー」のボタンを足します。KiCad は版ごとに別のユーザーフォルダを使うので、見つかった版（9.0、10.0、nightly など）ごとに状態（未登録・登録済み・別の `krbr.exe` を指している・指している `krbr.exe` が無い・ファイルが古い）を出し、版ごとに登録・解除します。版は、ユーザーフォルダ（`KICAD_DOCUMENTS_HOME`、無ければ `ドキュメント\KiCad\<版>`。ドキュメントを OneDrive などへ移していればその場所）、レジストリのアンインストールの情報（`KiCad <版>` の `InstallLocation`）、`Program Files\KiCad\<版>` から探します。登録すると、その版の `scripting\plugins\krbr_preview` に、exe に埋め込んだ `kicad_plugin/krbr_preview` の中身と、この `krbr.exe` の場所を書きます。ビューアは起動のたびに、登録済みの版のうち、指している `krbr.exe` が無くなった版（フォルダを移した）と、ファイルが古い版（`krbr.exe` を更新した）を直します（未登録の版と、まだ有る別の `krbr.exe` を指している版には触らない）。コマンドラインでは `krbr kicad-plugin status`／`install`／`uninstall`（`--kicad 10.0` で版を、`--dir` で場所を指定。省くとすべての版）。登録の後は KiCad を開き直すか、PCB エディタの「ツール → 外部プラグイン → プラグインを再読み込み」で出ます。押すと、開いている基板のファイルをビューアで開きます（コンソールは出さず、ログは基板ごとに `%TEMP%\krbr_preview_<基板のパスのハッシュ>.log`。同じ基板のビューアが開いていれば二重には開かない。ビューアが起動の直後に終わってしまったときは、ログの場所を添えてメッセージを出す）。ビューアは保存を監視しているので、KiCad で保存するたびに描き直されます。旧来の Action Plugin（SWIG の `pcbnew`）を使っています。KiCad 9 で非推奨になり、KiCad 11 で無くなる予定なので、そのときは IPC API のプラグイン（`plugin.json`）に移します。
+**KiCad のプラグイン**：ビューアのメニューの「設定 → KiCad プラグイン...」で、PCB エディタのツールバーに「KRB Renderer でプレビュー」のボタンを足します。KiCad は版ごとに別のユーザーフォルダを使うので、見つかった版（9.0、10.0、nightly など）ごとに状態（未登録・登録済み・別の `krbr.exe` を指している・指している `krbr.exe` が無い・ファイルが古い）を出し、版ごとに登録・解除します。版は、ユーザーフォルダ（`KICAD_DOCUMENTS_HOME`、無ければ `ドキュメント\KiCad\<版>`。ドキュメントを OneDrive などへ移していればその場所）、レジストリのアンインストールの情報（`KiCad <版>` の `InstallLocation`）、`Program Files\KiCad\<版>` から探します。登録すると、その版の `scripting\plugins\krbr_preview` に、exe に埋め込んだ `kicad_plugin/krbr_preview` の中身と、この `krbr.exe` の場所を書きます。ビューアは起動のたびに、登録済みの版のうち、指している `krbr.exe` が無くなった版（フォルダを移した）と、ファイルが古い版（`krbr.exe` を更新した）を直します（未登録の版と、まだ有る別の `krbr.exe` を指している版には触らない）。コマンドラインでは `krbr kicad-plugin status`／`install`／`uninstall`（`--kicad 10.0` で版を、`--dir` で場所を指定。省くとすべての版）。登録の後は KiCad を開き直すか、PCB エディタの「ツール → 外部プラグイン → プラグインを再読み込み」で出ます。押すと、開いている基板のファイルをビューアで開きます（コンソールは出さず、ログは基板ごとに `%TEMP%\krbr_preview_<基板のパスのハッシュ>.log`。同じ基板のビューアが開いていれば二重には開かない。ビューアが起動の直後に終わってしまったときは、ログの場所を添えてメッセージを出す）。ビューアは保存を監視しているので、KiCad で保存するたびに描き直されます。旧来の Action Plugin（SWIG の `pcbnew`）を使っています。KiCad 9 で非推奨になり、KiCad 11 で無くなる予定なので、そのときは IPC API のプラグイン（`plugin.json`）に移します。
 
 **exe のアイコンへのドラッグ＆ドロップ**：`krbr.exe`（またはそのショートカット）に `.kicad_pcb` をドロップすると、ビューアで開きます。作業フォルダは変えません（`S` で保存する画像は、起動の仕方によらず基板のフォルダに入り、ファイルのダイアログも基板・環境マップのフォルダから始まります）。エラーで終わるときは、コンソールが閉じる前に Enter を待ちます。
 

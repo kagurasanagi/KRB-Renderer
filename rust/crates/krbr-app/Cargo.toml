@@ -1,6 +1,6 @@
 [package]
 name = "krbr-app"
-description = "KRB-Renderer: コマンドの実装（シーンの準備、render、ビューア）"
+description = "KRB Renderer: コマンドの実装（シーンの準備、render、ビューア）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

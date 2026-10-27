@@ -1,4 +1,4 @@
-//! KiCad のプラグイン「KRB Render でプレビュー」（PCB エディタのツールバーのボタン）の登録・解除。
+//! KiCad のプラグイン「KRB Renderer でプレビュー」（PCB エディタのツールバーのボタン）の登録・解除。
 //! プラグインのファイル（<repo>/kicad_plugin/krbr_preview）は exe に埋め込んであり、KiCad のユーザーフォルダの
 //! <版>\scripting\plugins\krbr_preview に書き出す。あわせて、この krbr.exe の場所を krbr_path.txt に書く。
 //! KiCad は版（9.0、10.0、nightly の 10.99 など）ごとに別のユーザーフォルダを使い、その版のフォルダのプラグインだけを読むので、
@@ -274,7 +274,7 @@ pub fn cmd_install(dir: Option<&Path>, kicad: Option<&str>) -> anyhow::Result<()
         let d = install_into(&plugins, &exe)?;
         info!("{name}: installed the plugin into {} (krbr: {})", d.display(), exe.display());
     }
-    info!("restart KiCad, or in the PCB editor use Tools > External Plugins > Refresh Plugins; the toolbar gets a 'Preview in KRB Render' button");
+    info!("restart KiCad, or in the PCB editor use Tools > External Plugins > Refresh Plugins; the toolbar gets a 'Preview in KRB Renderer' button");
     Ok(())
 }
 

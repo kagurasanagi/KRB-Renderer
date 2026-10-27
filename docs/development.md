@@ -1,4 +1,4 @@
-# KRB-Renderer 開発者向け
+# KRB Renderer 開発者向け
 
 ビルド・テスト・配布の作り方・コードの拡張の入り口です。内部の仕組みは [internals.md](internals.md)、使い方の詳細は [usage.md](usage.md)。
 

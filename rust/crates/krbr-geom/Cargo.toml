@@ -1,6 +1,6 @@
 [package]
 name = "krbr-geom"
-description = "KRB-Renderer: 基板の形状（外形・穴・凹凸）、層の多角形、距離場"
+description = "KRB Renderer: 基板の形状（外形・穴・凹凸）、層の多角形、距離場"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

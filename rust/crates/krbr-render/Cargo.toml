@@ -1,6 +1,6 @@
 [package]
 name = "krbr-render"
-description = "KRB-Renderer: Vulkan（ash）による描画。加速構造、積分器のカーネル、累積、読み戻し、画像の入出力"
+description = "KRB Renderer: Vulkan（ash）による描画。加速構造、積分器のカーネル、累積、読み戻し、画像の入出力"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

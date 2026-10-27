@@ -1,4 +1,4 @@
-# KiCad の PCB エディタのツールバーに「KRB Render でプレビュー」（英語では Preview in KRB Render）を出す Action Plugin（KiCad 9 / 10）。
+# KiCad の PCB エディタのツールバーに「KRB Renderer でプレビュー」（英語では Preview in KRB Renderer）を出す Action Plugin（KiCad 9 / 10）。
 # 押すと、開いている基板のファイルを krbr（Rust 版のビューア）で開く。ビューアは保存を監視しているので、
 # KiCad で保存するたびに描き直される。
 # インストール：ビューアの「設定 → KiCad プラグイン」か krbr kicad-plugin install（このフォルダと krbr.exe の場所を、KiCad の版ごとのユーザーフォルダへ書く）
@@ -27,16 +27,16 @@ _LOG_TAIL_LINES = 15
 # 表示の文（KiCad の表示の言語に合わせる。訳の無い言語は英語）
 _TEXTS = {
     "en": {
-        "name": "Preview in KRB Render",
-        "description": "Show the open board in KRB Render (a physically based renderer). It is redrawn every time you save.",
+        "name": "Preview in KRB Renderer",
+        "description": "Show the open board in KRB Renderer (a physically based renderer). It is redrawn every time you save.",
         "not_saved": "The board has not been saved yet. Save it once, then press the button again.",
         "no_exe": "krbr.exe was not found (was it moved or deleted?). Start krbr.exe once and it records its new location (see Settings > KiCad plugin), or set its location in the KRBR_EXE environment variable.",
         "already_open": "A viewer for this board is already open. It is redrawn whenever you save in KiCad.",
         "exited": "The viewer stopped right after starting (exit code {code}).\nLog: {log}",
     },
     "ja": {
-        "name": "KRB Render でプレビュー",
-        "description": "開いている基板を KRB Render（物理ベースのレンダラー）で表示します。保存するたびに描き直します。",
+        "name": "KRB Renderer でプレビュー",
+        "description": "開いている基板を KRB Renderer（物理ベースのレンダラー）で表示します。保存するたびに描き直します。",
         "not_saved": "基板がまだ保存されていません。いったん保存してから押してください。",
         "no_exe": "krbr.exe が見つかりません（移動・削除した？）。krbr.exe を一度起動すると、新しい場所を書き直します（「設定 → KiCad プラグイン」）。または環境変数 KRBR_EXE に場所を設定してください。",
         "already_open": "この基板のビューアはもう開いています。KiCad で保存すると、そちらが描き直されます。",
@@ -59,7 +59,7 @@ def _text(key):
     return _TEXTS.get(_language(), _TEXTS["en"])[key]
 
 
-def _message(text, title="KRB Render"):
+def _message(text, title="KRB Renderer"):
     if wx is not None and wx.GetApp() is not None:
         wx.MessageBox(text, title, wx.OK | wx.ICON_INFORMATION)
     else:

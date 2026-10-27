@@ -78,7 +78,7 @@ Pop-Location
 if ($aboutExit -ne 0) { throw "cargo about generate に失敗（認めていないライセンスの依存があれば rust\about.toml の accepted に足す）" }
 # 使い方（メモ帳で読めるよう UTF-8 の BOM 付き）
 $readme = @"
-KRB-Renderer $version  KiCad の基板の物理ベースのレンダラー
+KRB Renderer $version  KiCad の基板の物理ベースのレンダラー
 
 ■ 最初に
 ・zip を展開したフォルダのまま使えます（インストールは要りません）。
@@ -94,7 +94,7 @@ KRB-Renderer $version  KiCad の基板の物理ベースのレンダラー
 ・ビューアは基板のファイルの保存を監視していて、KiCad で保存するたびに描き直します。
 ・GPU の弱い PC では、ビューアのメニューの下の「一時停止」（P キー）でレンダリングを止めると操作が軽くなります。
 
-■ KiCad のプラグイン（PCB エディタのツールバーに「KRB Render でプレビュー」のボタン）
+■ KiCad のプラグイン（PCB エディタのツールバーに「KRB Renderer でプレビュー」のボタン）
 ・ビューアのメニューの「設定 → KiCad プラグイン...」で、KiCad の版（9.0、10.0 など）ごとに登録・解除します。
   登録した後、KiCad を開き直すと出ます。
 ・このフォルダを移動したら、krbr.exe を一度起動してください（登録済みの版の krbr.exe の場所を書き直します）。
@@ -117,7 +117,7 @@ KRB-Renderer $version  KiCad の基板の物理ベースのレンダラー
 ・線フォントの文字（シルク・銅箔・ソルダーマスク）には kicad-cli（KiCad に付属）を使います。
 
 ■ 同梱物のライセンス（licenses フォルダ）
-・KRB-Renderer 本体（MIT）。
+・KRB Renderer 本体（MIT）。
 ・Intel Open Image Denoise（Apache-2.0）、oneTBB（Apache-2.0）。
 ・Open CASCADE Technology（LGPL-2.1、例外条項付き。dll\step\TK*.dll。ソースは https://github.com/Open-Cascade-SAS/OCCT 、
   手元でビルドし直した DLL に差し替えて使えます）。

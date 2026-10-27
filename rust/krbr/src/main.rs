@@ -12,7 +12,7 @@ use krbr_scene::config::load_project_config;
 use krbr_scene::{IntegratorKind, LensModel};
 
 #[derive(Parser)]
-#[command(name = "krbr", about = "KRB-Renderer: a physically based renderer for KiCad boards")]
+#[command(name = "krbr", about = "KRB Renderer: a physically based renderer for KiCad boards")]
 struct Cli {
     /// also print debug messages
     #[arg(short, long, global = true)]
@@ -52,7 +52,7 @@ enum Command {
         #[command(subcommand)]
         cmd: MaskCmd,
     },
-    /// KiCad plugin: a "Preview in KRB Render" button on the PCB editor toolbar
+    /// KiCad plugin: a "Preview in KRB Renderer" button on the PCB editor toolbar
     KicadPlugin {
         #[command(subcommand)]
         cmd: KicadPluginCmd,

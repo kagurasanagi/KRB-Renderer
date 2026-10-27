@@ -1,6 +1,6 @@
 [package]
 name = "krbr-scene"
-description = "KRB-Renderer: 材質（OpenPBR）、材質の割り当て、分光の土台、カメラ・レンズ、設定ファイル、シーンの組み立て"
+description = "KRB Renderer: 材質（OpenPBR）、材質の割り当て、分光の土台、カメラ・レンズ、設定ファイル、シーンの組み立て"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
