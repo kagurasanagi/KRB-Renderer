@@ -3,8 +3,12 @@
 KiCad の基板を、GPU のレイトレーシングで写真のように描く Windows 用のビューアです。KiCad で保存するたびに描き直します。
 
 <p>
-  <img src="docs/images/usbhub_cm1.jpg" width="49%" alt="レンダリングの例：白いレジストの USB ハブ基板">
-  <img src="docs/images/usbhub_cm2.jpg" width="49%" alt="レンダリングの例：同じ基板のアップ">
+  <img src="docs/images/gallery_usbhub.webp" width="49%" alt="レンダリングの例：白いレジストの USB ハブ基板">
+  <img src="docs/images/gallery_rk3506.webp" width="49%" alt="レンダリングの例：紫のレジストの RK3506 基板、屋外の HDR で">
+  <img src="docs/images/gallery_dsp_radio.webp" width="49%" alt="レンダリングの例：金メッキの縁の小さなラジオ基板">
+  <img src="docs/images/gallery_dsp_radio_clear.webp" width="49%" alt="レンダリングの例：同じ基板を透明な基材で、光る LED と内層の銅">
+  <img src="docs/images/gallery_usbhub_closeup.webp" width="49%" alt="レンダリングの例：チップ部品とはんだのアップ、光る LED">
+  <img src="docs/images/gallery_rp2350_transparent.webp" width="49%" alt="レンダリングの例：黒いレジストの RP2350 基板、背景を透明にして">
 </p>
 
 KiCad の 3D ビューアは編集の邪魔をしない簡素な表示なので、もっときれいに眺めたくて作りました。
