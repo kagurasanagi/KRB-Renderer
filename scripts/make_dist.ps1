@@ -110,7 +110,8 @@ KRB Renderer $version  KiCad の基板の物理ベースのレンダラー
 ・licenses\         同梱物のライセンス
 
 ■ 動かすのに必要なもの
-・Windows 10 / 11（64 bit）、Vulkan 1.3 とレイトレーシングに対応した GPU（NVIDIA GTX 10 系以降など）。
+・Windows 10 / 11（64 bit）、Vulkan 1.3 とレイトレーシングに対応した GPU。
+  推奨は NVIDIA GeForce RTX 20 系以降。GTX 1060 6GB などの GTX 10 系も動きますが、描き直しに十数秒かかります。
 ・画面のメニューやパネルには WebView2 Runtime を使います（Windows 11 には最初から入っています。
   無いときは 3D 表示とキーの操作だけになり、入れ方を画面に出します）。
 ・3D モデルは KiCad のインストール先から読みます（KiCad 10 なら C:\Program Files\KiCad\10.0）。
