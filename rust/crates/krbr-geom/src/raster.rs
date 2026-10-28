@@ -352,9 +352,9 @@ pub fn signed_distance_px_capped(inside: &[u8], w: usize, h: usize, cap: usize) 
         let row = y * w;
         let useful = |x: usize| dy[row + x] < cap || (x > 0 && inside[row + x - 1] != inside[row + x]) || (x + 1 < w && inside[row + x + 1] != inside[row + x]);
         let mut run = cap;
-        for x in 0..w {
+        for (x, n) in near.iter_mut().enumerate() {
             run = if useful(x) { 0 } else { step(run) };
-            near[x] = run;
+            *n = run;
         }
         run = cap;
         for x in (0..w).rev() {

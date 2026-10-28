@@ -673,6 +673,8 @@ impl Drop for Context {
     }
 }
 
+/// 画像のレイアウトの移行とメモリのバリア（VkImageMemoryBarrier2 の項目をそのまま引数にする）
+#[allow(clippy::too_many_arguments)]
 pub fn image_barrier(dev: &ash::Device, cmd: vk::CommandBuffer, image: vk::Image, old: vk::ImageLayout, new: vk::ImageLayout, src_stage: vk::PipelineStageFlags2, src_access: vk::AccessFlags2, dst_stage: vk::PipelineStageFlags2, dst_access: vk::AccessFlags2, layers: u32) {
     let b = vk::ImageMemoryBarrier2::default()
         .src_stage_mask(src_stage)

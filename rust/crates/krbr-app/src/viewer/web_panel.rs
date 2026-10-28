@@ -7,7 +7,8 @@ use serde_json::{json, Value};
 use super::*;
 
 /// スライダー。［−］［＋］の 1 回の増減（step）は表示の最小桁、Shift を押したときは 10 倍（big）。
-/// 露出のように別の刻みにするものは、呼んだ側で step・big を書き換える
+/// 露出のように別の刻みにするものは、呼んだ側で step・big を書き換える。引数はページに渡す JSON の項目そのまま
+#[allow(clippy::too_many_arguments)]
 fn slider(id: &str, label: String, value: f64, min: f64, max: f64, log: bool, digits: u32, suffix: &str) -> Value {
     let step = 10f64.powi(-(digits as i32));
     json!({ "t": "slider", "id": id, "label": label, "value": value, "min": min, "max": max, "log": log, "digits": digits, "suffix": suffix, "step": step, "big": step * 10.0 })
@@ -26,8 +27,11 @@ fn radio(id: &str, value: &str, options: Vec<(&str, String)>) -> Value {
     json!({ "t": "radio", "id": id, "value": value, "options": options.into_iter().map(|(v, l)| json!({ "v": v, "label": l })).collect::<Vec<_>>() })
 }
 
-/// 選択肢。groups：(見出し（空なら無し）, [(値, 名前, 説明)])
-fn select(id: &str, label: Option<String>, value: &str, groups: Vec<(String, Vec<(String, String, String)>)>) -> Value {
+/// 選択肢の群：(見出し（空なら無し）, [(値, 名前, 説明)])
+type SelectGroup = (String, Vec<(String, String, String)>);
+
+/// 選択肢
+fn select(id: &str, label: Option<String>, value: &str, groups: Vec<SelectGroup>) -> Value {
     let groups: Vec<Value> = groups
         .into_iter()
         .map(|(g, opts)| {

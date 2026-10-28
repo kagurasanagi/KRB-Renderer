@@ -780,8 +780,7 @@ mod tests {
         assert_eq!(render_size_of(&got), Some((1080, 1350)));
 
         // 設定ファイルの露出が書き換えられたら、露出だけ設定ファイルを使う（ほかの項目とビューアだけの項目は覚えたもの）
-        let mut edited = ProjectConfig::default();
-        edited.exposure_ev = -1.0;
+        let edited = ProjectConfig { exposure_ev: -1.0, ..Default::default() };
         let got = usable_view_values(&b, &ViewSettings::of(&edited).values());
         assert!(!got.contains_key("exposure_ev"));
         assert_eq!(got.get("integrator").and_then(|v| v.as_str()), Some("vcm"));

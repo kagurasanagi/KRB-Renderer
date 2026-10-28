@@ -184,7 +184,7 @@ impl SharedBuf {
     }
 }
 
-//// 計算シェーダ 1 本と、その記述子の組 1 つ（記述子は呼び出し側で書く）。積分器のカーネル（kernel::Kernel）とは別の、
+/// 計算シェーダ 1 本と、その記述子の組 1 つ（記述子は呼び出し側で書く）。積分器のカーネル（kernel::Kernel）とは別の、
 /// 前処理・後処理用の小さなもの
 struct ComputeKernel {
     set_layout: vk::DescriptorSetLayout,

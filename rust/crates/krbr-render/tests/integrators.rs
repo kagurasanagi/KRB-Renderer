@@ -3,6 +3,7 @@
 //!  - 集光模様：透明なふた（アクリル板）越しに、ボールレンズが LED の光を床に集める様子を見る。
 //!    カメラ → 板（鏡面）→ 床（拡散）→ レンズ（鏡面）→ LED の経路は、PT・BDPT では極めて収束しにくく、VCM では収束する。
 //!    同じ条件で 2 回（乱数の種を変えて）描き、その差（ノイズ）を比べる。画像は out/p6_*.png
+//!
 //!   cargo test --release -p krbr-render --test integrators -- --ignored --nocapture
 
 mod common;
@@ -15,7 +16,7 @@ use krbr_scene::camera::{orbit_camera, Camera};
 use krbr_scene::material::Material;
 use krbr_scene::material_library::MaterialLibrary;
 
-fn render_with(ctx: &Context, gpu: &GpuScene<'_>, cam: Camera, w: u32, h: u32, spp: u32, integrator: IntegratorKind, seed: u32) -> RenderOutput {
+fn render_with(ctx: &Context, gpu: &GpuScene<'_>, cam: Camera, (w, h): (u32, u32), spp: u32, integrator: IntegratorKind, seed: u32) -> RenderOutput {
     let mut f = frame(cam, 12);
     f.rr_start_depth = 12;
     f.seed = seed;
@@ -39,10 +40,10 @@ fn integrators_agree() {
     let gpu = gpu_scene(&ctx, &s, &uniform_env(0.05, 16, 8));
     let cam = orbit_camera(Vec3::new(0.0, 25.0, 0.0), 220.0, 25.0, 15.0, 40.0, 4.0 / 3.0);
 
-    let pt = render_with(&ctx, &gpu, cam, 160, 120, 2048, IntegratorKind::Pt, 1);
-    let bdpt = render_with(&ctx, &gpu, cam, 160, 120, 1024, IntegratorKind::Bdpt, 2);
-    let vcm = render_with(&ctx, &gpu, cam, 160, 120, 1024, IntegratorKind::Vcm, 3);
-    let pt2 = render_with(&ctx, &gpu, cam, 160, 120, 2048, IntegratorKind::Pt, 4);
+    let pt = render_with(&ctx, &gpu, cam, (160, 120), 2048, IntegratorKind::Pt, 1);
+    let bdpt = render_with(&ctx, &gpu, cam, (160, 120), 1024, IntegratorKind::Bdpt, 2);
+    let vcm = render_with(&ctx, &gpu, cam, (160, 120), 1024, IntegratorKind::Vcm, 3);
+    let pt2 = render_with(&ctx, &gpu, cam, (160, 120), 2048, IntegratorKind::Pt, 4);
 
     let (e_pt, m_pt, _) = relative_rmse(&pt.color, &pt2.color, Window::ALL);
     let (e_b, _, m_b) = relative_rmse(&pt.color, &bdpt.color, Window::ALL);
@@ -86,8 +87,8 @@ fn caustics_through_a_cover_converge_with_vcm() {
     let (gpu, cam) = caustic_scene(&ctx);
     let mut noise = Vec::new();
     for integ in [IntegratorKind::Pt, IntegratorKind::Bdpt, IntegratorKind::Vcm] {
-        let a = render_with(&ctx, &gpu, cam, CW, CH, 256, integ, 11);
-        let b = render_with(&ctx, &gpu, cam, CW, CH, 256, integ, 12);
+        let a = render_with(&ctx, &gpu, cam, (CW, CH), 256, integ, 11);
+        let b = render_with(&ctx, &gpu, cam, (CW, CH), 256, integ, 12);
         let (e, ma, mb) = relative_rmse(&a.color, &b.color, CAUSTIC_WIN);
         println!("caustic scene, {integ:<4}: noise around the caustic (rel. RMSE between two seeds) {e:.3}, mean {:.4}, {:.2} s for 256 spp", 0.5 * (ma + mb), 0.5 * (a.seconds + b.seconds));
         save_png(&format!("p6_caustic_{integ}.png"), &a.color, 0.0);
@@ -107,8 +108,8 @@ fn caustics_vcm_matches_a_pt_reference() {
     let _g = gpu_lock();
     let ctx = context();
     let (gpu, cam) = caustic_scene(&ctx);
-    let reference = render_with(&ctx, &gpu, cam, CW, CH, 16384, IntegratorKind::Pt, 21);
-    let vcm = render_with(&ctx, &gpu, cam, CW, CH, 1024, IntegratorKind::Vcm, 22);
+    let reference = render_with(&ctx, &gpu, cam, (CW, CH), 16384, IntegratorKind::Pt, 21);
+    let vcm = render_with(&ctx, &gpu, cam, (CW, CH), 1024, IntegratorKind::Vcm, 22);
     let (_, m_ref, m_vcm) = relative_rmse(&reference.color, &vcm.color, CAUSTIC_WIN);
     save_png("p6_caustic_vcm_1024.png", &vcm.color, 0.0);
     save_png("p6_caustic_pt_16384.png", &reference.color, 0.0);

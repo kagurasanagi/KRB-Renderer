@@ -309,7 +309,7 @@ fn parse_parallel(text: &str) -> Option<Result<Node, ParseError>> {
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(ParseError { message: "parser thread panicked", offset: 0 }))).collect()
+        handles.into_iter().map(|h| h.join().unwrap_or(Err(ParseError { message: "parser thread panicked", offset: 0 }))).collect()
     });
     let mut root = Node { is_list: true, ..Default::default() };
     for p in parts {

@@ -53,8 +53,8 @@ fn previous_frame_warped_by_the_flow_matches_the_current_frame() {
         let pos = p.readback_position().unwrap();
         (color, pos)
     };
-    let (prev, _) = shoot(prev_cam.clone());
-    let (cur, pos) = shoot(cur_cam.clone());
+    let (prev, _) = shoot(prev_cam);
+    let (cur, pos) = shoot(cur_cam);
     let fl = flow::backward_flow(&pos, W, H, &flow::FlowCamera::pinhole(cur_cam), &flow::FlowCamera::pinhole(prev_cam));
     // 今のコマの各画素を、前のコマの画像のフローの先の値と比べる（ずらさない場合と比べて、ずっと小さい）
     let (mut warped, mut plain, mut n) = (0.0f64, 0.0f64, 0.0f64);

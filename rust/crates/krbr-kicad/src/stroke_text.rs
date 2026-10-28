@@ -132,11 +132,7 @@ pub fn stroke_text_only_board(text: &str) -> Result<String, String> {
                 out.items.push(l);
             }
             "footprint" | "module" => out.items.push(filter_footprint(it)),
-            "gr_text" | "gr_text_box" | "dimension" | "table" | "target" | "barcode" => {
-                if plotted_by_kicad_cli(it) {
-                    out.items.push(it.clone());
-                }
-            }
+            "gr_text" | "gr_text_box" | "dimension" | "table" | "target" | "barcode" if plotted_by_kicad_cli(it) => out.items.push(it.clone()),
             _ => {}
         }
     }

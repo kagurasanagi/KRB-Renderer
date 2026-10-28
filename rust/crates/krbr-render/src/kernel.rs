@@ -118,7 +118,9 @@ const MIN_FOCUS_IN_FOCAL_LENGTHS: f32 = 1.25;
 /// 光線を数千本追うので、レンズ・F 値・フィルムの位置・画角が同じなら覚えた値を使う（fill_lens はフレームごとに呼ばれる）
 fn film_constants_cached(file: &str, f_number: f32, sys: &LensSystem, film_dist: f32, tan_half: f32) -> (f32, Option<f32>) {
     type Key = (String, u32, u32, u32);
-    static LAST: Mutex<Option<(Key, (f32, Option<f32>))>> = Mutex::new(None);
+    /// (中央の明るさ, フィルムの高さ)
+    type Film = (f32, Option<f32>);
+    static LAST: Mutex<Option<(Key, Film)>> = Mutex::new(None);
     let key: Key = (file.to_string(), f_number.to_bits(), film_dist.to_bits(), tan_half.to_bits());
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((k, v)) = last.as_ref() {
@@ -230,8 +232,8 @@ pub fn fill_lens(u: &mut FrameUbo, fp: &FrameParams) {
         let zs = sys.vertex_z();
         // 面の数は lens_system_for が MAX_LENS_SURFACES 以下に限っている（切り詰めると光学系が食い違うので、そうしない）
         let n = sys.surfaces.len();
-        for i in 0..n {
-            u.lens_surfaces[i] = Vec4::new(sys.surfaces[i].radius, zs[i], sys.surfaces[i].ior, 0.5 * sys.surfaces[i].aperture);
+        for ((dst, s), &z) in u.lens_surfaces.iter_mut().zip(&sys.surfaces).zip(&zs) {
+            *dst = Vec4::new(s.radius, z, s.ior, 0.5 * s.aperture);
         }
         u.lens3.z = 1.0 / center_weight.max(1e-12);
         u.lens3.w = n as f32;

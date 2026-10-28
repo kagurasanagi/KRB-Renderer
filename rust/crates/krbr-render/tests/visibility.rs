@@ -20,7 +20,7 @@ fn scene(with_smd: bool, with_tht: bool) -> Scene {
     let mut block = Mesh::default();
     add_box(&mut block, Vec3::new(5.0, 0.0, -15.0), Vec3::new(35.0, 25.0, 15.0), 2);
     let mut s = Scene { materials, ..Default::default() };
-    let mut add = |mesh: Mesh, class: u8, s: &mut Scene| {
+    let add = |mesh: Mesh, class: u8, s: &mut Scene| {
         s.meshes.push(SceneMesh { name: "m".into(), mesh });
         let owner = if class == visibility::BOARD { InstanceOwner::Board } else { InstanceOwner::Placeholder { footprint: 0 } };
         s.instances.push(Instance { mesh: s.meshes.len() as u32 - 1, xform: Mat4::IDENTITY, material_base: 0, owner });

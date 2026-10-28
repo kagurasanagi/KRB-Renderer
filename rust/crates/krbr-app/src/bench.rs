@@ -125,7 +125,7 @@ pub fn cmd_bench(b: &BenchOptions) -> anyhow::Result<()> {
     println!();
     println!("{} ({}, driver {})", ctx.info.name, method, driver);
     println!("{}: {}x{}, {} spp per case, max depth {}", board_name, b.width, b.height, b.spp, cfg.max_depth);
-    println!("{:<12} {:>12} {:>10}   {}", "case", "spp/s", "seconds", "vs. previous GPU");
+    println!("{:<12} {:>12} {:>10}   vs. previous GPU", "case", "spp/s", "seconds");
     for (name, ms, secs) in &results {
         // 同じ基板・同じ条件で、別の GPU の最後の記録
         let prev = previous.iter().rev().find(|r| r.board_hash == board_hash && r.conditions == conditions && r.case == *name && r.gpu != ctx.info.name);

@@ -101,7 +101,7 @@ fn build_dimple(d: &ReliefDimple, h_rim: f64, depth: f64, side: Side, center: Ve
     let slope = |r: f64| depth * 0.5 * PI / r_max * (PI * r / r_max).sin();
     let mut rings: Vec<Vec<u32>> = vec![Vec::new(); DIMPLE_RINGS + 1];
     let c = out.add_vertex(board_to_world(d.pos, sign * height(0.0), center), Vec3::new(0.0, sign as f32, 0.0));
-    for k in 1..=DIMPLE_RINGS {
+    for (k, ring) in rings.iter_mut().enumerate().skip(1) {
         let r = r_max * k as f64 / DIMPLE_RINGS as f64;
         let dh = slope(r);
         for i in 0..DIMPLE_SEGMENTS {
@@ -110,7 +110,7 @@ fn build_dimple(d: &ReliefDimple, h_rim: f64, depth: f64, side: Side, center: Ve
             let p = d.pos + r * radial;
             let mut n = Vec3::new((-dh * radial.x) as f32, 1.0, (-dh * radial.y) as f32).normalize();
             n.y *= sign as f32;
-            rings[k].push(out.add_vertex(board_to_world(p, sign * height(r), center), n));
+            ring.push(out.add_vertex(board_to_world(p, sign * height(r), center), n));
         }
     }
     let tri = |a: u32, b: u32, cc: u32, out: &mut Mesh| {

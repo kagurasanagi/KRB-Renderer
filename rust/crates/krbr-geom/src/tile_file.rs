@@ -305,7 +305,7 @@ pub fn prune(dir: &Path, keep: usize) {
         .filter(|p| p.extension().is_some_and(|x| x == "krbt"))
         .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
         .collect();
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|f| std::cmp::Reverse(f.0));
     for (_, p) in files.into_iter().skip(keep) {
         let _ = std::fs::remove_file(p);
     }
@@ -332,11 +332,12 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let mut m = Mesh::default();
-        m.positions = vec![Vec3::new(1.0, 2.0, 3.0), Vec3::new(-0.5, 2.0, 7.0), Vec3::new(0.25, -0.0, 1.0)];
-        m.normals = vec![Vec3::Y, Vec3::new(0.6, 0.0, -0.8), Vec3::new(0.1, -0.2, 0.3)];
-        m.indices = vec![0, 1, 2];
-        m.tri_material = vec![4];
+        let mut m = Mesh {
+            positions: vec![Vec3::new(1.0, 2.0, 3.0), Vec3::new(-0.5, 2.0, 7.0), Vec3::new(0.25, -0.0, 1.0)],
+            normals: vec![Vec3::Y, Vec3::new(0.6, 0.0, -0.8), Vec3::new(0.1, -0.2, 0.3)],
+            indices: vec![0, 1, 2],
+            tri_material: vec![4],
+        };
         let mut copper = vec![0u8; 300];
         copper.extend((0..200).map(|i| (i % 7) as u8));
         copper.extend(vec![255u8; 400]);

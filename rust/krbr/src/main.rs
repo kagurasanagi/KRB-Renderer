@@ -1,7 +1,7 @@
 //! krbr（Rust 版）のコマンドライン。サブコマンドの解析だけをして、処理は krbr-app に任せる
 //! （render / view / watch / material / bench など。`krbr <基板>.kicad_pcb` は view）
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 use krbr_app::prepare::{load_board_or_report, model_resolver};
@@ -35,11 +35,11 @@ enum Command {
         models: bool,
     },
     /// render offscreen to PNG (tone mapped) and EXR (linear)
-    Render(RenderArgs),
+    Render(Box<RenderArgs>),
     /// real-time viewer window (default command when the first argument is a .kicad_pcb)
-    View(ViewArgs),
+    View(Box<ViewArgs>),
     /// headless: re-render whenever the board is saved (no window)
-    Watch(WatchArgs),
+    Watch(Box<WatchArgs>),
     /// list Vulkan devices and check ray tracing support
     Probe,
     /// material assignment (OpenPBR materials, per model / per reference)
@@ -462,7 +462,7 @@ fn cmd_diff(a: &PathBuf, b: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_geom(pcb: &PathBuf, dump: Option<&std::path::Path>) -> anyhow::Result<()> {
+fn cmd_geom(pcb: &Path, dump: Option<&std::path::Path>) -> anyhow::Result<()> {
     use krbr_geom::{build_board_geometry, tiles::build_relief_tiles, BoardBuildOptions, LayerArtOptions, ReliefParams, ReliefTileCache};
     let _all_cores = krbr_core::platform::AllCores::new(); // 読み込みと同じ並列の数で測る
     let board = load_board(pcb)?;
@@ -499,13 +499,13 @@ fn cmd_geom(pcb: &PathBuf, dump: Option<&std::path::Path>) -> anyhow::Result<()>
 }
 
 /// 基板を読み（要約をログに出す）、3D モデルのパスの解決を用意する（基板の設定ファイルの [paths] も使う。render と同じ）
-fn board_and_resolver(pcb: &PathBuf) -> anyhow::Result<(Board, krbr_kicad::ModelResolver)> {
+fn board_and_resolver(pcb: &Path) -> anyhow::Result<(Board, krbr_kicad::ModelResolver)> {
     let board = load_board_or_report(pcb).ok_or_else(|| anyhow::anyhow!("cannot load {}", pcb.display()))?;
     let resolver = model_resolver(&board, &load_project_config(&board.file));
     Ok((board, resolver))
 }
 
-fn cmd_models(pcb: &PathBuf, no_cache: bool) -> anyhow::Result<()> {
+fn cmd_models(pcb: &Path, no_cache: bool) -> anyhow::Result<()> {
     use krbr_model::{library::step_support, MeshParams, ModelLibrary};
     let (board, resolver) = board_and_resolver(pcb)?;
     match step_support() {
@@ -543,7 +543,7 @@ fn cmd_models(pcb: &PathBuf, no_cache: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_info(pcb: &PathBuf, models: bool) -> anyhow::Result<()> {
+fn cmd_info(pcb: &Path, models: bool) -> anyhow::Result<()> {
     let (board, resolver) = board_and_resolver(pcb)?;
     info!(
         "stackup: thickness {:.3} mm, finish '{}', mask '{}'",

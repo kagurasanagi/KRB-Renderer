@@ -26,7 +26,7 @@ impl EnvDistribution {
 
 /// 分布は最大 max_width まで縮小して作る（放射輝度の参照は元の解像度のまま）
 pub fn build_env_distribution(img: &ImageF, max_width: u32) -> EnvDistribution {
-    let f = ((img.width + max_width - 1) / max_width).max(1);
+    let f = img.width.div_ceil(max_width).max(1);
     let w = (img.width / f).max(1);
     let h = (img.height / f).max(1);
     let mut func = vec![0.0f64; (w * h) as usize];
@@ -70,8 +70,8 @@ pub fn build_env_distribution(img: &ImageF, max_width: u32) -> EnvDistribution {
         tmp[j + 1] = acc;
     }
     d.integral = acc;
-    for j in 0..=h as usize {
-        d.marginal_cdf[j] = if acc > 0.0 { (tmp[j] / acc) as f32 } else { j as f32 / h as f32 };
+    for (j, (c, &t)) in d.marginal_cdf.iter_mut().zip(&tmp).enumerate() {
+        *c = if acc > 0.0 { (t / acc) as f32 } else { j as f32 / h as f32 };
     }
     d.marginal_cdf[h as usize] = 1.0;
     d.pdf = func.iter().map(|&v| if acc > 0.0 { (v / acc) as f32 } else { 1.0 }).collect();
@@ -89,7 +89,7 @@ mod tests {
         assert_eq!((d.width, d.height), (8, 4));
         assert!((d.marginal_cdf[4] - 1.0).abs() < 1e-6);
         // 中央の行（赤道）の方が極より密度が高い
-        assert!(d.pdf[(1 * 8) as usize] > d.pdf[0]);
+        assert!(d.pdf[8] > d.pdf[0]);
         let mean: f32 = d.pdf.iter().sum::<f32>() / d.pdf.len() as f32;
         assert!((mean - 1.0).abs() < 1e-4);
         // 一様な明るさ 1 の平均輝度は 1（sinθ を画素の中心で取るので離散化の誤差がある。4 行では約 2.6%）

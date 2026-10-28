@@ -211,7 +211,7 @@ mod tests {
         let (w, h) = (96u32, 54u32);
         let cam = orbit_camera(Vec3::ZERO, 130.0, 30.0, 10.0, 30.0, w as f32 / h as f32);
         let lens = LensParams { model: LensModel::Realistic, f_number: 8.0, ..Default::default() };
-        let fc = FlowCamera::new(cam.clone(), &lens);
+        let fc = FlowCamera::new(cam, &lens);
         assert!(fc.lens.is_some());
         let m = fc.lens.as_ref().unwrap();
         let mut worst = 0.0f32;

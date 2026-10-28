@@ -62,7 +62,7 @@ pub fn xyz_to_linear_srgb() -> Mat3 {
     static M: OnceLock<Mat3> = OnceLock::new();
     *M.get_or_init(|| {
         // 行で書いた行列（glam は列優先なので転置して作る）
-        let xyz_d65_to_srgb = Mat3::from_cols_array(&[3.2404542, -1.5371385, -0.4985314, -0.9692660, 1.8760108, 0.0415560, 0.0556434, -0.2040259, 1.0572252]).transpose();
+        let xyz_d65_to_srgb = Mat3::from_cols_array(&[3.2404542, -1.5371385, -0.4985314, -0.969266, 1.8760108, 0.0415560, 0.0556434, -0.2040259, 1.0572252]).transpose();
         let bradford = Mat3::from_cols_array(&[0.8951, 0.2664, -0.1614, -0.7502, 1.7135, 0.0367, 0.0389, -0.0685, 1.0296]).transpose();
         let src_w = bradford * white_e();
         let dst_w = bradford * Vec3::new(0.95047, 1.0, 1.08883);
@@ -199,7 +199,7 @@ impl Fitter {
     }
     /// Gauss–Newton（数値微分のヤコビアン）。残差が減るまで歩幅を半分にする
     fn fit(&self, c: &mut DVec3, rgb: DVec3) {
-        let target_lab = xyz_to_lab(DMat3::from(linear_srgb_to_xyz().as_dmat3()) * rgb);
+        let target_lab = xyz_to_lab(linear_srgb_to_xyz().as_dmat3() * rgb);
         let mut r = self.residual(*c, target_lab);
         for _ in 0..40 {
             if r.length() < 1e-4 {

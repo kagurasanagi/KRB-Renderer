@@ -545,7 +545,7 @@ pub fn cmd_render(o: &RenderOptions) -> anyhow::Result<()> {
         }
     };
     let png = out_dir.join(format!("{stem}.png"));
-    report(image_io::save_png_tonemapped(&png, &result.color, cfg.exposure_ev, &glow_params(&cfg)), &png);
+    report(image_io::save_png_tonemapped(&png, &result.color, cfg.exposure_ev, &glow_params(cfg)), &png);
     let exr = out_dir.join(format!("{stem}.exr"));
     report(image_io::save_exr(&exr, &result.color), &exr);
     let alb = out_dir.join(format!("{stem}_albedo.exr"));
@@ -554,7 +554,7 @@ pub fn cmd_render(o: &RenderOptions) -> anyhow::Result<()> {
     report(image_io::save_exr(&nrm, &result.normal), &nrm);
     if let Some(d) = &result.denoised {
         let png = out_dir.join(format!("{stem}_denoised.png"));
-        report(image_io::save_png_tonemapped(&png, d, cfg.exposure_ev, &glow_params(&cfg)), &png);
+        report(image_io::save_png_tonemapped(&png, d, cfg.exposure_ev, &glow_params(cfg)), &png);
         let exr = out_dir.join(format!("{stem}_denoised.exr"));
         report(image_io::save_exr(&exr, d), &exr);
     }

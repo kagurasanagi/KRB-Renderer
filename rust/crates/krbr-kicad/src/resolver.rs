@@ -263,7 +263,7 @@ mod tests {
         assert!(!missing.found);
         assert!(missing.reason.contains("NOPE_UNDEFINED"));
         // 相対パスはプロジェクトのフォルダから。検索フォルダは "Lib/name" でも探す。拡張子が同じなら差し替えではない
-        let r2 = ModelResolver::new(&std::env::temp_dir(), &BTreeMap::new(), &[dir.clone()]);
+        let r2 = ModelResolver::new(&std::env::temp_dir(), &BTreeMap::new(), std::slice::from_ref(&dir));
         let m2 = r2.resolve("elsewhere/Lib.3dshapes/part.step");
         assert!(m2.found && !m2.substituted);
         // 検索フォルダに .wrl と .step が並んでいても、.wrl の指定には読める .step を返す

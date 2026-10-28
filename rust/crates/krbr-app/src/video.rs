@@ -33,7 +33,7 @@ pub struct VideoWriter {
 impl VideoWriter {
     /// ファイルを作って書き始める（エンコーダーを用意できなければ Err）
     pub fn start(f: &VideoFormat) -> Result<Self, String> {
-        if f.width < 2 || f.height < 2 || f.width % 2 != 0 || f.height % 2 != 0 {
+        if f.width < 2 || f.height < 2 || !f.width.is_multiple_of(2) || !f.height.is_multiple_of(2) {
             return Err(format!("the size of a video must be even: {}x{}", f.width, f.height));
         }
         if let Some(dir) = f.path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -273,8 +273,7 @@ mod imp {
             // 時刻は 100 ns 単位
             let duration = 10_000_000i64 / f.fps as i64;
             let mut nv12 = vec![0u8; size];
-            let mut index = 0i64;
-            for rgba in rx.iter() {
+            for (index, rgba) in (0i64..).zip(rx.iter()) {
                 rgba_to_nv12(&rgba, w, h, &mut nv12);
                 let buf = MFCreateMemoryBuffer(size as u32).map_err(e("buffer"))?;
                 let mut ptr: *mut u8 = std::ptr::null_mut();
@@ -287,7 +286,6 @@ mod imp {
                 sample.SetSampleTime(index * duration).map_err(e("time"))?;
                 sample.SetSampleDuration(duration).map_err(e("duration"))?;
                 writer.WriteSample(stream, &sample).map_err(e("write a frame"))?;
-                index += 1;
             }
             writer.Finalize().map_err(e("finish the video file"))?;
             Ok(file_size(&f.path))

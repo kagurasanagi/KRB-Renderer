@@ -1,6 +1,6 @@
 //! ヘッドレスの保存監視（`krbr watch`、C++ 版 app/watch）。ウィンドウは開かず、保存のたびに描き直して PNG を書き出す
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use ash::vk;
@@ -203,7 +203,7 @@ struct Renderer<'a> {
 
 impl<'a> Renderer<'a> {
     /// 戻り値：(描画と読み戻しの ms, 書き出しの ms, そのうちノイズ除去の ms)
-    fn render_and_write(&mut self, gpu: &GpuScene<'_>, out: &PathBuf) -> anyhow::Result<(f64, f64, f64)> {
+    fn render_and_write(&mut self, gpu: &GpuScene<'_>, out: &Path) -> anyhow::Result<(f64, f64, f64)> {
         let t0 = Instant::now();
         // 形状を作り直すと積分器の参照先も変わるので、更新のたびに作る（C++ 版の rebuildIntegrator と同じ）
         let mut prog = progressive_or_pt(self.ctx, gpu, self.integrator, self.width, self.height, self.frame.clone()).map_err(|e| anyhow::anyhow!(e))?;

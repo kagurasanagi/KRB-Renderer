@@ -341,6 +341,7 @@ fn all_rings(rings: &[Ring]) -> Vec<&Vec<Vec2>> {
 }
 
 /// region を押し出す：y_face の高さに面（face_up で向き）、y_face〜y_base に側壁を作る（高さ 0 なら面だけ）
+#[allow(clippy::too_many_arguments)]
 pub fn extrude_region(region: &Paths, y_face: f64, y_base: f64, face_up: bool, face_mat: u32, wall_mat: u32, center: Vec2, mesh: &mut Mesh) {
     if region.is_empty() {
         return;
@@ -495,8 +496,8 @@ mod tests {
         assert!(!geo.outline_from_fallback);
         assert!(geo.mesh.triangle_count() > 20);
         // 穴の内壁はメッキ、外形の側面は基材
-        assert!(geo.mesh.tri_material.iter().any(|&m| m == BoardMat::Plated as u32));
-        assert!(geo.mesh.tri_material.iter().any(|&m| m == BoardMat::Edge as u32));
+        assert!(geo.mesh.tri_material.contains(&(BoardMat::Plated as u32)));
+        assert!(geo.mesh.tri_material.contains(&(BoardMat::Edge as u32)));
         // ワールド座標の中心は原点
         let b = geo.mesh.bounds();
         assert!((b.lo.x + 10.0).abs() < 1e-4 && (b.hi.x - 10.0).abs() < 1e-4);
