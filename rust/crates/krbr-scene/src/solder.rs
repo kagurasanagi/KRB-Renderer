@@ -26,6 +26,9 @@ const STENCIL_MM: f64 = 0.12;
 const PASTE_METAL: f64 = 0.5;
 /// 表面実装のフィレットが登るのは、リードの高さのこの割合まで
 const MAX_WETTING: f64 = 0.8;
+/// 表面実装のフィレットの傾き（高さ / 接地部からパッドの縁までの幅）の上限。チップ部品の横のように、
+/// 電極の際にパッドが少ししか残らないところで、はんだが壁のように立たないようにする
+const SMD_SLOPE: f64 = 1.0;
 /// スルーホールのフィレットの傾き（高さ / ランドの幅）：はんだ面、部品面（部品面へは穴を通って少しだけ上がる）
 const THT_SLOPE_SOLDER_SIDE: f64 = 0.9;
 const THT_SLOPE_COMPONENT_SIDE: f64 = 0.4;
@@ -368,28 +371,28 @@ fn pad_fillet(pad: &Pad, side: Side, kind: Kind, tris: &[[DVec3; 3]], pad_top: f
     walls.sort_by(f64::total_cmp);
     let lead = walls.get(((walls.len() as f64 * 0.95) as usize).min(walls.len().saturating_sub(1))).copied().unwrap_or(DEFAULT_WALL);
 
-    // 倍率を掛ける前の高さ（接地部の際の高さ h0 と形）
-    let shape: Vec<(f64, bool)> = (0..n)
+    // 倍率を掛ける前の形：接地部の際の高さ h0、倍率を掛けた後の h0 の上限（傾きの上限から）、凹んだ形の割合 (1 − s)²、接地部か
+    let shape: Vec<(f64, f64, f64, bool)> = (0..n)
         .map(|k| {
             if !inside[k] {
-                return (0.0, false);
+                return (0.0, 0.0, 0.0, false);
             }
-            let Some(q) = near_contact[k] else { return (0.0, false) };
+            let Some(q) = near_contact[k] else { return (0.0, 0.0, 0.0, false) };
             // 接地部までの距離は格子の点から測るので、半分の間隔を引いて境目からの距離にする
             let d = (dist(k, Some(q)) - 0.5 * cell).max(0.0);
             let e = edge[k];
-            let h0 = match kind {
-                Kind::Smd => lead,
+            let (h0, cap) = match kind {
+                Kind::Smd => (lead, SMD_SLOPE * (d + e)),
                 Kind::Tht { solder_side } => {
                     let slope = if solder_side { THT_SLOPE_SOLDER_SIDE } else { THT_SLOPE_COMPONENT_SIDE };
-                    lead.min(slope * (d + e)).min(MAX_THT_HEIGHT)
+                    (lead.min(slope * (d + e)).min(MAX_THT_HEIGHT), f64::INFINITY)
                 }
             };
             if contact[k] {
-                (h0, true)
+                (h0, cap, 1.0, true)
             } else {
                 let s = if d + e > 0.0 { d / (d + e) } else { 1.0 };
-                (h0 * (1.0 - s) * (1.0 - s), false)
+                (h0, cap, (1.0 - s) * (1.0 - s), false)
             }
         })
         .collect();
@@ -403,14 +406,21 @@ fn pad_fillet(pad: &Pad, side: Side, kind: Kind, tris: &[[DVec3; 3]], pad_top: f
             h.min(above[k] - CLEARANCE).max(0.0)
         }
     };
-    let heights = |scale: f64| -> Vec<f64> { (0..n).map(|k| clamp(k, scale * shape[k].0)).collect() };
+    let heights = |scale: f64| -> Vec<f64> {
+        (0..n)
+            .map(|k| {
+                let (h0, cap, profile, _) = shape[k];
+                clamp(k, (scale * h0).min(cap) * profile)
+            })
+            .collect()
+    };
     let scale = match kind {
         Kind::Tht { .. } => 1.0,
         Kind::Smd => {
             // はんだの体積（接地部の外）が、ペーストから残る体積に合う倍率（二分法）
             let cell_area = cell * cell;
             let target = inside.iter().filter(|&&b| b).count() as f64 * cell_area * STENCIL_MM * PASTE_METAL;
-            let volume = |scale: f64| heights(scale).iter().zip(&shape).filter(|(_, (_, c))| !c).map(|(h, _)| h * cell_area).sum::<f64>();
+            let volume = |scale: f64| heights(scale).iter().zip(&shape).filter(|(_, sh)| !sh.3).map(|(h, _)| h * cell_area).sum::<f64>();
             if volume(MAX_WETTING) <= target {
                 MAX_WETTING
             } else {
@@ -578,7 +588,8 @@ mod tests {
         // 電極の外側（つま先）：電極の際で高く、パッドの縁へ下がる
         let at = |x: f32| m.positions.iter().filter(|p| (p.x - x).abs() < 0.02 && p.z.abs() < 0.1).map(|p| p.y - PAD_TOP as f32).fold(0.0f32, f32::max);
         assert!(at(0.85) > at(1.0) && at(1.0) > at(1.15), "{} {} {}", at(0.85), at(1.0), at(1.15));
-        // 上から見た体積（つま先と横の盛り。電極の下を除く）は、ペーストから残る体積に近い：0.8 × 0.95 × 0.12 × 0.5 = 0.0456 mm³（パッドごと）
+        // 上から見た体積（つま先と横の盛り。電極の下を除く）は、ペーストから残る体積 0.8 × 0.95 × 0.12 × 0.5 = 0.0456 mm³（パッドごと）を
+        // 超えず、大きくは下回らない（この形ではつま先が MAX_WETTING の高さに届き、横は傾きの上限で低いので、少し少ない）
         let mut vol = 0.0f64;
         for t in m.mesh_tris() {
             let [a, b, c] = t;
@@ -589,13 +600,26 @@ mod tests {
                 vol += area * hmean;
             }
         }
-        assert!((vol / 2.0 - 0.0456).abs() < 0.008, "volume per pad {vol}");
+        let per_pad = vol / 2.0;
+        assert!(per_pad < 0.0456 + 0.004 && per_pad > 0.0456 * 0.7, "volume per pad {per_pad}");
         // 法線は上向き（表）
         assert!(m.normals.iter().all(|n| n.y > 0.0));
         // 三角形は外向き（上から見て、法線と同じ向き）
         for [a, b, c] in m.mesh_tris() {
             assert!((b - a).cross(c - a).y >= 0.0);
         }
+    }
+
+    #[test]
+    fn a_narrow_strip_beside_the_terminal_gets_a_low_fillet_not_a_wall() {
+        // 電極の幅 0.8 mm に対してパッドの幅 0.95 mm：横に残るパッドは片側 0.075 mm
+        let (board, tris) = chip_board(true);
+        let m = footprint_fillets(&board, 0, &tris, PAD_TOP, DVec2::ZERO, 0);
+        let side = m.positions.iter().filter(|p| p.x.abs() > 0.55 && p.x.abs() < 0.75 && p.z.abs() > 0.4).map(|p| p.y - PAD_TOP as f32).fold(0.0f32, f32::max);
+        assert!(side <= (SMD_SLOPE * 0.075) as f32 + 0.01, "beside the terminal {side}");
+        // つま先（0.4 mm 残る）は高く盛る
+        let toe = m.positions.iter().filter(|p| p.x.abs() > 0.8 && p.z.abs() < 0.3).map(|p| p.y - PAD_TOP as f32).fold(0.0f32, f32::max);
+        assert!(toe > 0.2, "toe {toe}");
     }
 
     #[test]
