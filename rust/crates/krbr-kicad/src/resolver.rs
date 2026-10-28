@@ -209,16 +209,19 @@ impl ModelResolver {
 
 /// STEP の拡張子（大文字のファイル名もあるので両方）
 const STEP_EXTS: [&str; 4] = ["step", "stp", "STEP", "STP"];
+/// VRML の拡張子（.wrz は gzip で圧縮したもの）
+const VRML_EXTS: [&str; 4] = ["wrl", "wrz", "WRL", "WRZ"];
 
-/// p を探すときの候補の順。VRML（.wrl / .wrz）は読み込み器が無いので、同名の STEP を先に試す。
-/// それ以外は指定どおりのファイルを先に、無ければ同名の STEP を試す
+/// p を探すときの候補の順。VRML（.wrl / .wrz）の指定は、形と部位の名前が正確な同名の STEP を先に試し、無ければ VRML。
+/// それ以外は指定どおりのファイルを先に、無ければ同名の STEP、それも無ければ同名の VRML（VRML しか無いモデル）
 fn candidates(p: &Path) -> Vec<PathBuf> {
     let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     let steps = STEP_EXTS.iter().map(|e| p.with_extension(e));
+    let vrmls = VRML_EXTS.iter().map(|e| p.with_extension(e)).filter(|c| c != p);
     if ext == "wrl" || ext == "wrz" {
-        steps.chain(std::iter::once(p.to_path_buf())).collect()
+        steps.chain(std::iter::once(p.to_path_buf())).chain(vrmls).collect()
     } else {
-        std::iter::once(p.to_path_buf()).chain(steps).collect()
+        std::iter::once(p.to_path_buf()).chain(steps).chain(vrmls).collect()
     }
 }
 
@@ -267,6 +270,15 @@ mod tests {
         std::fs::write(lib.join("part.wrl"), "x").unwrap();
         let m3 = r2.resolve("elsewhere/Lib.3dshapes/part.wrl");
         assert!(m3.found && m3.substituted && m3.path.extension().unwrap() == "step", "{:?}", m3.path);
+        // STEP が無ければ VRML：.wrl の指定はそのまま、.step の指定は同名の .wrl、.wrl の指定で .wrz しか無ければ .wrz
+        std::fs::write(lib.join("only_vrml.wrl"), "x").unwrap();
+        std::fs::write(lib.join("only_wrz.wrz"), "x").unwrap();
+        let v = r2.resolve("elsewhere/Lib.3dshapes/only_vrml.wrl");
+        assert!(v.found && !v.substituted && v.path == lib.join("only_vrml.wrl"), "{:?}", v.path);
+        let v = r2.resolve("elsewhere/Lib.3dshapes/only_vrml.step");
+        assert!(v.found && v.substituted && v.path == lib.join("only_vrml.wrl"), "{:?}", v.path);
+        let v = r2.resolve("elsewhere/Lib.3dshapes/only_wrz.wrl");
+        assert!(v.found && v.substituted && v.path == lib.join("only_wrz.wrz"), "{:?}", v.path);
     }
 
     #[test]

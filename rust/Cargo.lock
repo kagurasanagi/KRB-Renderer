@@ -2304,6 +2304,7 @@ dependencies = [
 name = "krbr-model"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "glam",
  "krbr-core",
  "libloading",

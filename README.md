@@ -97,7 +97,7 @@ KiCad を使わずに開くときは、`.kicad_pcb` を `KRB-Renderer.exe` か�
 
 ## 困ったとき
 
-- **部品が箱のまま**：3D モデル（STEP）が見つかりません。KiCad の 3D モデルのライブラリを入れてください（開いた直後は、読み込みが終わるまで箱で出ます）。
+- **部品が箱のまま**：3D モデル（STEP / VRML）が見つかりません。KiCad の 3D モデルのライブラリを入れてください（開いた直後は、読み込みが終わるまで箱で出ます）。
 - **文字や QR コードが出ない**：KiCad 付属の `kicad-cli` が見つかりません。KiCad を標準の場所に入れてください。
 - **操作が重い**：`P` で一時停止すると軽くなります。
 - **メニューが出ない**：[WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) を入れてください。

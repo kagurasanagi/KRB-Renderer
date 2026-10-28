@@ -37,6 +37,7 @@ STEP 変換器 DLL と OIDN が無くても krbr.exe は動きます（STEP の�
 | exr, image | EXR/HDR の入出力、PNG 出力 |
 | toml, serde_json, clap, glam, xxhash-rust | 設定・レポート・コマンドライン・数学・キャッシュのキー |
 | libloading | STEP 変換器 DLL と OIDN を実行時に読む |
+| flate2 | VRML の `.wrz`（gzip）の展開（`png` も使っているので、同じ版が 1 つ入る） |
 | Intel Open Image Denoise 2.5.1 | ノイズ除去。公式のビルド済みバイナリ（Apache-2.0）を `third_party/oidn` に置く（`scripts/get_oidn.ps1`、git には含めない）。実行時に読む |
 | OpenCASCADE 8.0（TKDESTEP / TKXCAF / TKMesh / TKRWMesh） | STEP の読み込みと三角形分割（面の色つき）。**変換器 DLL `krbr_step.dll` の中だけで使い**、本体はリンクしない（下記） |
 
@@ -83,12 +84,15 @@ cargo test --release -p krbr-app --test material -- --ignored --nocapture    # �
 cargo test --release -p krbr-app --test denoise -- --ignored --nocapture     # ノイズ除去（GPU と OIDN の DLL が要る）
 cargo test -p krbr-app --lib kicad_cli -- --ignored --nocapture             # 線フォントの文字の書き出し（kicad-cli が要る）
 cargo test --release -p krbr-app --lib preview -- --ignored --nocapture      # 材質の見本を out/material_swatches.png に描く（目で確かめる）
+cargo test --release -p krbr-model --test vrml_vs_step -- --ignored --nocapture # VRML と同名の STEP の比べ合わせ（下記）
 cargo run --release -- material bake-swatches                                # 組み込みの材質の見本を焼き直す（下記）
 ```
 
 組み込みの材質（`builtin_materials.toml`）・`Material` の項目・見本の描き方（`preview.rs`）を変えたら、`krbr material bake-swatches` で見本を焼き直します（RGB と分光の 106 枚を 16384 サンプル・OIDN で描いて `rust/crates/krbr-app/swatches/` に書き、使われなくなった画像を消す。RTX 3080 Ti で約 4 分。`--spp` で変えられる）。焼き直していないと `cargo test` の `baked_swatches_cover_the_builtin_materials` が失敗します（ビューアは、焼き付けが無い材質をその場で描くので動く）。
 
 krbr-app のテスト（watch / material / denoise）が使う基板は、既定では `<リポジトリ>\kicad\mini_dsp_radio.kicad_pcb`（git に入れていない）で、環境変数 `KRBR_TEST_PCB` で差し替えられます。部品番号や座標は基板の中から選びます（KiCad 標準の色を持つ IC、`C_0603_1608Metric` のコンデンサ）。基板は読むだけで、書き換えるテストは一時フォルダのコピーを使います。
+
+`vrml_vs_step` は、KiCad 8 の 3D ライブラリ（kicad-packages3D の 8.0.0。KiCad 9 以降は .wrl を配っていない）から取ってきた .wrl のフォルダを環境変数 `KRBR_TEST_VRML_DIR` で渡し、インストールした KiCad の同名の STEP と、外接箱（単位と向き）と KiCad の色の名前がそろうことを確かめます（STEP 変換器 DLL も要る）。
 
 GPU・KiCad の 3D モデル・OIDN が要るテストは `#[ignore]` にしてあり、`--ignored` を付けたときだけ走ります。どれもウィンドウを開きません。GPU の検証のうち時間のかかる 2 つ（集光模様の PT 16384 spp の参照、カメラの確認用の画像 32768 spp）は別のテストに分けてあり、名前で外せます。画像は `out/p5_*.png`、`out/p6_*.png`、`out/p7_*.png` に書きます。
 
@@ -136,5 +140,5 @@ GPU の検証（`rust/crates/krbr-render/tests/`。基準の値は以前の C++ 
 | 拡張 | 入り口 |
 |---|---|
 | **積分器の追加** | `krbr-scene` の `config.rs` の `IntegratorKind` に種類と名前を足し（設定ファイル・コマンドライン・ビューアの選択肢はここから作る）、`krbr-render` の `integrator.rs` の `Integrator` を実装して `create_integrator` に足します。計算シェーダと記述子の組は `kernel.rs` の `Kernel` / `scene_bindings` で作れます。シェーダは `krbr-render` の `build.rs` の一覧に足します。 |
-| **モデル形式の追加（VRML など）** | `krbr-model` の `library.rs` の読み込み（今は拡張子で STEP を判定して変換器 DLL を呼ぶ）に形式を足します。キャッシュ（`.krbm`）はそのまま使えます。 |
+| **モデル形式の追加** | `krbr-model` の `library.rs` の `Format`（拡張子で判定）と `load_model`・`loader_key`（キャッシュのキー）に形式を足し、`krbr-kicad` の `resolver.rs` の候補の順に拡張子を足します（VRML の `vrml.rs` が例）。キャッシュ（`.krbm`）はそのまま使えます。 |
 | **材質の対応表の拡充** | `materials/*.toml` の `[material.<名前>]`（材質ライブラリ）と、`model_map.toml` の `[[rule]]`（ファイル名のワイルドカード、HSV の条件）。 |

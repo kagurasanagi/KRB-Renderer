@@ -215,7 +215,7 @@ GTX 1060 での実測（kachkojir_RK3506G2、135 万三角形、PT、深さ 8）
 | `%APPDATA%\krbr\state.toml` | 基板によらない記憶（最近使った環境マップ、ビューアのウィンドウ） |
 | `%APPDATA%\krbr\materials\*.toml` | 名前付きの材質（OpenPBR）。組み込みの材質に、書いた項目だけ重ねる。ビューアの材質エディタで作った材質は `user.toml` に書く |
 | `%APPDATA%\krbr\model_map.toml` | 3D モデルごとの材質（他のプロジェクトと共有）と、色・名前の規則 |
-| `%LOCALAPPDATA%\krbr\cache\meshes\` | STEP の分割結果のキャッシュ（キーはファイル内容の XXH64 ＋分割パラメータ） |
+| `%LOCALAPPDATA%\krbr\cache\meshes\` | 3D モデル（STEP の分割結果、VRML）のキャッシュ（キーはファイル内容の XXH64 ＋読み込み器と分割パラメータ） |
 | `%LOCALAPPDATA%\krbr\cache\silk\` | kicad-cli による線フォントの文字の SVG のキャッシュ |
 | `%LOCALAPPDATA%\krbr\cache\relief\` | 凹凸のタイル（メッシュと距離場）のキャッシュ。基板ごとに 1 つ（数十 MB）、最近の 8 枚分。タイルごとに、その範囲にかかる基板の項目と設定・krbr.exe から作ったキーで引くので、少し直した基板でも変わったタイルだけを作り直す |
 
@@ -313,7 +313,7 @@ bump_strength = 0.015
 bump_scale = 0.1
 ```
 
-3D モデルの部位（STEP の XDE の名前、または面の色）ごとに、次の順で材質を決めます。
+3D モデルの部位（STEP の XDE の名前と面の色、VRML の Material の DEF の名前と diffuseColor）ごとに、次の順で材質を決めます。
 
 1. 部品番号ごとの上書き（基板の設定ファイル `<名前>.krbr` の `[ref.U3]`）
 2. 3D モデルごとの上書き（`<名前>.krbr` の `[[model]]`）
@@ -322,7 +322,7 @@ bump_scale = 0.1
 5. 既定値
 
 - 3D モデルは、展開前のパス（`path`）か、ファイル内容の XXH64（`hash`）のどちらかが一致すれば同じとみなします。ファイルを別の場所に移しても、中身が同じなら設定が効きます。
-- 部位のキーは、XDE の名前、`kicad:<色名>`（KiCad 標準モデルの色。例 `kicad:metal_grey_pins`、`kicad:black_body`）、`#rrggbb`（STEP に書かれた色）です。`"*"` は全部位に一致します。
+- 部位のキーは、XDE の名前、`kicad:<色名>`（KiCad 標準モデルの色。例 `kicad:metal_grey_pins`、`kicad:black_body`）、`#rrggbb`（STEP・VRML に書かれた色）です。KiCad 標準モデルの VRML（KiCad 8 まで）は STEP と同じ色の値なので、同じ `kicad:<色名>` になります。`"*"` は全部位に一致します。
 - 材質はどれも自分の色を持ちます（3D モデルの面の色は使わない）。規則に `model_color = true` と書くと、3D モデルの面の色を部位の色の調整（`+color=`）として付けます。組み込みの規則のうち、汎用の樹脂・つやのある樹脂・セラミック・錫の規則はこれで、ボードを開いたときはモデルどおりの色に見えます。部位に別の材質を割り当てると、その材質の色になります。
 - 組み込みの規則の先頭は、KiCad 標準のアルミ電解コンデンサのモデル用です（ファイル名が `CP_Radial_D*` / `CP_Elec_*`）。金属色の部位（缶と上面）を `aluminum`、ラジアルの帯（`kicad:light_brown_body`、スリーブへの印刷）を `plastic` にします（色で決める規則だけだと、上面が錫、帯がセラミックになるため）。タンタル（`CP_Radial_Tantal_*`）は対象外です。
 - 材質名の後ろに `+smooth` を付けると、表面の模様（凹凸と粗さのむら）を無くした版になります（例 `plastic+smooth`。`krbr material set --material plastic+smooth`、ビューアの部位ごとの「模様」のチェック）。
@@ -421,7 +421,8 @@ bump_scale = 0.1
 
 ## 既知の制限
 
-- 3D モデルは STEP のみ読み込みます。`.wrl` の指定は、同名の `.step` があれば差し替えます。無ければ代替の箱になります。
+- 3D モデルは STEP と VRML 2.0（`.wrl`、gzip で圧縮した `.wrz`）を読みます。`.wrl` の指定は、同名の `.step` があればそちらを使います（形と部位の名前が正確なため）。逆に `.step` の指定でファイルが無く、同名の `.wrl` / `.wrz` だけがあれば VRML を読みます。
+- VRML は、Shape の IndexedFaceSet だけを読みます（Transform・Group・Switch・LOD・DEF / USE は扱う）。基本形状（Box・Sphere・Cylinder・Cone）、線・点、Inline（別ファイルの参照）、テクスチャは読みません。VRML 1.0 は読めません（警告に出て、代替の箱になる）。単位は KiCad と同じく 1 単位 = 0.1 インチ（2.54 mm）です。
 - パッドの `padstack`（層ごとに形が違うパッド）は、表と裏の形を使います。内層は描きません。
 - 線フォント（KiCad 標準のストロークフォント）の文字は `render_cache` を持たないため、kicad-cli の SVG 出力から取り込みます（シルク・銅箔・マスク）。寸法線・表・バーコード（QR コードなど）も同じです。kicad-cli が無ければ、それらは描かれません（警告を出します）。
 - レジストの縁の丸みは法線（見え方）だけで表し、形状は垂直な段差のままです。

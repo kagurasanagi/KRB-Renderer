@@ -1,5 +1,5 @@
-//! 3D モデルの読み込み：メモ → ディスクのキャッシュ（ファイル内容の XXH64 ＋分割パラメータがキー）→ 変換器 DLL。
-//! キャッシュの名前は C++ 版と同じ規則なので、同じキャッシュを共有できる。
+//! 3D モデルの読み込み：メモ → ディスクのキャッシュ（ファイル内容の XXH64 ＋分割パラメータがキー）→ 読み込み器
+//! （STEP は変換器 DLL、VRML は crate::vrml）。STEP のキャッシュの名前は C++ 版と同じ規則なので、同じキャッシュを共有できる。
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::{c_char, c_double, c_int, CString};
@@ -199,8 +199,37 @@ pub struct ModelLibrary {
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
-fn is_step(p: &Path) -> bool {
-    matches!(p.extension().map(|e| e.to_string_lossy().to_lowercase()).as_deref(), Some("step") | Some("stp"))
+/// 3D モデルの形式（拡張子で決める）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Format {
+    Step,
+    /// VRML 2.0（.wrl、gzip で圧縮した .wrz）
+    Vrml,
+}
+
+fn format_of(p: &Path) -> Option<Format> {
+    match p.extension().map(|e| e.to_string_lossy().to_lowercase()).as_deref() {
+        Some("step") | Some("stp") => Some(Format::Step),
+        Some("wrl") | Some("wrz") => Some(Format::Vrml),
+        _ => None,
+    }
+}
+
+/// 読み込む（STEP は変換器 DLL で分割、VRML はそのまま三角形）
+fn load_model(p: &Path, params: MeshParams) -> Result<ModelMesh, String> {
+    match format_of(p) {
+        Some(Format::Step) => tessellate_step(p, params),
+        Some(Format::Vrml) => crate::vrml::load_vrml(p),
+        None => Err("unsupported model format".into()),
+    }
+}
+
+/// キャッシュのキーに入れる、読み込み器と分割パラメータ（STEP は C++ 版と同じ）
+fn loader_key(format: Format, params: MeshParams) -> String {
+    match format {
+        Format::Step => format!("occt-step|{:.6}|{:.6}|v{}", params.linear_deflection, params.angular_deflection, MESH_FILE_VERSION),
+        Format::Vrml => format!("vrml|v{}|v{}", crate::vrml::VRML_LOADER_VERSION, MESH_FILE_VERSION),
+    }
 }
 
 impl ModelLibrary {
@@ -215,7 +244,7 @@ impl ModelLibrary {
 
     /// 読み込んで返す（同じ実行内では、ファイルが変わらない限り同じパスを 1 回だけ読む）
     pub fn get(&self, p: &Path) -> LoadResult {
-        if !is_step(p) {
+        if format_of(p).is_none() {
             // STEP と同じく、先にメモを見る（同じファイルを使う部品が多くても failed は 1 つ）
             let stamp = file_stamp(p);
             let mut st = self.shared.state.lock().unwrap();
@@ -248,7 +277,7 @@ impl ModelLibrary {
 
     /// キャッシュにあればすぐ返す。無ければ裏で分割を始めて pending を返す（保存の監視中に使う）
     pub fn request(&self, p: &Path) -> LoadResult {
-        if !is_step(p) {
+        if format_of(p).is_none() {
             return self.get(p);
         }
         // 待っている間にシーンを作り直しても、ファイル全体を読んでハッシュを計算し直さない
@@ -259,7 +288,7 @@ impl ModelLibrary {
         if let Some(r) = hit {
             return r;
         }
-        // 分割は裏の 1 本のスレッドで順に行う（OCCT の読み込みを並べない）
+        // 読み込みは裏の 1 本のスレッドで順に行う（OCCT の読み込みを並べない）
         let mut st = self.shared.state.lock().unwrap();
         if !st.queued.contains_key(p) {
             st.queued.insert(p.to_path_buf(), file_hash.clone());
@@ -298,10 +327,9 @@ impl ModelLibrary {
         if !self.use_cache || file_hash.is_empty() {
             return (None, None, file_hash, stamp);
         }
-        // キーはファイル内容のハッシュ＋分割パラメータ＋読み込み器（C++ 版と同じ）
-        let params = self.shared.params;
-        let param_key = format!("occt-step|{:.6}|{:.6}|v{}", params.linear_deflection, params.angular_deflection, MESH_FILE_VERSION);
-        let ph = to_hex(xxh64(param_key.as_bytes()));
+        // キーはファイル内容のハッシュ＋分割パラメータ＋読み込み器（STEP は C++ 版と同じ）
+        let Some(format) = format_of(p) else { return (None, None, file_hash, stamp) };
+        let ph = to_hex(xxh64(loader_key(format, self.shared.params).as_bytes()));
         let cache_file = self.cache_dir.join("meshes").join(format!("{file_hash}-{}.krbm", &ph[..8]));
         match read_mesh_file(&cache_file) {
             Ok(m) => {
@@ -345,7 +373,7 @@ fn load_now(shared: &Shared, p: &Path, cache_file: Option<&Path>, file_hash: &st
     let t0 = Instant::now();
     let name = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
     let mut res = LoadResult { file_hash: file_hash.to_string(), ..Default::default() };
-    match tessellate_step(p, shared.params) {
+    match load_model(p, shared.params) {
         Ok(m) => {
             res.seconds = t0.elapsed().as_secs_f64();
             krbr_core::info!("model loaded: {} ({} tris, {:.2} s){}", name, m.mesh.triangle_count(), res.seconds, if cache_file.is_some() { ", cached" } else { "" });
@@ -443,6 +471,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(ptrs.iter().all(|&p| p == ptrs[0]), "{ptrs:?}");
         assert_eq!(lib.stats().cache_hits, 1);
+    }
+
+    /// VRML は変換器 DLL を使わずに読み、STEP と同じくキャッシュに書いて、次はキャッシュから読む
+    #[test]
+    fn vrml_is_loaded_and_cached() {
+        let dir = std::env::temp_dir().join(format!("krbr_rust_library_vrml_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wrl = dir.join("Part.WRL");
+        std::fs::write(&wrl, "#VRML V2.0 utf8
+Shape { geometry IndexedFaceSet { coord Coordinate { point [0 0 0 1 0 0 0 1 0] } coordIndex [0 1 2] } }
+").unwrap();
+        let params = MeshParams::default();
+        let r = ModelLibrary::new(dir.join("cache"), params, true).get(&wrl);
+        assert!(r.mesh.is_some() && !r.from_cache, "{}", r.error);
+        assert_eq!(r.mesh.unwrap().mesh.triangle_count(), 1);
+        // 別の読み込み器のキー（STEP の分割パラメータを変えても、VRML のキャッシュはそのまま使える）
+        let r2 = ModelLibrary::new(dir.join("cache"), MeshParams { linear_deflection: 0.5, ..params }, true).request(&wrl);
+        assert!(r2.from_cache && r2.mesh.is_some() && !r2.pending);
+        assert_ne!(loader_key(Format::Vrml, params), loader_key(Format::Step, params));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,11 +1,12 @@
 //! 3D モデルのメッシュ：`.krbm` ファイル（C++ 版・変換器 DLL と同じ形式）、部位（名前と色）、
-//! ファイル内容のハッシュをキーにしたキャッシュ、STEP 変換器 DLL（step\krbr_step.dll）の呼び出し。
+//! ファイル内容のハッシュをキーにしたキャッシュ、STEP 変換器 DLL（step\krbr_step.dll）の呼び出し、VRML（.wrl / .wrz）の読み込み。
 //! sRGB とリニアの変換（color）も、krbr-scene と共有するためここに置く。
 
 pub mod color;
 pub mod library;
 pub mod mesh_file;
 pub mod part;
+pub mod vrml;
 
 pub use library::{LoadResult, MeshParams, ModelLibrary};
 pub use mesh_file::{read_mesh_file, write_mesh_file, MESH_FILE_VERSION};
