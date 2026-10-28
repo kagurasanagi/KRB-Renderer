@@ -8,8 +8,10 @@
 //! - 接地部までの距離 d と、パッドの縁までの距離 e
 //!
 //! はんだの高さは h = h0 · (1 − s)²、s = d / (d + e)：接地部の際で h0、パッドの縁で 0 になる凹んだ形（濡れ広がったはんだ）。
+//! 表面実装の e は、接地部から外へ向かう向きで測ったパッドの縁までの距離（つま先は電極の幅いっぱいに同じ高さで盛る）。
 //! h0 は、表面実装ではリードの高さに比例させ、はんだの体積（パッドの面積 × メタルマスクの厚み × 溶けた後に残る割合）に
-//! 合うように決める（リードの高さの MAX_WETTING 倍まで）。スルーホールでは、ランドの幅に傾きを掛けた高さ（ピンの高さまで）。
+//! 合うように決める（リードの高さの MAX_WETTING 倍まで）。ただし流れる向きの幅 d + e の SMD_SLOPE 倍まで（電極の横の
+//! 狭い帯で壁にしない）、どの点もパッドの一番近い縁までの距離の SMD_EDGE_SLOPE 倍まで（縁で丸く下がる）。スルーホールでは、ランドの幅に傾きを掛けた高さ（ピンの高さまで）。
 //! どこでも上の面より上には出さないので、リードや部品を突き抜けない。
 //! 表面実装はペーストの層（F.Paste / B.Paste）があるパッドの、部品の面だけ。スルーホールは表と裏（レジストの開いた面）。
 
@@ -24,11 +26,14 @@ use krbr_kicad::{Board, Pad, PadType, Side};
 const STENCIL_MM: f64 = 0.12;
 /// はんだペーストのうち、溶けた後にはんだとして残る体積の割合（残りはフラックス）
 const PASTE_METAL: f64 = 0.5;
-/// 表面実装のフィレットが登るのは、リードの高さのこの割合まで
-const MAX_WETTING: f64 = 0.8;
-/// 表面実装のフィレットの傾き（高さ / 接地部からパッドの縁までの幅）の上限。チップ部品の横のように、
+/// 表面実装のフィレットが登るのは、リードの高さのこの割合まで（チップ部品は薄いので、電極の上の縁まで濡れ上がる）
+const MAX_WETTING: f64 = 1.0;
+/// 表面実装のフィレットの傾き（高さ / 接地部から外へ向かってパッドの縁までの幅）の上限。チップ部品の横のように、
 /// 電極の際にパッドが少ししか残らないところで、はんだが壁のように立たないようにする
 const SMD_SLOPE: f64 = 1.0;
+/// 表面実装のはんだの高さの上限：パッドの一番近い縁までの距離 × これ。つま先の盛りの脇（流れと平行な縁）が、
+/// 垂直な崖にならずに丸く下がるように
+const SMD_EDGE_SLOPE: f64 = 3.0;
 /// スルーホールのフィレットの傾き（高さ / ランドの幅）：はんだ面、部品面（部品面へは穴を通って少しだけ上がる）
 const THT_SLOPE_SOLDER_SIDE: f64 = 0.9;
 const THT_SLOPE_COMPONENT_SIDE: f64 = 0.4;
@@ -251,6 +256,29 @@ fn distance_to_rings(rings: &[Vec<DVec2>], p: DVec2) -> f64 {
     best
 }
 
+/// 点 p から向き dir へ進んで、多角形の輪郭に当たるまでの距離（向きが 0 か、当たらなければ None）
+fn distance_along(rings: &[Vec<DVec2>], p: DVec2, dir: DVec2) -> Option<f64> {
+    let dir = dir.try_normalize()?;
+    let mut best = f64::INFINITY;
+    for r in rings {
+        for k in 0..r.len() {
+            let (a, b) = (r[k], r[(k + 1) % r.len()]);
+            let ab = b - a;
+            let den = dir.perp_dot(ab);
+            if den.abs() < 1e-12 {
+                continue;
+            }
+            let ap = a - p;
+            let t = ap.perp_dot(ab) / den;
+            let u = ap.perp_dot(dir) / den;
+            if t >= 0.0 && (0.0..=1.0).contains(&u) {
+                best = best.min(t);
+            }
+        }
+    }
+    best.is_finite().then_some(best)
+}
+
 /// 三角形（パッドの座標系）を高さ u0 で切った断面の中にある格子の点（偶奇の規則）
 fn slice_inside(tris: &[[DVec3; 3]], u0: f64, g: &Lattice) -> Vec<bool> {
     let mut segs: Vec<(DVec2, DVec2)> = Vec::new();
@@ -371,28 +399,33 @@ fn pad_fillet(pad: &Pad, side: Side, kind: Kind, tris: &[[DVec3; 3]], pad_top: f
     walls.sort_by(f64::total_cmp);
     let lead = walls.get(((walls.len() as f64 * 0.95) as usize).min(walls.len().saturating_sub(1))).copied().unwrap_or(DEFAULT_WALL);
 
-    // 倍率を掛ける前の形：接地部の際の高さ h0、倍率を掛けた後の h0 の上限（傾きの上限から）、凹んだ形の割合 (1 − s)²、接地部か
-    let shape: Vec<(f64, f64, f64, bool)> = (0..n)
+    // 倍率を掛ける前の形：接地部の際の高さ h0、倍率を掛けた後の h0 の上限、凹んだ形の割合 (1 − s)²、高さの上限、接地部か。
+    // 表面実装の s と h0 の上限は、接地部から外へ向かう向きで縁までの幅を測る（つま先は電極の幅いっぱいに同じ高さで盛り、
+    // 電極の横の狭い帯では低い。一番近い縁で測ると、つま先も横の縁に近いところが下がって、真ん中だけが尖った形になる）
+    let shape: Vec<(f64, f64, f64, f64, bool)> = (0..n)
         .map(|k| {
             if !inside[k] {
-                return (0.0, 0.0, 0.0, false);
+                return (0.0, 0.0, 0.0, 0.0, false);
             }
-            let Some(q) = near_contact[k] else { return (0.0, 0.0, 0.0, false) };
+            let Some(q) = near_contact[k] else { return (0.0, 0.0, 0.0, 0.0, false) };
             // 接地部までの距離は格子の点から測るので、半分の間隔を引いて境目からの距離にする
             let d = (dist(k, Some(q)) - 0.5 * cell).max(0.0);
-            let e = edge[k];
-            let (h0, cap) = match kind {
-                Kind::Smd => (lead, SMD_SLOPE * (d + e)),
+            let (h0, e, h0_cap, cap) = match kind {
+                Kind::Smd => {
+                    // 接地部の点は向きが無いので、一番近い縁まで
+                    let ray = distance_along(&rings, g.at(k), g.at(k) - g.at(q)).unwrap_or(edge[k]);
+                    (lead, ray, SMD_SLOPE * (d + ray), SMD_EDGE_SLOPE * edge[k])
+                }
                 Kind::Tht { solder_side } => {
                     let slope = if solder_side { THT_SLOPE_SOLDER_SIDE } else { THT_SLOPE_COMPONENT_SIDE };
-                    (lead.min(slope * (d + e)).min(MAX_THT_HEIGHT), f64::INFINITY)
+                    (lead.min(slope * (d + edge[k])).min(MAX_THT_HEIGHT), edge[k], f64::INFINITY, f64::INFINITY)
                 }
             };
             if contact[k] {
-                (h0, cap, 1.0, true)
+                (h0, h0_cap, 1.0, cap, true)
             } else {
                 let s = if d + e > 0.0 { d / (d + e) } else { 1.0 };
-                (h0, cap, (1.0 - s) * (1.0 - s), false)
+                (h0, h0_cap, (1.0 - s) * (1.0 - s), cap, false)
             }
         })
         .collect();
@@ -409,8 +442,8 @@ fn pad_fillet(pad: &Pad, side: Side, kind: Kind, tris: &[[DVec3; 3]], pad_top: f
     let heights = |scale: f64| -> Vec<f64> {
         (0..n)
             .map(|k| {
-                let (h0, cap, profile, _) = shape[k];
-                clamp(k, (scale * h0).min(cap) * profile)
+                let (h0, h0_cap, profile, cap, _) = shape[k];
+                clamp(k, ((scale * h0).min(h0_cap) * profile).min(cap))
             })
             .collect()
     };
@@ -420,7 +453,7 @@ fn pad_fillet(pad: &Pad, side: Side, kind: Kind, tris: &[[DVec3; 3]], pad_top: f
             // はんだの体積（接地部の外）が、ペーストから残る体積に合う倍率（二分法）
             let cell_area = cell * cell;
             let target = inside.iter().filter(|&&b| b).count() as f64 * cell_area * STENCIL_MM * PASTE_METAL;
-            let volume = |scale: f64| heights(scale).iter().zip(&shape).filter(|(_, sh)| !sh.3).map(|(h, _)| h * cell_area).sum::<f64>();
+            let volume = |scale: f64| heights(scale).iter().zip(&shape).filter(|(_, sh)| !sh.4).map(|(h, _)| h * cell_area).sum::<f64>();
             if volume(MAX_WETTING) <= target {
                 MAX_WETTING
             } else {
@@ -589,7 +622,7 @@ mod tests {
         let at = |x: f32| m.positions.iter().filter(|p| (p.x - x).abs() < 0.02 && p.z.abs() < 0.1).map(|p| p.y - PAD_TOP as f32).fold(0.0f32, f32::max);
         assert!(at(0.85) > at(1.0) && at(1.0) > at(1.15), "{} {} {}", at(0.85), at(1.0), at(1.15));
         // 上から見た体積（つま先と横の盛り。電極の下を除く）は、ペーストから残る体積 0.8 × 0.95 × 0.12 × 0.5 = 0.0456 mm³（パッドごと）を
-        // 超えず、大きくは下回らない（この形ではつま先が MAX_WETTING の高さに届き、横は傾きの上限で低いので、少し少ない）
+        // 超えず、大きくは下回らない（この形ではつま先が電極の上まで届き、横は傾きの上限で低いので、少し少ない）
         let mut vol = 0.0f64;
         for t in m.mesh_tris() {
             let [a, b, c] = t;
