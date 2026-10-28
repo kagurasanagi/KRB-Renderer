@@ -154,6 +154,7 @@ impl TestHooks {
                 match kind {
                     "smd" => st.show_smd = false,
                     "tht" => st.show_tht = false,
+                    "solder" => st.show_solder = false,
                     _ => continue,
                 }
                 st.changed.visibility = true;
@@ -432,6 +433,8 @@ struct ViewState {
     /// 表面実装の部品・スルーホールの部品を表示する（どちらでもない部品と基板はいつも表示）
     show_smd: bool,
     show_tht: bool,
+    /// はんだフィレットを表示する（形状は作ったまま。隠すと光線が通り抜ける）
+    show_solder: bool,
     spectral: bool,
     /// 背景を透明にする（表示は市松模様、保存する PNG はアルファ付き）。動画の書き出しの間は使わない
     transparent: bool,
@@ -466,11 +469,15 @@ impl ViewState {
     /// 見せるインスタンスの種類（krbr_scene::visibility のビット）
     fn visible_mask(&self) -> u8 {
         let mut m = visibility::ALL;
+        // はんだフィレットは、その部品を隠したときも隠す
         if !self.show_smd {
-            m &= !visibility::SMD;
+            m &= !(visibility::SMD | visibility::SOLDER_SMD);
         }
         if !self.show_tht {
-            m &= !visibility::THROUGH_HOLE;
+            m &= !(visibility::THROUGH_HOLE | visibility::SOLDER_THROUGH_HOLE);
+        }
+        if !self.show_solder {
+            m &= !visibility::SOLDER;
         }
         m
     }
@@ -483,6 +490,7 @@ struct ViewerSettings {
     focus_point: Option<Vec3>,
     show_smd: bool,
     show_tht: bool,
+    show_solder: bool,
     denoise: bool,
     denoise_strength: f32,
     mode: DisplayMode,
@@ -693,6 +701,7 @@ impl ViewerSettings {
             focus_point: r.focus_point.map(|p| Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32)),
             show_smd: r.show_smd.unwrap_or(true),
             show_tht: r.show_tht.unwrap_or(true),
+            show_solder: r.show_solder.unwrap_or(true),
             denoise: vo.common.denoise.or(r.denoise).unwrap_or(false),
             denoise_strength: vo.common.denoise_strength.or(r.denoise_strength).unwrap_or(1.0),
             mode: r.display_mode.as_deref().map(display_mode_of).unwrap_or(DisplayMode::Beauty),
@@ -706,6 +715,7 @@ impl ViewerSettings {
         st.focus_point = self.focus_point;
         st.show_smd = self.show_smd;
         st.show_tht = self.show_tht;
+        st.show_solder = self.show_solder;
         st.changed.visibility = true;
         st.denoise = self.denoise;
         st.denoise_strength = self.denoise_strength;
@@ -1242,6 +1252,7 @@ impl App {
             render_ratio: Some(st.render_ratio),
             show_smd: Some(st.show_smd),
             show_tht: Some(st.show_tht),
+            show_solder: Some(st.show_solder),
             focus_point: st.focus_point.map(|p| [p.x as f64, p.y as f64, p.z as f64]),
         }
         .write(&mut v);
@@ -1797,7 +1808,7 @@ impl App {
             .enumerate()
             .filter(|(_, i)| match i.owner {
                 InstanceOwner::Model { footprint, .. } | InstanceOwner::Placeholder { footprint } => footprint == fp,
-                InstanceOwner::Board => false,
+                InstanceOwner::Board | InstanceOwner::Solder { .. } => false,
             })
             .map(|(k, _)| k)
             .collect();
@@ -3735,6 +3746,7 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         focus_point: None,
         show_smd: true,
         show_tht: true,
+        show_solder: true,
         spectral: cfg.spectral,
         transparent: cfg.transparent_background,
         rotating: false,

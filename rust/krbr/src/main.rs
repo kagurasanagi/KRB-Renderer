@@ -258,6 +258,9 @@ struct RenderArgs {
     /// opaque background (overrides the transparent background remembered for the board or set in <name>.krbr)
     #[arg(long, conflicts_with = "transparent")]
     opaque: bool,
+    /// do not shape solder fillets (same as [solder] fillet = false)
+    #[arg(long)]
+    no_fillet: bool,
     /// camera lens: pinhole (default), thin, realistic
     #[arg(long, value_parser = parse_lens)]
     lens: Option<LensModel>,
@@ -397,6 +400,7 @@ impl RenderArgs {
             validate: self.validate,
             spectral: if self.spectral { Some(true) } else if self.rgb { Some(false) } else { None },
             transparent_background: if self.transparent { Some(true) } else if self.opaque { Some(false) } else { None },
+            solder_fillet: self.no_fillet.then_some(false),
             lens: self.lens,
             f_number: self.f_number,
             focal_length: self.focal_length,

@@ -39,6 +39,7 @@
 | 強さ・回転 | 環境マップの明るさと、縦軸まわりの回転 |
 | 露出 | EV のスライダー。「自動」は、いまの画像の対数平均輝度を中間の灰色（0.18）に合わせる |
 | 凹凸の強さ | 表面の微細な凹凸の倍率（`bump_intensity`） |
+| はんだフィレットを表示 | はんだの盛りを表示する・隠す（形は作ったまま。メニューの「表示」にもある。基板ごとに覚える。下記「はんだフィレット」） |
 | レジスト | レジストの色のプリセット（「設定どおり」か、KiCad の色名／JLCPCB の色）。色・粗さ・散乱をまとめて切り替え、累積をやり直す。基板ごとに覚え、次に開いたときにも使う（下記「前回の設定を覚える」） |
 | 表示 | 描画のサイズとレンダリングの比率（下記）、画像 / アルベド / 法線、最大 spp（2 の累乗） |
 | カメラ | 画角、仰角・方位、注視点（KiCad の座標）と距離、カメラの位置（KiCad の座標と基板の上面からの高さ）、全体を表示、視点を戻す、保存 |
@@ -88,7 +89,7 @@
 
 ログとコマンドラインの説明は英語です。KiCad のプラグインのボタンとメッセージは、KiCad の表示の言語に合わせます。翻訳は `rust/crates/krbr-app/i18n/<言語>/krbr-app.ftl`（[Fluent](https://projectfluent.org/) の形式、英語が基準）で、exe に埋め込みます。言語を足すときは、英語のファイルを写して訳し、`krbr-app/src/i18n.rs` の `LANGUAGES` に加えます。
 
-開発用に、非表示のウィンドウで描いて終了するテストモードがあります（`--test-frames N --screenshot path [--test-orbit 度]`）。画面には出ず、フォーカスも奪いません。途中で UI の操作をしたことにする `--test-reload` / `--test-pick` / `--test-assign` / `--test-mask` / `--test-save-as` / `--test-reset-settings` / `--test-open` / `--test-view top|bottom` / `--test-hide smd,tht` もあり、決まったフレームで要求として流し込みます（`viewer.rs` の `TestHooks`）。
+開発用に、非表示のウィンドウで描いて終了するテストモードがあります（`--test-frames N --screenshot path [--test-orbit 度]`）。画面には出ず、フォーカスも奪いません。途中で UI の操作をしたことにする `--test-reload` / `--test-pick` / `--test-assign` / `--test-mask` / `--test-save-as` / `--test-reset-settings` / `--test-open` / `--test-view top|bottom` / `--test-hide smd,tht,solder` もあり、決まったフレームで要求として流し込みます（`viewer.rs` の `TestHooks`）。
 
 ## 保存の監視と差分更新
 
@@ -147,7 +148,7 @@
 | `krbr geom <pcb>` / `krbr models <pcb>` | 開発用：基板の形状と凹凸タイル（GPU を使わない）／全 3D モデルの読み込みの統計 |
 | `krbr diff <a> <b>` | 開発用：2 枚の画像（PNG / EXR）の差の平均と最大 |
 
-`render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率。正の値。付けると基板で覚えた視点を使わない）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--integrator pt|bdpt|vcm`（`path` は `pt` の別名。知らない名前はエラー）, `--seed`, `--spectral` / `--rgb`（色の計算）, `--transparent` / `--opaque`（背景を透明にする。下記）, `--mask-color <プリセット名 または r,g,b>`（レジストの色。下記）, `--substrate <材質名>`（基材。下記）, `--lens pinhole|thin|realistic`（知らない名前はエラー）, `--f-number`, `--focal-length`, `--focus-distance`, `--blades`, `--denoise` / `--no-denoise` / `--denoise-strength`, `--init`, `--no-cache`, `--no-kicad-cli`, `--validate`, `--normal-priority`, `-v`。
+`render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率。正の値。付けると基板で覚えた視点を使わない）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--integrator pt|bdpt|vcm`（`path` は `pt` の別名。知らない名前はエラー）, `--seed`, `--spectral` / `--rgb`（色の計算）, `--transparent` / `--opaque`（背景を透明にする。下記）, `--no-fillet`（はんだフィレットを作らない。下記）, `--mask-color <プリセット名 または r,g,b>`（レジストの色。下記）, `--substrate <材質名>`（基材。下記）, `--lens pinhole|thin|realistic`（知らない名前はエラー）, `--f-number`, `--focal-length`, `--focus-distance`, `--blades`, `--denoise` / `--no-denoise` / `--denoise-strength`, `--init`, `--no-cache`, `--no-kicad-cli`, `--validate`, `--normal-priority`, `-v`。
 
 ### 速さの計測（`krbr bench`）
 
@@ -225,7 +226,7 @@ GTX 1060 での実測（kachkojir_RK3506G2、135 万三角形、PT、深さ 8）
 
 | 表 | 内容 | 書くのは |
 |---|---|---|
-| `[board]` `[relief]` `[surface]` `[placeholder]` `[paths]` `[kicad_cli]` | 表面処理、レジスト・シルク・基材の色、距離場の解像度、凹凸の厚み、代替の箱、モデルのパスの変数・追加検索フォルダ、kicad-cli | 人（`--init` でひな形） |
+| `[board]` `[relief]` `[surface]` `[solder]` `[placeholder]` `[paths]` `[kicad_cli]` | 表面処理、レジスト・シルク・基材の色、距離場の解像度、凹凸の厚み、はんだフィレット、代替の箱、モデルのパスの変数・追加検索フォルダ、kicad-cli | 人（`--init` でひな形） |
 | `[environment]` `[camera]` `[render]` `[lens]` | 環境マップ・強さ・回転、カメラ、解像度・spp・露出・グロー・積分器、レンズ | 人（`--init` でひな形） |
 | `[ref.<部品番号>]` `[[model]]` | 材質の上書き（部品番号ごと・3D モデルごと） | ビューア、`krbr material set` |
 | `[remembered]` | ビューアで最後に使った設定（環境マップ、パネルの設定、視点）。消すと上の表の値に戻る | ビューア（`--hdr` を付けた `render` も環境マップを） |
@@ -350,6 +351,14 @@ bump_scale = 0.1
 - 発光の輝度としきい値の関係：発光面の明るさは、画面の白の「輝度 ÷ 1000 × 2^露出」倍です（5000 cd/m²・露出 0.7 EV なら約 8 倍）。これがしきい値を超えるとにじみます。
 - 表示（GPU）と保存（CPU）は同じ式で、画素の差は 1/255 以内です（`tests/glow.rs`）。
 - ぼかしの広がりは画像の大きさに比例するので、表示と、解像度の違う保存の画像でも見た目はそろいます。
+
+**はんだフィレット**（`<名前>.krbr` の `[solder] fillet`（既定 true）・`material`（既定 `metal_tin+rough=0.15`）、`--no-fillet`）：部品の 3D モデルとパッドから、はんだの盛り（濡れ広がって凹んだ形）を作ります（`krbr-scene` の `solder.rs`）。
+
+- 表面実装の部品は、ペーストの層（`F.Paste` / `B.Paste`）のあるパッドに作ります。体積はパッドの面積 × メタルマスクの厚み 0.12 mm × 0.5（溶けた後に残る割合）で、電極・リードの高さの 8 割まで登ります。チップ部品の電極、ガルウィングのリードのつま先とかかと、裏面の部品にも付きます。
+- スルーホールの部品は、ピンの周りに円すい形の盛りを作ります（はんだ面が高く、部品面は低い）。
+- 3D モデルの無い部品（代替の箱）、DNP で外した部品、何も載っていないパッド、モデルのリードがパッドに届いていない部品には作りません。はんだが部品やリードを突き抜けることはありません。
+- 表示はパネルの「はんだフィレットを表示」かメニューの「表示」で切り替えます（形は作ったままなので、すぐ切り替わる）。部品の種類（表面実装・スルーホール）を隠すと、そのはんだも隠れます。クリックしても選べません。
+- 保存の監視中は、パッドもモデルも動いていない部品のはんだを作り直しません。
 
 **背景を透明にする**（設定パネルの「照明」、`--transparent` / `--opaque`、`<名前>.krbr` の `[render] transparent_background`）：カメラから見て環境マップしか見えない画素を透明にします（Blender の Film → Transparent と同じ考え方）。製品写真や資料に、基板だけを切り抜いた画像を使うときに。
 

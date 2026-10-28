@@ -15,6 +15,7 @@ pub mod material_io;
 pub mod material_library;
 pub mod model_map;
 pub mod scene;
+pub mod solder;
 pub mod spectrum;
 
 pub use camera::{frame_camera, orbit_camera, Camera, CameraParams};

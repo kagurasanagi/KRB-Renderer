@@ -27,6 +27,8 @@ menu-bottom-view = 真裏から見る
 menu-fit-view = 全体を表示
 menu-show-smd = 表面実装の部品を表示
 menu-show-tht = スルーホールの部品を表示
+menu-show-solder = はんだフィレットを表示
+menu-show-solder-tip = パッドと 3D モデルから、はんだの盛りの形を作ります（パッドごとのペーストの量）。作らないようにするには <名前>.krbr の [solder] fillet = false。
 menu-render-size = 描画のサイズ
 menu-render-ratio = レンダリングの比率
 menu-reset-view = 視点を戻す

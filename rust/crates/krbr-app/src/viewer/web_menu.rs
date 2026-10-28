@@ -123,6 +123,7 @@ impl App {
                     enabled(key(item("fit", fl!("menu-fit-view")), "F"), board),
                     enabled(checked(item("smd", fl!("menu-show-smd")), st.show_smd), board),
                     enabled(checked(item("tht", fl!("menu-show-tht")), st.show_tht), board),
+                    enabled(tip(checked(item("solder", fl!("menu-show-solder")), st.show_solder), fl!("menu-show-solder-tip")), board),
                     sep(),
                     sub(fl!("menu-render-size"), size),
                     sub(fl!("menu-render-ratio"), ratio),
@@ -186,6 +187,10 @@ impl App {
             }
             "tht" => {
                 st.show_tht = !st.show_tht;
+                st.changed.visibility = true;
+            }
+            "solder" => {
+                st.show_solder = !st.show_solder;
                 st.changed.visibility = true;
             }
             "size.fit" => st.size_mode = None,

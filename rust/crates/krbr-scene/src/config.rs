@@ -220,7 +220,7 @@ impl Range {
 /// ビューアが覚えた設定（krbr-app の remember）
 const TABLES_READ_ELSEWHERE: &[&str] = &["ref", "model", "remembered"];
 /// ここで読む表
-const SECTIONS: &[&str] = &["board", "relief", "surface", "placeholder", "paths", "kicad_cli", "environment", "camera", "render", "lens"];
+const SECTIONS: &[&str] = &["board", "relief", "surface", "solder", "placeholder", "paths", "kicad_cli", "environment", "camera", "render", "lens"];
 
 /// 設定ファイルの読み取り。読んだ鍵を覚えておき、型の誤り・範囲外の値をファイル名つきで警告する（値は使わず既定値のまま）。
 /// 最後に、読まなかった鍵（綴りの誤り、置き場所の違う鍵）を警告する。材質ライブラリが未知のパラメータを警告するのと同じ方針
@@ -475,6 +475,10 @@ fn read_into(c: &mut ProjectConfig, r: &mut Reader, base: &Path) {
         }
     }
     r.num(&["surface", "bump_intensity"], R::NON_NEGATIVE, &mut o.bump_intensity);
+    r.boolean(&["solder", "fillet"], &mut o.solder_fillet);
+    if let Some(v) = r.string(&["solder", "material"]) {
+        o.solder_material = v.trim().to_string();
+    }
     r.num_f64(&["placeholder", "height_mm"], R::NON_NEGATIVE, &mut o.placeholder_height);
     r.color(&["placeholder", "color"], &mut o.placeholder_color, None);
     match r.get(&["paths", "vars"]) {

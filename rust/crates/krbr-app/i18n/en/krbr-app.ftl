@@ -27,6 +27,8 @@ menu-bottom-view = View from the bottom
 menu-fit-view = Fit the board in the view
 menu-show-smd = Show surface-mount parts
 menu-show-tht = Show through-hole parts
+menu-show-solder = Show solder fillets
+menu-show-solder-tip = Solder fillets are shaped from the pads and the 3D models (the paste volume of each pad). Turn them off in <name>.krbr with [solder] fillet = false.
 menu-render-size = Rendering size
 menu-render-ratio = Rendering ratio
 menu-reset-view = Reset view

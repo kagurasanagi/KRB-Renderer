@@ -17,7 +17,7 @@ pub struct Selected {
 impl Selected {
     pub fn from_instance(scene: &Scene, board: &Board, instance: usize) -> Option<Selected> {
         match scene.instances.get(instance)?.owner {
-            InstanceOwner::Board => None,
+            InstanceOwner::Board | InstanceOwner::Solder { .. } => None,
             InstanceOwner::Model { footprint, model, .. } => Some(Selected { reference: board.footprints.get(footprint as usize)?.reference.clone(), model: Some(model as usize) }),
             InstanceOwner::Placeholder { footprint } => Some(Selected { reference: board.footprints.get(footprint as usize)?.reference.clone(), model: None }),
         }
@@ -29,7 +29,7 @@ impl Selected {
         let mut fallback = None;
         for (i, inst) in scene.instances.iter().enumerate() {
             let (fp, model) = match inst.owner {
-                InstanceOwner::Board => continue,
+                InstanceOwner::Board | InstanceOwner::Solder { .. } => continue,
                 InstanceOwner::Model { footprint, model, .. } => (footprint, Some(model as usize)),
                 InstanceOwner::Placeholder { footprint } => (footprint, None),
             };

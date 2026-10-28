@@ -179,6 +179,8 @@ pub struct ViewerValues {
     /// 表面実装・スルーホールの部品を表示するか
     pub show_smd: Option<bool>,
     pub show_tht: Option<bool>,
+    /// はんだフィレットを表示するか
+    pub show_solder: Option<bool>,
     /// ピントを合わせる点（ワールド座標の x, y, z。無ければ注視点に合わせる）
     pub focus_point: Option<[f64; 3]>,
 }
@@ -191,6 +193,7 @@ impl ViewerValues {
     const RENDER_RATIO: &'static str = "render_ratio";
     const SHOW_SMD: &'static str = "show_smd";
     const SHOW_THT: &'static str = "show_tht";
+    const SHOW_SOLDER: &'static str = "show_solder";
     const FOCUS_POINT: &'static str = "focus_point";
 
     /// 覚えた値から読む
@@ -203,6 +206,7 @@ impl ViewerValues {
             render_ratio: v.get(Self::RENDER_RATIO).and_then(|x| x.as_float()).map(|x| x as f32),
             show_smd: v.get(Self::SHOW_SMD).and_then(|x| x.as_bool()),
             show_tht: v.get(Self::SHOW_THT).and_then(|x| x.as_bool()),
+            show_solder: v.get(Self::SHOW_SOLDER).and_then(|x| x.as_bool()),
             focus_point: v.get(Self::FOCUS_POINT).and_then(|x| x.as_array()).and_then(|a| {
                 let f: Vec<f64> = a.iter().filter_map(|x| x.as_float()).collect();
                 (f.len() == 3 && f.iter().all(|x| x.is_finite())).then(|| [f[0], f[1], f[2]])
@@ -227,7 +231,7 @@ impl ViewerValues {
         if let Some(r) = self.render_ratio {
             v.insert(Self::RENDER_RATIO.into(), Value::Float(r as f64));
         }
-        for (key, b) in [(Self::SHOW_SMD, self.show_smd), (Self::SHOW_THT, self.show_tht)] {
+        for (key, b) in [(Self::SHOW_SMD, self.show_smd), (Self::SHOW_THT, self.show_tht), (Self::SHOW_SOLDER, self.show_solder)] {
             if let Some(b) = b {
                 v.insert(key.into(), Value::Boolean(b));
             }
@@ -734,7 +738,7 @@ mod tests {
 
     #[test]
     fn viewer_values_round_trip_and_render_size_limit() {
-        let v = ViewerValues { denoise: Some(true), denoise_strength: Some(0.5), max_spp: Some(256), display_mode: Some("albedo".into()), render_ratio: Some(1.5), show_smd: Some(false), show_tht: Some(true), focus_point: Some([1.5, -2.0, 30.25]) };
+        let v = ViewerValues { denoise: Some(true), denoise_strength: Some(0.5), max_spp: Some(256), display_mode: Some("albedo".into()), render_ratio: Some(1.5), show_smd: Some(false), show_tht: Some(true), show_solder: Some(false), focus_point: Some([1.5, -2.0, 30.25]) };
         let mut t = ViewValues::new();
         v.write(&mut t);
         let t: Table = t.to_string().parse().unwrap();

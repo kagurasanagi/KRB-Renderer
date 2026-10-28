@@ -280,6 +280,9 @@ impl App {
             board.push(note(fl!("substrate-clear-hint"), "muted"));
         }
         board.push(slider("surface.bump", fl!("bump-intensity"), st.bump_intensity as f64, 0.0, 2.0, false, 2, ""));
+        if cfg.scene.solder_fillet {
+            board.push(tip(check("surface.solder", fl!("menu-show-solder"), st.show_solder), fl!("menu-show-solder-tip")));
+        }
         sections.push(self.group_section("board", fl!("panel-board"), None, board));
 
         // 照明：環境マップ・強さ・回転
@@ -547,6 +550,10 @@ impl App {
                     st.spectral = spectral;
                     st.changed.frame = true;
                 }
+            }
+            "surface.solder" => {
+                st.show_solder = b;
+                st.changed.visibility = true;
             }
             "surface.bump" => {
                 st.bump_intensity = f as f32;

@@ -43,7 +43,21 @@ pub mod visibility {
     pub const THROUGH_HOLE: u8 = 4;
     /// どちらでもない部品（いつも表示）
     pub const OTHER: u8 = 8;
+    /// はんだフィレット（部品の種類ごと。部品を隠したときと、フィレットを隠したときのどちらでも隠す）
+    pub const SOLDER_SMD: u8 = 16;
+    pub const SOLDER_THROUGH_HOLE: u8 = 32;
+    pub const SOLDER_OTHER: u8 = 64;
+    pub const SOLDER: u8 = SOLDER_SMD | SOLDER_THROUGH_HOLE | SOLDER_OTHER;
     pub const ALL: u8 = 0xFF;
+
+    /// 部品の種類（SMD / THROUGH_HOLE / OTHER）に対応する、はんだフィレットの種類
+    pub fn solder_of(class: u8) -> u8 {
+        match class {
+            SMD => SOLDER_SMD,
+            THROUGH_HOLE => SOLDER_THROUGH_HOLE,
+            _ => SOLDER_OTHER,
+        }
+    }
 }
 
 /// 部品の種類（visibility::SMD / THROUGH_HOLE / OTHER）：フットプリントの属性（smd / through_hole）、
@@ -84,6 +98,8 @@ pub enum InstanceOwner {
     Model { footprint: u32, model: u32, assignments: u32 },
     /// 3D モデルが無い（または裏で分割中の）部品の代わりの箱
     Placeholder { footprint: u32 },
+    /// 部品のはんだフィレット（crate::solder）。選べない
+    Solder { footprint: u32 },
 }
 
 /// 部品の部位ごとの材質の割り当て（krbr material show 用）
@@ -303,6 +319,7 @@ impl Scene {
             .map(|i| match i.owner {
                 InstanceOwner::Board => visibility::BOARD,
                 InstanceOwner::Model { footprint, .. } | InstanceOwner::Placeholder { footprint } => *memo.entry(footprint).or_insert_with(|| footprint_class(board, footprint as usize)),
+                InstanceOwner::Solder { footprint } => visibility::solder_of(*memo.entry(footprint).or_insert_with(|| footprint_class(board, footprint as usize))),
             })
             .collect();
     }
@@ -336,7 +353,14 @@ pub struct SceneOptions {
     pub relief_params: ReliefParams,
     /// 表面の凹凸（バンプ）の強さの倍率。0 で無効（GPU へ送るときに掛ける）
     pub bump_intensity: f32,
+    /// はんだフィレットを作る（crate::solder）
+    pub solder_fillet: bool,
+    /// はんだの材質（材質ライブラリの名前。変種も書ける）
+    pub solder_material: String,
 }
+
+/// はんだの材質の既定：錫（めっきより滑らかな、溶けて固まった面）
+pub const DEFAULT_SOLDER_MATERIAL: &str = "metal_tin+rough=0.15";
 
 impl Default for SceneOptions {
     fn default() -> Self {
@@ -360,6 +384,8 @@ impl Default for SceneOptions {
             relief_copper_from_stackup: true,
             relief_params: ReliefParams::default(),
             bump_intensity: 0.25,
+            solder_fillet: true,
+            solder_material: DEFAULT_SOLDER_MATERIAL.into(),
         }
     }
 }
@@ -372,6 +398,8 @@ pub struct SceneContext<'a> {
     pub options: &'a SceneOptions,
     /// 保存の監視中は、前回のタイルを使い回す
     pub relief_cache: Option<&'a mut ReliefTileCache>,
+    /// 保存の監視中は、変わらない部品のはんだフィレットを使い回す
+    pub solder_cache: Option<&'a mut crate::solder::SolderCache>,
     /// 未分割の STEP は裏で分割し、それまでは箱で仮表示する
     pub async_models: bool,
 }
@@ -951,6 +979,10 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
             s.placeholders += 1;
         }
     }
+    if opts.solder_fillet {
+        let pad_top = s.board.core_half + rp.copper;
+        add_solder_fillets(&mut s, board, opts, ctx.materials.library(), pad_top, ctx.solder_cache);
+    }
     // まだ描画に反映していない OpenPBR の要素を知らせる
     {
         let mut unsupported: BTreeMap<&str, Vec<String>> = BTreeMap::new();
@@ -989,6 +1021,94 @@ pub fn build_scene(ctx: SceneContext<'_>) -> Scene {
         s.materials.len()
     );
     s
+}
+
+/// はんだフィレット（crate::solder）を、3D モデルを置いた部品ごとに 1 つのメッシュにして足す。pad_top は表のパッドの面の高さ
+fn add_solder_fillets(s: &mut Scene, board: &Board, opts: &SceneOptions, lib: &crate::material_library::MaterialLibrary, pad_top: f64, cache: Option<&mut crate::solder::SolderCache>) {
+    let t0 = std::time::Instant::now();
+    let mut local = crate::solder::SolderCache::default();
+    let cache = cache.unwrap_or(&mut local);
+    cache.begin();
+    let mut models: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+    for (k, inst) in s.instances.iter().enumerate() {
+        if let InstanceOwner::Model { footprint, .. } = inst.owner {
+            models.entry(footprint).or_default().push(k);
+        }
+    }
+    if models.is_empty() {
+        return;
+    }
+    let solder = lib.find_variant(&opts.solder_material).unwrap_or_else(|| {
+        krbr_core::warn!("solder material '{}' not found; using {}", opts.solder_material, DEFAULT_SOLDER_MATERIAL);
+        lib.find_variant(DEFAULT_SOLDER_MATERIAL).unwrap_or_default()
+    });
+    let mat = add_material(s, Material { name: "solder".into(), ..solder });
+    let center = s.board.center;
+    // パッドの面から離れた三角形は使わない（部品の上の方。はんだの高さの上限には届かない）
+    let reach = s.board.thickness / 2.0 + 6.0;
+    // 部品ごとの三角形とキー。キャッシュに無い部品だけを、並列に計算する
+    let mut jobs: Vec<(u32, u64, Vec<[DVec3; 3]>)> = Vec::new();
+    for (fp, insts) in models {
+        let mut tris: Vec<[DVec3; 3]> = Vec::new();
+        for &k in &insts {
+            let inst = s.instances[k];
+            let mesh = &s.meshes[inst.mesh as usize].mesh;
+            let xf = inst.xform.as_dmat4();
+            for t in mesh.indices.chunks_exact(3) {
+                // ワールド（X, Y = 上, Z）-> (基板座標 x, 基板座標 y, Y)
+                let w = [t[0], t[1], t[2]].map(|i| xf.transform_point3(mesh.positions[i as usize].as_dvec3()));
+                if w.iter().all(|p| p.y.abs() > reach) {
+                    continue;
+                }
+                tris.push(w.map(|p| DVec3::new(p.x + center.x, p.z + center.y, p.y)));
+            }
+        }
+        let key = crate::solder::footprint_key(board, fp as usize, &tris, pad_top, center, mat);
+        jobs.push((fp, key, tris));
+    }
+    let mut done: Vec<Option<Mesh>> = jobs.iter().map(|(_, key, _)| cache.take(*key)).collect();
+    let todo: Vec<usize> = (0..jobs.len()).filter(|&i| done[i].is_none()).collect();
+    if !todo.is_empty() {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let results = std::sync::Mutex::new(Vec::new());
+        let worker = || loop {
+            let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some(&i) = todo.get(k) else { break };
+            let (fp, _, tris) = &jobs[i];
+            let m = crate::solder::footprint_fillets(board, *fp as usize, tris, pad_top, center, mat);
+            results.lock().unwrap().push((i, m));
+        };
+        let nthreads = krbr_core::platform::worker_threads().min(todo.len());
+        std::thread::scope(|sc| {
+            for _ in 0..nthreads {
+                // 作業用のスレッドは低優先度（ビューアのウィンドウのスレッドより後回しにする）
+                sc.spawn(|| {
+                    krbr_core::platform::lower_thread_priority();
+                    worker()
+                });
+            }
+        });
+        for (i, m) in results.into_inner().unwrap() {
+            cache.keep(jobs[i].1, &m);
+            done[i] = Some(m);
+        }
+    }
+    let (mut parts, mut tris_total) = (0, 0);
+    for ((fp, _, _), m) in jobs.iter().zip(done) {
+        let (fp, Some(m)) = (*fp, m) else { continue };
+        if m.triangle_count() == 0 {
+            continue;
+        }
+        tris_total += m.triangle_count();
+        parts += 1;
+        let id = s.meshes.len() as u32;
+        let name = format!("solder_{}", board.footprints.get(fp as usize).map(|f| f.reference.as_str()).unwrap_or(""));
+        s.meshes.push(SceneMesh { name, mesh: m });
+        s.instances.push(Instance { mesh: id, xform: Mat4::IDENTITY, material_base: 0, owner: InstanceOwner::Solder { footprint: fp } });
+        add_instance_bounds(s, id, &Mat4::IDENTITY);
+    }
+    cache.finish();
+    krbr_core::debug!("scene: solder fillets on {} parts ({} triangles, {} computed) in {:.0} ms", parts, tris_total, cache.last_built, t0.elapsed().as_secs_f64() * 1000.0);
 }
 
 /// 光線が最初に当たったもの

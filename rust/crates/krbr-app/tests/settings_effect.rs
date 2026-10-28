@@ -150,6 +150,7 @@ fn every_setting_changes_the_image() {
         ("--clamp", &base, &reference, RenderOptions { radiance_clamp: Some(0.2), ..base.clone() }, ""),
         ("--spectral", &base, &reference, RenderOptions { spectral: Some(true), ..base.clone() }, ""),
         ("--transparent", &wide, &wide_ref, RenderOptions { transparent_background: Some(true), ..wide.clone() }, ""),
+        ("--no-fillet", &close, &close_ref, RenderOptions { solder_fillet: Some(false), ..close.clone() }, ""),
         ("--max-depth", &base, &reference, RenderOptions { max_depth: Some(1), ..base.clone() }, ""),
         ("--fov", &base, &reference, RenderOptions { fov: Some(45.0), ..base.clone() }, ""),
         ("--elevation", &base, &reference, RenderOptions { elevation: Some(40.0), ..base.clone() }, ""),
@@ -181,6 +182,12 @@ fn every_setting_changes_the_image() {
         ("[relief] silk_um", &base, &reference, base.clone(), "[relief]\nsilk_um = 120\n"),
         ("[relief] via_dimple_um", &close, &close_ref, close.clone(), "[relief]\nvia_dimple_um = 0\n"),
         ("[surface] bump_intensity", &close, &close_ref, close.clone(), "[surface]\nbump_intensity = 2.0\n"),
+        ("[solder] fillet", &close, &close_ref, close.clone(), "[solder]
+fillet = false
+"),
+        ("[solder] material", &close, &close_ref, close.clone(), "[solder]
+material = \"metal_gold\"
+"),
         ("[camera] margin", &base, &reference, base.clone(), "[camera]\nmargin = 0.3\n"),
         ("[render] exposure_ev", &base, &reference, base.clone(), "[render]\nexposure_ev = -1.0\n"),
         ("[render] glow", &base, &reference, base.clone(), "[render]\nglow = 0.0\n"),

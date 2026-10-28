@@ -54,6 +54,8 @@ pub struct RenderOptions {
     pub spectral: Option<bool>,
     /// 背景を透明にする。None なら設定ファイル（または覚えたもの）のまま
     pub transparent_background: Option<bool>,
+    /// はんだフィレットを作るか。None なら設定ファイルのまま
+    pub solder_fillet: Option<bool>,
     /// None なら設定ファイル（または覚えたもの）のまま
     pub lens: Option<LensModel>,
     pub f_number: Option<f32>,
@@ -131,6 +133,8 @@ pub struct SceneSource {
     pub materials: MaterialSetup,
     /// 凹凸タイルのキャッシュ。変わった範囲のタイルだけを作り直す
     pub tiles: ReliefTileCache,
+    /// はんだフィレットのキャッシュ。パッドもモデルも変わらない部品は計算し直さない
+    pub solder: krbr_scene::solder::SolderCache,
 }
 
 /// 読み直しの統計
@@ -147,7 +151,7 @@ impl SceneSource {
     /// シーンを組み立てる。async_models なら、まだ分割していない STEP は裏で分割し、それまでは箱で仮表示する
     pub fn build(&mut self, board: &Board, options: &SceneOptions, async_models: bool) -> Scene {
         let material_resolver = MaterialResolver::new(&self.materials.library, &self.materials.project, &self.materials.global);
-        build_scene(SceneContext { board, resolver: &self.resolver, library: &self.library, materials: &material_resolver, options, relief_cache: Some(&mut self.tiles), async_models })
+        build_scene(SceneContext { board, resolver: &self.resolver, library: &self.library, materials: &material_resolver, options, relief_cache: Some(&mut self.tiles), solder_cache: Some(&mut self.solder), async_models })
     }
 
     /// 基板を読み直し、前の基板との差分で変わった範囲のタイルを無効にしてから組み立てる（C++ 版 PreparedScene::reload）。
@@ -237,6 +241,9 @@ fn apply_command_line(cfg: &mut ProjectConfig, o: &RenderOptions) {
     }
     if let Some(v) = o.transparent_background {
         cfg.transparent_background = v;
+    }
+    if let Some(v) = o.solder_fillet {
+        cfg.scene.solder_fillet = v;
     }
     if !o.substrate.is_empty() {
         cfg.scene.substrate = if o.substrate == "fr4" { String::new() } else { o.substrate.clone() };
@@ -356,7 +363,7 @@ pub fn prepare_scene(o: &RenderOptions) -> Option<PreparedScene> {
             let key = krbr_core::to_hex(krbr_core::xxh64(krbr_scene::board_file::board_key(&board.file).as_bytes()));
             tiles.disk_file = Some(cache_dir.join("relief").join(format!("{key}.krbt")));
         }
-        let mut source = SceneSource { resolver: resolver.clone(), library: Arc::clone(library), materials, tiles };
+        let mut source = SceneSource { resolver: resolver.clone(), library: Arc::clone(library), materials, tiles, solder: Default::default() };
         let scene = source.build(board, &cfg.scene, false);
         (env_job.join().ok().flatten(), kicad_cli, scene, source)
     });
