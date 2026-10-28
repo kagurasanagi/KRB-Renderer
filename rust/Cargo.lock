@@ -2221,7 +2221,7 @@ dependencies = [
 
 [[package]]
 name = "krbr"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2239,7 +2239,7 @@ dependencies = [
 
 [[package]]
 name = "krbr-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ash",
@@ -2272,7 +2272,7 @@ dependencies = [
 
 [[package]]
 name = "krbr-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "notify",
@@ -2281,7 +2281,7 @@ dependencies = [
 
 [[package]]
 name = "krbr-geom"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clipper2",
  "earcut",
@@ -2292,7 +2292,7 @@ dependencies = [
 
 [[package]]
 name = "krbr-kicad"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "krbr-core",
@@ -2302,7 +2302,7 @@ dependencies = [
 
 [[package]]
 name = "krbr-model"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "glam",
@@ -2312,7 +2312,7 @@ dependencies = [
 
 [[package]]
 name = "krbr-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ash",
  "exr",
@@ -2328,7 +2328,7 @@ dependencies = [
 
 [[package]]
 name = "krbr-scene"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "krbr-core",
