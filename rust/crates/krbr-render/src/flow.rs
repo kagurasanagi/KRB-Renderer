@@ -90,6 +90,21 @@ impl FlowCamera {
         (c.right * (dx * ux) as f32 + c.up * (dx * uy) as f32 + c.forward * dz as f32).normalize()
     }
 
+    /// 正規化座標（-1..1、y は下向き）の画素に写る物を探す視線：起点と向き（正規化）。ピンホールはカメラの位置から。
+    /// 実レンズは主光線が前の面を出る点から（入射瞳がカメラの位置に無い・歪曲があるので、ピンホールの式では画面とずれる）
+    pub fn view_ray(&self, ndc_x: f32, ndc_y: f32) -> (Vec3, Vec3) {
+        let c = &self.cam;
+        let Some(m) = &self.lens else {
+            return (c.position, self.ray_dir(ndc_x, ndc_y));
+        };
+        let (fx, fy) = (-ndc_x as f64 * m.half_w, ndc_y as f64 * m.half_h);
+        let r = (fx * fx + fy * fy).sqrt();
+        let [ox, oz] = m.interp_o(r);
+        let (ux, uy) = if r > 1e-12 { (fx / r, fy / r) } else { (1.0, 0.0) };
+        let origin = c.position + c.right * (ox * ux) as f32 + c.up * (ox * uy) as f32 + c.forward * oz as f32;
+        (origin, self.ray_dir(ndc_x, ndc_y))
+    }
+
     /// 点（カメラの位置からの差 d。無限遠の向きなら far = true）を、画素の座標（左上が 0、画素の中心は +0.5）にする。
     /// カメラの後ろ・表の外なら None
     fn project(&self, d: Vec3, far: bool, w: u32, h: u32) -> Option<(f32, f32)> {
@@ -125,6 +140,15 @@ impl LensMap {
         let k = self.ys.partition_point(|&y| y <= r).clamp(1, n - 1);
         let t = ((r - self.ys[k - 1]) / (self.ys[k] - self.ys[k - 1])).clamp(0.0, 1.0);
         let (a, b) = (self.d[k - 1], self.d[k]);
+        [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+    }
+
+    /// フィルムの高さ r の主光線が前の面を出る点 (x, z)（表から補間）
+    fn interp_o(&self, r: f64) -> [f64; 2] {
+        let n = self.ys.len();
+        let k = self.ys.partition_point(|&y| y <= r).clamp(1, n - 1);
+        let t = ((r - self.ys[k - 1]) / (self.ys[k] - self.ys[k - 1])).clamp(0.0, 1.0);
+        let (a, b) = (self.o[k - 1], self.o[k]);
         [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
     }
 
@@ -234,6 +258,12 @@ mod tests {
             worst = worst.max((px - cx).abs().max((py - cy).abs()));
             let (ex, ey) = fc.project(fc.ray_dir(nx, ny), true, w, h).unwrap();
             worst = worst.max((ex - cx).abs().max((ey - cy).abs()));
+            // クリックの視線（view_ray）の上の点も、その画素に戻る（近い所・遠い所）
+            let (o, dir) = fc.view_ray(nx, ny);
+            for s in [60.0f32, 130.0, 400.0] {
+                let (vx, vy) = fc.project(o + dir * s - cam.position, false, w, h).unwrap();
+                worst = worst.max((vx - cx).abs().max((vy - cy).abs()));
+            }
         }
         assert!(worst < 0.05, "{worst}");
     }

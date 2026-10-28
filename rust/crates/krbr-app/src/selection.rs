@@ -15,9 +15,14 @@ pub struct Selected {
 }
 
 impl Selected {
+    /// インスタンスの部品。はんだ（フィレットが端子を覆っている）なら、その部品（最初のモデル。無ければ代わりの箱）
     pub fn from_instance(scene: &Scene, board: &Board, instance: usize) -> Option<Selected> {
         match scene.instances.get(instance)?.owner {
-            InstanceOwner::Board | InstanceOwner::Solder { .. } => None,
+            InstanceOwner::Board => None,
+            InstanceOwner::Solder { footprint } => {
+                let part = Selected { reference: board.footprints.get(footprint as usize)?.reference.clone(), model: Some(0) };
+                Selected::from_instance(scene, board, part.find_instance(scene, board)?)
+            }
             InstanceOwner::Model { footprint, model, .. } => Some(Selected { reference: board.footprints.get(footprint as usize)?.reference.clone(), model: Some(model as usize) }),
             InstanceOwner::Placeholder { footprint } => Some(Selected { reference: board.footprints.get(footprint as usize)?.reference.clone(), model: None }),
         }
@@ -168,6 +173,25 @@ mod tests {
                 assert!(p[0] > 40.0 && p[0] < 60.0 && p[1] > 40.0 && p[1] < 60.0, "{p:?}");
             }
         }
+    }
+
+    /// はんだをクリックしたら、その部品を選ぶ（フィレットが端子を覆っているので、端をクリックすると当たる）
+    #[test]
+    fn clicking_solder_selects_its_part() {
+        let mut board = Board::default();
+        for r in ["R1", "C2"] {
+            board.footprints.push(krbr_kicad::Footprint { reference: r.into(), ..Default::default() });
+        }
+        let mut s = Scene::default();
+        let inst = |owner| krbr_scene::Instance { mesh: 0, xform: glam::Mat4::IDENTITY, material_base: 0, owner };
+        s.instances.push(inst(InstanceOwner::Board));
+        s.instances.push(inst(InstanceOwner::Placeholder { footprint: 0 }));
+        s.instances.push(inst(InstanceOwner::Model { footprint: 1, model: 0, assignments: 0 }));
+        s.instances.push(inst(InstanceOwner::Solder { footprint: 1 }));
+        s.instances.push(inst(InstanceOwner::Solder { footprint: 0 }));
+        assert_eq!(Selected::from_instance(&s, &board, 0), None);
+        assert_eq!(Selected::from_instance(&s, &board, 3), Some(Selected { reference: "C2".into(), model: Some(0) }));
+        assert_eq!(Selected::from_instance(&s, &board, 4), Some(Selected { reference: "R1".into(), model: None }));
     }
 
     #[test]

@@ -98,7 +98,7 @@ pub enum InstanceOwner {
     Model { footprint: u32, model: u32, assignments: u32 },
     /// 3D モデルが無い（または裏で分割中の）部品の代わりの箱
     Placeholder { footprint: u32 },
-    /// 部品のはんだフィレット（crate::solder）。選べない
+    /// 部品のはんだフィレット（crate::solder）。クリックするとその部品を選ぶ
     Solder { footprint: u32 },
 }
 

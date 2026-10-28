@@ -1726,20 +1726,27 @@ impl App {
         }
     }
 
-    /// 画面の点（物理ピクセル）を通る視線：カメラと方向
-    fn view_ray(&self, p: (f64, f64)) -> (Camera, Vec3) {
+    /// 画面の点（物理ピクセル）を通る視線：カメラと、視線の起点・方向。実レンズは描画と同じ主光線で写す
+    /// （ピンホールの式だと、入射瞳の位置と歪曲の分だけ画面とずれ、端ほど違う物に当たる）
+    fn view_ray(&self, p: (f64, f64)) -> (Camera, Vec3, Vec3) {
         let vp = self.st.display;
         let c = self.view_camera();
-        let dir = unproject(&c, (p.0 - vp.x as f64) as f32, (p.1 - vp.y as f64) as f32, vp.w.max(1) as f32, vp.h.max(1) as f32);
-        (c, dir)
+        let (x, y) = ((p.0 - vp.x as f64) as f32, (p.1 - vp.y as f64) as f32);
+        let (w, h) = (vp.w.max(1) as f32, vp.h.max(1) as f32);
+        if self.prep.cfg.lens.model == LensModel::Realistic {
+            // ピントの距離は、最後に描いたコマの値（frame_params が入れている）
+            let (o, dir) = krbr_render::flow::FlowCamera::new(c, &self.prep.cfg.lens).view_ray(2.0 * x / w - 1.0, 2.0 * y / h - 1.0);
+            return (c, o, dir);
+        }
+        (c, c.position, unproject(&c, x, y, w, h))
     }
 
     /// 画面の点（物理ピクセル）の部品を選ぶ。基板や何も無い所なら選択を外す
     fn pick_part(&mut self, p: (f64, f64)) {
         self.flush_emit_edit(true);
         self.emit_edit = None;
-        let (c, dir) = self.view_ray(p);
-        let hit = raycast_pick_visible(&self.prep.scene, c.position, dir, self.st.visible_mask());
+        let (_, o, dir) = self.view_ray(p);
+        let hit = raycast_pick_visible(&self.prep.scene, o, dir, self.st.visible_mask());
         self.selected = hit.and_then(|h| Selected::from_instance(&self.prep.scene, &self.prep.board, h.instance));
         self.material_error.clear();
         self.refresh_outline();
@@ -1751,9 +1758,9 @@ impl App {
 
     /// Ctrl + クリック：画面の点（物理ピクセル）にある面にピントを合わせる（ピンホールなら薄レンズにする）
     fn focus_at(&mut self, p: (f64, f64)) {
-        let (c, dir) = self.view_ray(p);
-        if let Some(t) = raycast_pick_visible(&self.prep.scene, c.position, dir, self.st.visible_mask()).map(|h| h.t) {
-            let point = c.position + dir * t;
+        let (c, o, dir) = self.view_ray(p);
+        if let Some(t) = raycast_pick_visible(&self.prep.scene, o, dir, self.st.visible_mask()).map(|h| h.t) {
+            let point = o + dir * t;
             self.st.focus_point = Some(point);
             if self.prep.cfg.lens.model == LensModel::Pinhole {
                 self.prep.cfg.lens.model = LensModel::Thin;
