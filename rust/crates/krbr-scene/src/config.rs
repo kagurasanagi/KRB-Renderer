@@ -87,6 +87,8 @@ pub struct ProjectConfig {
     pub radiance_clamp: f32,
     /// 分光モード（代表波長方式、4 波長）
     pub spectral: bool,
+    /// 背景を透明にする（カメラの光線が何にも当たらない画素を透明に。PNG はアルファ付き、EXR は A に入れる）
+    pub transparent_background: bool,
     pub integrator: IntegratorKind,
     /// VCM の近傍の半径の初期値（mm）。0 で自動
     pub vcm_radius: f32,
@@ -122,6 +124,7 @@ impl Default for ProjectConfig {
             glow_spread: 0.7,
             radiance_clamp: 10.0,
             spectral: false,
+            transparent_background: false,
             integrator: IntegratorKind::default(),
             vcm_radius: 0.0,
             lens: LensParams::default(),
@@ -526,6 +529,7 @@ fn read_into(c: &mut ProjectConfig, r: &mut Reader, base: &Path) {
     r.num(&["render", "glow_spread"], R::UNIT, &mut c.glow_spread);
     r.num(&["render", "radiance_clamp"], R::NON_NEGATIVE, &mut c.radiance_clamp);
     r.boolean(&["render", "spectral"], &mut c.spectral);
+    r.boolean(&["render", "transparent_background"], &mut c.transparent_background);
     // 知らない名前は警告して既定のまま（"path" は "pt" の別名）
     r.choice(&["render", "integrator"], &mut c.integrator);
     r.num(&["render", "vcm_radius"], R::NON_NEGATIVE, &mut c.vcm_radius);

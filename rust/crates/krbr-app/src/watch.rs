@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use ash::vk;
 use krbr_core::{info, warn, FileWatcher};
-use krbr_render::tonemapper::{DisplayMode, Tonemapper};
+use krbr_render::tonemapper::{Background, DisplayMode, Tonemapper};
 use krbr_render::vk::memory_barrier;
 use krbr_render::{image_io, Context, DenoiseQuality, Denoiser, FrameParams, GpuScene};
 use krbr_scene::scene::MaterialFilesWatch;
@@ -238,7 +238,7 @@ impl<'a> Renderer<'a> {
                 Ok(ms) => {
                     denoise_ms = ms;
                     let t = prog.targets();
-                    tone_denoised = Some(Tonemapper::with_views(self.ctx, d.output().view, t.albedo.view, t.normal.view, t.width, t.height).map_err(|e| anyhow::anyhow!(e))?);
+                    tone_denoised = Some(Tonemapper::with_color(self.ctx, d.output().view, t).map_err(|e| anyhow::anyhow!(e))?);
                 }
                 Err(e) => warn!("watch: {e}"),
             }
@@ -256,7 +256,7 @@ impl<'a> Renderer<'a> {
             if let Some(d) = denoiser {
                 d.record_output(cmd, strength, xyz);
             }
-            tm.record(cmd, self.exposure, DisplayMode::Beauty, xyz, &self.glow);
+            tm.record(cmd, self.exposure, DisplayMode::Beauty, xyz, &self.glow, Background::for_saving(self.frame.transparent_background));
             memory_barrier(dev, cmd, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_READ);
             let region = vk::BufferImageCopy::default()
                 .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
@@ -268,8 +268,11 @@ impl<'a> Renderer<'a> {
         let px = copied.map(|()| rb.mapped_bytes().map(<[u8]>::to_vec).unwrap_or_default());
         self.ctx.destroy_buffer(&mut rb);
         let mut px = px.map_err(|e| anyhow::anyhow!(e))?;
-        for c in px.chunks_exact_mut(4) {
-            c[3] = 255;
+        // 背景を透明にしていなければ不透明（アルファを付けたときは、トーンマップがアルファを書いている）
+        if !self.frame.transparent_background {
+            for c in px.chunks_exact_mut(4) {
+                c[3] = 255;
+            }
         }
         let render_ms = ms_since(t0);
         let t1 = Instant::now();

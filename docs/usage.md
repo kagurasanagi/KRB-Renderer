@@ -123,8 +123,8 @@
 
 | ファイル | 内容 |
 |---|---|
-| `board.png` | グローとトーンマッピング済み（ACES 近似、sRGB） |
-| `board.exr` | リニアの放射輝度（RGB float32） |
+| `board.png` | グローとトーンマッピング済み（ACES 近似、sRGB）。背景を透明にしたときはアルファ付き |
+| `board.exr` | リニアの放射輝度（RGB float32。背景を透明にしたときは A にアルファ、色はアルファを掛けた値） |
 | `board_albedo.exr` / `board_normal.exr` | 最初の交点のアルベド／ワールド法線（ノイズ除去の補助情報） |
 | `missing_models.json` / `missing_models.txt` | 見つからない・読めなかった 3D モデルの一覧 |
 
@@ -147,7 +147,7 @@
 | `krbr geom <pcb>` / `krbr models <pcb>` | 開発用：基板の形状と凹凸タイル（GPU を使わない）／全 3D モデルの読み込みの統計 |
 | `krbr diff <a> <b>` | 開発用：2 枚の画像（PNG / EXR）の差の平均と最大 |
 
-`render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率。正の値。付けると基板で覚えた視点を使わない）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--integrator pt|bdpt|vcm`（`path` は `pt` の別名。知らない名前はエラー）, `--seed`, `--spectral` / `--rgb`（色の計算）, `--mask-color <プリセット名 または r,g,b>`（レジストの色。下記）, `--substrate <材質名>`（基材。下記）, `--lens pinhole|thin|realistic`（知らない名前はエラー）, `--f-number`, `--focal-length`, `--focus-distance`, `--blades`, `--denoise` / `--no-denoise` / `--denoise-strength`, `--init`, `--no-cache`, `--no-kicad-cli`, `--validate`, `--normal-priority`, `-v`。
+`render` の主なオプション: `--spp`（既定 64）, `--width/--height`, `--elevation`（既定 35°）, `--azimuth`（既定 45°）, `--fov`, `--look-at X Y`（KiCad の座標の点を注視）, `--zoom`（自動の構図からの拡大率。正の値。付けると基板で覚えた視点を使わない）, `--exposure`, `--env-intensity`, `--env-rotation`, `--max-depth`, `--clamp`, `--integrator pt|bdpt|vcm`（`path` は `pt` の別名。知らない名前はエラー）, `--seed`, `--spectral` / `--rgb`（色の計算）, `--transparent` / `--opaque`（背景を透明にする。下記）, `--mask-color <プリセット名 または r,g,b>`（レジストの色。下記）, `--substrate <材質名>`（基材。下記）, `--lens pinhole|thin|realistic`（知らない名前はエラー）, `--f-number`, `--focal-length`, `--focus-distance`, `--blades`, `--denoise` / `--no-denoise` / `--denoise-strength`, `--init`, `--no-cache`, `--no-kicad-cli`, `--validate`, `--normal-priority`, `-v`。
 
 ### 速さの計測（`krbr bench`）
 
@@ -351,11 +351,20 @@ bump_scale = 0.1
 - 表示（GPU）と保存（CPU）は同じ式で、画素の差は 1/255 以内です（`tests/glow.rs`）。
 - ぼかしの広がりは画像の大きさに比例するので、表示と、解像度の違う保存の画像でも見た目はそろいます。
 
+**背景を透明にする**（設定パネルの「照明」、`--transparent` / `--opaque`、`<名前>.krbr` の `[render] transparent_background`）：カメラから見て環境マップしか見えない画素を透明にします（Blender の Film → Transparent と同じ考え方）。製品写真や資料に、基板だけを切り抜いた画像を使うときに。
+
+- 環境マップは、照明と映り込みにはそのまま使います。基板の取り付け穴など、向こう側に何も無い所も透明になります。
+- ビューアでは透明な所を市松模様で見せます。保存する PNG（`S`・「PNG として保存」・`render`・`watch`）はアルファ付き（ストレートアルファ）、EXR は A にアルファを入れ、色はアルファを掛けた値（premultiplied）にします。
+- アルファは、画素の中のサンプルのうち、カメラの光線が何かに当たった割合です。縁はなめらかに半透明になります。ノイズ除去した画像にも、元の画像のアルファを付けます。
+- ガラスなどの透明な物体は、不透明として扱います（向こうの景色は透けて見えるが、アルファは 1）。
+- グローは物の上にだけかかり、透明な所には広がりません。
+- MP4 は透明にできないので、動画の書き出しの間は背景を描きます。
+
 **前回の設定を覚える**：ビューアのパネルで変えた設定は、基板の設定ファイル `<名前>.krbr` の `[remembered]` に覚え、次に開いたときにも使います（変えてから 1 秒後と終了時に書く）。同じファイルの手で書く表（`[render]` など）は書き換えません。
 
 | 覚える項目 | 単位 | render / watch にも使うか |
 |---|---|---|
-| 環境マップ（ファイル・強さ・回転）、露出、グロー（強さ・しきい値・広がり）、積分器、レンズ（種類・F 値・ピント・焦点距離・羽根・周辺減光・口径食・色収差）、色の計算（RGB / 分光）、凹凸の強さ、レジストの色、画角 | 基板ごと | 使う |
+| 環境マップ（ファイル・強さ・回転）、背景を透明にするか、露出、グロー（強さ・しきい値・広がり）、積分器、レンズ（種類・F 値・ピント・焦点距離・羽根・周辺減光・口径食・色収差）、色の計算（RGB / 分光）、凹凸の強さ、レジストの色、画角 | 基板ごと | 使う |
 | 視点（注視点・距離・仰角・方位） | 基板ごと | 使う（`--look-at` / `--zoom` を付けたら自動の構図、`--elevation` / `--azimuth` はコマンドラインが勝つ） |
 | ノイズ除去のオン・オフと強さ、最大 spp、表示モード（画像 / アルベド / 法線）、レンダリングの比率、表面実装・スルーホールの部品の表示 | 基板ごと | ビューアだけ |
 | 描画のサイズ（決まったサイズのとき） | 基板ごと | 使う（`--width` / `--height` が勝つ） |

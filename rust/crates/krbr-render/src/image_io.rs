@@ -16,6 +16,21 @@ impl ImageF {
     pub fn new(width: u32, height: u32) -> Self {
         Self { width, height, rgba: vec![0.0; (width * height * 4) as usize] }
     }
+
+    /// アルファ（A）が 1 でない画素があるか（背景を透明にした画像。色はアルファを掛けた値）
+    pub fn has_alpha(&self) -> bool {
+        self.rgba.chunks_exact(4).any(|p| p[3] < 1.0)
+    }
+
+    /// src のアルファを写す（ノイズ除去した画像に、元の画像のアルファを付ける）。大きさが違えば何もしない
+    pub fn copy_alpha_from(&mut self, src: &ImageF) {
+        if (self.width, self.height) != (src.width, src.height) {
+            return;
+        }
+        for (d, s) in self.rgba.chunks_exact_mut(4).zip(src.rgba.chunks_exact(4)) {
+            d[3] = s[3];
+        }
+    }
 }
 
 pub fn load_hdr_image(p: &Path) -> Result<ImageF, String> {
@@ -79,12 +94,28 @@ pub fn aces_fitted(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     (1.60475 * o0 - 0.53108 * o1 - 0.07367 * o2, -0.10208 * o0 + 1.10813 * o1 - 0.00605 * o2, -0.00327 * o0 - 0.07276 * o1 + 1.07602 * o2)
 }
 
-/// 露出とグロー（crate::glow）をかけ、ACES でトーンマッピングして sRGB の 8bit にする（表示の shaders/tonemap.comp と同じ式）
+/// 露出とグロー（crate::glow）をかけ、ACES でトーンマッピングして sRGB の 8bit にする（表示の shaders/tonemap.comp と同じ式）。
+/// アルファのある画像（背景を透明にした画像。色はアルファを掛けた値）は、アルファで割ってからトーンマッピングし、
+/// アルファを付けた PNG 用の値（ストレートアルファ）にする。グローは透明な所には広げない（物の上にだけ足す）
 pub fn tonemap_rgba8(img: &ImageF, exposure_ev: f32, glow: &crate::glow::GlowParams) -> Vec<u8> {
     let scale = 2f32.powf(exposure_ev);
     let n = (img.width * img.height) as usize;
     let mut lin: Vec<[f32; 3]> = (0..n).map(|i| [img.rgba[i * 4] * scale, img.rgba[i * 4 + 1] * scale, img.rgba[i * 4 + 2] * scale].map(|v| v.max(0.0))).collect();
-    crate::glow::apply(&mut lin, img.width, img.height, glow);
+    let alpha: Option<Vec<f32>> = img.has_alpha().then(|| img.rgba.chunks_exact(4).map(|p| p[3].clamp(0.0, 1.0)).collect());
+    match &alpha {
+        None => crate::glow::apply(&mut lin, img.width, img.height, glow),
+        Some(a) => {
+            // グローはアルファを掛けた色から作り（表示と同じ）、アルファで割った色に足す
+            let mut with_glow = lin.clone();
+            crate::glow::apply(&mut with_glow, img.width, img.height, glow);
+            for i in 0..n {
+                for c in 0..3 {
+                    let g = with_glow[i][c] - lin[i][c];
+                    lin[i][c] = if a[i] > 0.0 { lin[i][c] / a[i] + g } else { 0.0 };
+                }
+            }
+        }
+    }
     let mut px = vec![0u8; n * 4];
     for i in 0..n {
         let (r, g, b) = aces_fitted(lin[i][0], lin[i][1], lin[i][2]);
@@ -93,7 +124,10 @@ pub fn tonemap_rgba8(img: &ImageF, exposure_ev: f32, glow: &crate::glow::GlowPar
         px[i * 4] = ((linear_to_srgb_f(r) + d).clamp(0.0, 1.0) * 255.0).round() as u8;
         px[i * 4 + 1] = ((linear_to_srgb_f(g) + d).clamp(0.0, 1.0) * 255.0).round() as u8;
         px[i * 4 + 2] = ((linear_to_srgb_f(b) + d).clamp(0.0, 1.0) * 255.0).round() as u8;
-        px[i * 4 + 3] = 255;
+        px[i * 4 + 3] = match &alpha {
+            Some(a) => (a[i] * 255.0).round() as u8,
+            None => 255,
+        };
     }
     px
 }

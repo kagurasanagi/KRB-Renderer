@@ -44,11 +44,14 @@ pub struct FrameParams {
     pub vcm_radius: f32,
     pub vcm_alpha: f32,
     pub lens: LensParams,
+    /// 背景を透明にする：カメラの光線が何にも当たらない画素は、環境光を足さず透明にする（環境光は映り込みと照明には使う）。
+    /// 色はアルファを掛けた値（premultiplied）になり、アルファは当たったサンプルの割合（Progressive::readback）
+    pub transparent_background: bool,
 }
 
 impl Default for FrameParams {
     fn default() -> Self {
-        Self { camera: Camera::default(), env_intensity: 1.0, env_rotation_rad: 0.0, radiance_clamp: 0.0, max_depth: 8, rr_start_depth: 3, seed: 0, spectral: false, vcm_radius: 0.0, vcm_alpha: 0.75, lens: LensParams::default() }
+        Self { camera: Camera::default(), env_intensity: 1.0, env_rotation_rad: 0.0, radiance_clamp: 0.0, max_depth: 8, rr_start_depth: 3, seed: 0, spectral: false, vcm_radius: 0.0, vcm_alpha: 0.75, lens: LensParams::default(), transparent_background: false }
     }
 }
 
@@ -519,12 +522,17 @@ impl<'a> Progressive<'a> {
     }
 
     /// 現在の累積を読み戻す（GPU が待機中に呼ぶこと）。分光モードでも RGB に変換して返す。
-    /// 読み戻し用のバッファが作れないなどで失敗したら Err
+    /// 背景を透明にしているときは、色の A にアルファ（カメラの光線が何かに当たったサンプルの割合）を入れる（色はアルファを
+    /// 掛けた値のまま）。それ以外は 1。読み戻し用のバッファが作れないなどで失敗したら Err
     pub fn readback(&self) -> Result<AovImages, String> {
         let (w, h) = (self.targets.width, self.targets.height);
         let bytes = w as u64 * h as u64 * 16;
-        let mut rb = self.ctx.create_buffer(bytes * 3, vk::BufferUsageFlags::TRANSFER_DST, true, true)?;
-        let imgs = [self.targets.color.image, self.targets.albedo.image, self.targets.normal.image];
+        let transparent = self.frame.transparent_background;
+        let mut imgs = vec![self.targets.color.image, self.targets.albedo.image, self.targets.normal.image];
+        if transparent {
+            imgs.push(self.targets.position.image);
+        }
+        let mut rb = self.ctx.create_buffer(bytes * imgs.len() as u64, vk::BufferUsageFlags::TRANSFER_DST, true, true)?;
         let rbb = rb.buffer;
         let r = self.ctx.submit_and_wait(|dev, cmd| {
             for (k, img) in imgs.iter().enumerate() {
@@ -542,20 +550,27 @@ impl<'a> Progressive<'a> {
         }
         let src = rb.mapped_bytes().expect("the readback buffer is host-visible");
         let n = (w * h) as usize;
+        let at = |k: usize, i: usize, c: usize| {
+            let o = n * 16 * k + i * 16 + c * 4;
+            f32::from_le_bytes([src[o], src[o + 1], src[o + 2], src[o + 3]])
+        };
         let mut out = [ImageF::new(w, h), ImageF::new(w, h), ImageF::new(w, h)];
         for (k, dst) in out.iter_mut().enumerate() {
-            let base = n * 16 * k;
             for i in 0..n {
-                let px = |c: usize| {
-                    let o = base + i * 16 + c * 4;
-                    f32::from_le_bytes([src[o], src[o + 1], src[o + 2], src[o + 3]])
-                };
-                let cnt = px(3); // A にサンプル数が入っている
+                let cnt = at(k, i, 3); // A にサンプル数が入っている
                 let inv = if cnt > 0.0 { 1.0 / cnt } else { 0.0 };
                 for c in 0..3 {
-                    dst.rgba[i * 4 + c] = px(c) * inv;
+                    dst.rgba[i * 4 + c] = at(k, i, c) * inv;
                 }
                 dst.rgba[i * 4 + 3] = 1.0;
+            }
+        }
+        if transparent {
+            // アルファ = 当たったサンプルの数 / 数えたサンプルの数（アルベドの A。レンズの中で遮られたサンプルは数えない）。
+            // 表示の shaders/tonemap.comp の coverage と同じ
+            for i in 0..n {
+                let (hits, cnt) = (at(3, i, 3), at(1, i, 3));
+                out[0].rgba[i * 4 + 3] = if cnt > 0.0 { (hits / cnt).clamp(0.0, 1.0) } else { 0.0 };
             }
         }
         self.ctx.destroy_buffer(&mut rb);

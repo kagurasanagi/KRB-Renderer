@@ -65,6 +65,8 @@ pub fn render_offscreen(ctx: &Context, scene: &GpuScene<'_>, s: &RenderSettings)
                     if xyz {
                         xyz_to_linear_srgb(&mut img);
                     }
+                    // 背景が透明なら、ノイズ除去していない画像のアルファを付ける（アルファはノイズが少ない）
+                    img.copy_alpha_from(&aov.color);
                     krbr_core::info!("denoised in {:.0} ms ({}, quality {}, strength {:.2})", ms, d.device_name(), q.name(), strength);
                     Some(img)
                 }

@@ -16,6 +16,40 @@ pub enum DisplayMode {
     Normal = 2,
 }
 
+/// 背景を透明にした画像（FrameParams::transparent_background）の、アルファの扱い
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Background {
+    /// アルファを使わない（背景を透明にしていない）
+    Opaque,
+    /// 透明な所を市松模様にして見せる（表示）
+    Checker,
+    /// アルファを付けて出す（保存。色はアルファで割った値）
+    Alpha,
+}
+
+impl Background {
+    /// 表示用：背景を透明にしていれば市松模様
+    pub fn for_display(transparent: bool) -> Self {
+        if transparent {
+            Self::Checker
+        } else {
+            Self::Opaque
+        }
+    }
+
+    /// 保存用：背景を透明にしていればアルファを付ける
+    pub fn for_saving(transparent: bool) -> Self {
+        if transparent {
+            Self::Alpha
+        } else {
+            Self::Opaque
+        }
+    }
+}
+
+/// 市松模様の 1 マス（画素）
+const CHECKER_PX: f32 = 12.0;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct TonemapPush {
@@ -26,6 +60,8 @@ struct TonemapPush {
     xyz_to_rgb: [Vec4; 3],
     /// x: 強さ / 段の重みの合計（0 ならグローなし）, y, z: グローの最上段の大きさ
     glow: Vec4,
+    /// x: 0 = 不透明, 1 = 市松模様の上に合成, 2 = アルファを付ける（Background）。y: 市松の 1 マス（画素）
+    background: Vec4,
 }
 
 #[repr(C)]
@@ -45,7 +81,7 @@ struct GlowPush {
 }
 
 // tonemap.comp・glow.comp のプッシュ定数と同じ大きさ（隙間が無いことの確認も兼ねる）
-const _: () = assert!(std::mem::size_of::<TonemapPush>() == 80);
+const _: () = assert!(std::mem::size_of::<TonemapPush>() == 96);
 const _: () = assert!(std::mem::size_of::<GlowPush>() == 96);
 // 安全性：repr(C) で、上の assert により隙間が無い
 unsafe impl GpuPod for TonemapPush {}
@@ -92,12 +128,18 @@ fn write_storage_images(dev: &ash::Device, set: vk::DescriptorSet, views: &[vk::
 impl<'a> Tonemapper<'a> {
     /// 出力（RGBA8、GENERAL レイアウト）を作る。targets が変わったら作り直す
     pub fn new(ctx: &'a Context, targets: &RenderTargets) -> Result<Self, String> {
-        Self::with_views(ctx, targets.color.view, targets.albedo.view, targets.normal.view, targets.width, targets.height)
+        Self::with_color(ctx, targets.color.view, targets)
     }
 
-    /// 色の画像を差し替えて作る（ノイズ除去の結果を表示するとき。A が割る数になっている画像）。
+    /// 色の画像を差し替えて作る（ノイズ除去の結果を表示するとき。A が割る数になっている画像）。アルベド・法線・
+    /// アルファ（最初に当たった点）は targets のもの
+    pub fn with_color(ctx: &'a Context, color: vk::ImageView, targets: &RenderTargets) -> Result<Self, String> {
+        Self::with_views(ctx, color, targets.albedo.view, targets.normal.view, targets.position.view, targets.width, targets.height)
+    }
+
+    /// 画像を指定して作る。position はアルファ（背景を透明にしたとき）に使う、最初に当たった点の累積。
     /// 失敗したら Err（作った分は Drop が解放する）
-    pub fn with_views(ctx: &'a Context, color: vk::ImageView, albedo: vk::ImageView, normal: vk::ImageView, width: u32, height: u32) -> Result<Self, String> {
+    pub fn with_views(ctx: &'a Context, color: vk::ImageView, albedo: vk::ImageView, normal: vk::ImageView, position: vk::ImageView, width: u32, height: u32) -> Result<Self, String> {
         let dev = &ctx.device;
         // 資源は 1 つ作るたびにフィールドへ入れる。途中で失敗して返ると、Drop が作った分だけを破棄する（null は何もしない）
         let mut t = Self {
@@ -118,7 +160,7 @@ impl<'a> Tonemapper<'a> {
             glow_pipeline: vk::Pipeline::null(),
         };
         // シェーダが読めないなど失敗しやすいものを先に作る
-        t.set_layout = storage_set_layout(dev, 5)?;
+        t.set_layout = storage_set_layout(dev, 6)?;
         t.glow_set_layout = storage_set_layout(dev, 3)?;
         let layouts = [t.set_layout];
         let pcr = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::COMPUTE, offset: 0, size: std::mem::size_of::<TonemapPush>() as u32 }];
@@ -146,12 +188,12 @@ impl<'a> Tonemapper<'a> {
             }
         })?;
         let n_glow_sets = if sizes.is_empty() { 0 } else { 2 * sizes.len() as u32 - 1 };
-        let sizes_pool = [vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_IMAGE, descriptor_count: 5 + 3 * n_glow_sets }];
+        let sizes_pool = [vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_IMAGE, descriptor_count: 6 + 3 * n_glow_sets }];
         t.pool = unsafe { dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1 + n_glow_sets).pool_sizes(&sizes_pool), None) }.map_err(|e| format!("{e:?}"))?;
         t.set = unsafe { dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(t.pool).set_layouts(&layouts)) }.map_err(|e| format!("{e:?}"))?[0];
         // 最上段：段が 1 つなら縮めた段、2 つ以上なら足し上げた段
         let top = t.sums.first().unwrap_or(&t.levels[0]).view;
-        write_storage_images(dev, t.set, &[color, albedo, normal, t.out.view, top]);
+        write_storage_images(dev, t.set, &[color, albedo, normal, t.out.view, top, position]);
 
         // グローの処理の並び：縮める（0 段目は累積画像から）→ 小さい段から足し上げる
         let n = sizes.len();
@@ -176,8 +218,9 @@ impl<'a> Tonemapper<'a> {
         Ok(t)
     }
 
-    /// xyz_input: 累積が CIE XYZ（分光モード）なら true。glow: グロー（画像の表示のときだけかける）
-    pub fn record(&self, cmd: vk::CommandBuffer, exposure_ev: f32, mode: DisplayMode, xyz_input: bool, glow: &glow::GlowParams) {
+    /// xyz_input: 累積が CIE XYZ（分光モード）なら true。glow: グロー（画像の表示のときだけかける）。
+    /// background: 背景を透明にした画像のアルファの扱い（画像の表示のときだけ）
+    pub fn record(&self, cmd: vk::CommandBuffer, exposure_ev: f32, mode: DisplayMode, xyz_input: bool, glow: &glow::GlowParams, background: Background) {
         let dev = &self.ctx.device;
         let m = krbr_scene::spectrum::xyz_to_linear_srgb();
         let w = if xyz_input { 1.0 } else { 0.0 };
@@ -201,7 +244,12 @@ impl<'a> Tonemapper<'a> {
             }
             let top = glow::level_sizes(self.width, self.height).first().copied().unwrap_or((1, 1));
             let glow_v = if use_glow { Vec4::new(glow.strength / glow.weight_sum(n_levels), top.0 as f32, top.1 as f32, 0.0) } else { Vec4::ZERO };
-            let pc = TonemapPush { exposure_scale, mode: mode as u32, width: self.width, height: self.height, xyz_to_rgb, glow: glow_v };
+            let bg = match background {
+                Background::Opaque => 0.0,
+                Background::Checker => 1.0,
+                Background::Alpha => 2.0,
+            };
+            let pc = TonemapPush { exposure_scale, mode: mode as u32, width: self.width, height: self.height, xyz_to_rgb, glow: glow_v, background: Vec4::new(bg, CHECKER_PX, 0.0, 0.0) };
             dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
             dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.layout, 0, &[self.set], &[]);
             dev.cmd_push_constants(cmd, self.layout, vk::ShaderStageFlags::COMPUTE, 0, crate::vk::as_bytes(std::slice::from_ref(&pc)));

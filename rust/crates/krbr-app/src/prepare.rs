@@ -52,6 +52,8 @@ pub struct RenderOptions {
     pub no_cache: bool,
     pub validate: bool,
     pub spectral: Option<bool>,
+    /// 背景を透明にする。None なら設定ファイル（または覚えたもの）のまま
+    pub transparent_background: Option<bool>,
     /// None なら設定ファイル（または覚えたもの）のまま
     pub lens: Option<LensModel>,
     pub f_number: Option<f32>,
@@ -232,6 +234,9 @@ fn apply_command_line(cfg: &mut ProjectConfig, o: &RenderOptions) {
     }
     if let Some(v) = o.spectral {
         cfg.spectral = v;
+    }
+    if let Some(v) = o.transparent_background {
+        cfg.transparent_background = v;
     }
     if !o.substrate.is_empty() {
         cfg.scene.substrate = if o.substrate == "fr4" { String::new() } else { o.substrate.clone() };
@@ -493,6 +498,7 @@ pub fn frame_params(cfg: &ProjectConfig, cam: Camera, seed: u32) -> FrameParams 
         env_rotation_rad: cfg.env_rotation_deg.to_radians(),
         radiance_clamp: cfg.radiance_clamp,
         spectral: cfg.spectral,
+        transparent_background: cfg.transparent_background,
         vcm_radius: cfg.vcm_radius,
         lens: cfg.lens.clone(),
         max_depth: cfg.max_depth.max(1),

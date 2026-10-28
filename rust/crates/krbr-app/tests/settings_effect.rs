@@ -134,6 +134,9 @@ fn every_setting_changes_the_image() {
     let spectral_thin_ref = shoot(&ctx, &spectral_thin, "");
     let vcm = RenderOptions { integrator: Some(IntegratorKind::Vcm), ..base.clone() };
     let vcm_ref = shoot(&ctx, &vcm, "");
+    // 背景を透明にする設定は、背景の見える引いた構図で比べる
+    let wide = RenderOptions { look_at: Vec::new(), zoom: None, elevation: Some(40.0), ..base.clone() };
+    let wide_ref = shoot(&ctx, &wide, "");
 
     // (名前, 基準の設定, 基準の画像, 変えた設定, 基板の設定ファイル)
     let cases: Vec<(&str, &RenderOptions, &Shot, RenderOptions, &str)> = vec![
@@ -146,6 +149,7 @@ fn every_setting_changes_the_image() {
         ("--env-rotation", &base, &reference, RenderOptions { env_rotation: Some(90.0), ..base.clone() }, ""),
         ("--clamp", &base, &reference, RenderOptions { radiance_clamp: Some(0.2), ..base.clone() }, ""),
         ("--spectral", &base, &reference, RenderOptions { spectral: Some(true), ..base.clone() }, ""),
+        ("--transparent", &wide, &wide_ref, RenderOptions { transparent_background: Some(true), ..wide.clone() }, ""),
         ("--max-depth", &base, &reference, RenderOptions { max_depth: Some(1), ..base.clone() }, ""),
         ("--fov", &base, &reference, RenderOptions { fov: Some(45.0), ..base.clone() }, ""),
         ("--elevation", &base, &reference, RenderOptions { elevation: Some(40.0), ..base.clone() }, ""),
@@ -180,6 +184,9 @@ fn every_setting_changes_the_image() {
         ("[camera] margin", &base, &reference, base.clone(), "[camera]\nmargin = 0.3\n"),
         ("[render] exposure_ev", &base, &reference, base.clone(), "[render]\nexposure_ev = -1.0\n"),
         ("[render] glow", &base, &reference, base.clone(), "[render]\nglow = 0.0\n"),
+        ("[render] transparent_background", &wide, &wide_ref, wide.clone(), "[render]
+transparent_background = true
+"),
         ("[render] radiance_clamp", &base, &reference, base.clone(), "[render]\nradiance_clamp = 0.2\n"),
         ("[environment] intensity", &base, &reference, base.clone(), "[environment]\nintensity = 3.0\n"),
         ("[environment] rotation_deg", &base, &reference, base.clone(), "[environment]\nrotation_deg = 120.0\n"),

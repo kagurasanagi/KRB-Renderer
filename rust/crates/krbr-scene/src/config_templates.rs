@@ -79,6 +79,7 @@ glow_threshold = 4.0         # これより明るい光だけがにじむ（露�
 glow_spread = 0.7            # にじみの広がり（0..1。小さいと光の近くに締まる）
 radiance_clamp = 10.0        # 間接光の放射輝度の上限（ホタル対策）。0 で無効（偏りのない結果）
 spectral = false             # true で分光レンダリング（代表波長方式。分散による色の分かれを再現する）
+transparent_background = false # true で背景を透明に（PNG はアルファ付き。環境マップは照明と映り込みには使う）
 integrator = "pt"            # pt（パストレーサー）/ bdpt（双方向）/ vcm（透明な物体越しの集光模様も扱う）
 # vcm_radius = 0.0           # VCM の近傍の半径の初期値（mm）。0 でシーンの大きさの 0.3%
 

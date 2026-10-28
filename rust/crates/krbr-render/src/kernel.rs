@@ -79,7 +79,7 @@ pub fn make_frame_ubo(sc: &GpuScene, width: u32, height: u32, fp: &FrameParams, 
         cam_up: (cam.up * cam.tan_half_fov_y).extend(0.0),
         cam_forward: cam.forward.extend(0.0),
         board_map: sc.board_map,
-        env_params: Vec4::new(fp.env_intensity, fp.env_rotation_rad, fp.radiance_clamp, 0.0),
+        env_params: Vec4::new(fp.env_intensity, fp.env_rotation_rad, fp.radiance_clamp, if fp.transparent_background { 1.0 } else { 0.0 }),
         dims: UVec4::new(width, height, sc.env_dist_w, sc.env_dist_h),
         // z: 光線の cull mask（見せるインスタンスの種類）
         counts: UVec4::new(fp.max_depth, fp.rr_start_depth, sc.visible_mask as u32, 0),

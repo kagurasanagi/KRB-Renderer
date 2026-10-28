@@ -249,6 +249,7 @@ pub struct ViewSettings<'a> {
     pub glow_spread: f32,
     pub integrator: IntegratorKind,
     pub spectral: bool,
+    pub transparent_background: bool,
     pub bump_intensity: f32,
     /// レジストの色：プリセットの名前、r,g,b、または空（stackup の色・既定）
     pub mask: String,
@@ -274,6 +275,7 @@ impl<'a> ViewSettings<'a> {
             glow_spread: cfg.glow_spread,
             integrator: cfg.integrator,
             spectral: cfg.spectral,
+            transparent_background: cfg.transparent_background,
             bump_intensity: cfg.scene.bump_intensity,
             mask: mask_spec(&cfg.scene),
             substrate: cfg.scene.substrate.clone(),
@@ -318,6 +320,7 @@ impl<'a> ViewSettings<'a> {
         }
         t.insert("integrator".into(), Value::String(self.integrator.as_str().into()));
         t.insert("spectral".into(), Value::Boolean(self.spectral));
+        t.insert("transparent_background".into(), Value::Boolean(self.transparent_background));
         t.insert("mask".into(), Value::String(self.mask.clone()));
         t.insert("substrate".into(), Value::String(self.substrate.clone()));
         t.insert("lens_model".into(), Value::String(l.model.as_str().into()));
@@ -395,6 +398,9 @@ pub fn apply_view_values(cfg: &mut ProjectConfig, v: &ViewValues) {
     }
     if let Some(b) = v.get("spectral").and_then(|x| x.as_bool()) {
         cfg.spectral = b;
+    }
+    if let Some(b) = v.get("transparent_background").and_then(|x| x.as_bool()) {
+        cfg.transparent_background = b;
     }
     if let Some(s) = v.get("substrate").and_then(|x| x.as_str()) {
         cfg.scene.substrate = s.to_string();

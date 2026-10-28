@@ -13,7 +13,7 @@ use krbr_core::{error, info, warn, FileWatcher};
 use krbr_kicad::Board;
 use krbr_render::image_io::{self, ImageF};
 use krbr_render::glow::GlowParams;
-use krbr_render::tonemapper::{DisplayMode, Tonemapper};
+use krbr_render::tonemapper::{Background, DisplayMode, Tonemapper};
 use krbr_render::vk::{image_barrier, memory_barrier, Buffer};
 use krbr_render::studio_env::STUDIO;
 use krbr_render::{build_env_distribution, describe_environment, is_builtin, load_environment_map, Context, ContextOptions, DenoiseQuality, Denoiser, EnvDistribution, EnvironmentName, GpuScene, Progressive};
@@ -433,6 +433,8 @@ struct ViewState {
     show_smd: bool,
     show_tht: bool,
     spectral: bool,
+    /// 背景を透明にする（表示は市松模様、保存する PNG はアルファ付き）。動画の書き出しの間は使わない
+    transparent: bool,
     rotating: bool,
     panning: bool,
     /// 左ボタンを押した位置と、そこから動いた量（ほとんど動かさずに離したらクリック）
@@ -1124,6 +1126,10 @@ fn read_image(g: &Gpu, denoised: bool) -> Result<ImageF, String> {
             if g.prog.xyz_output() {
                 krbr_render::integrator::xyz_to_linear_srgb(&mut img);
             }
+            // 背景が透明なら、累積のアルファを付ける（アルファはノイズが少ないので、ノイズ除去しない）
+            if g.prog.frame().transparent_background {
+                img.copy_alpha_from(&g.prog.readback()?.color);
+            }
             Ok(img)
         }
         None => Ok(g.prog.readback()?.color),
@@ -1220,6 +1226,7 @@ impl App {
         c.glow_threshold = st.glow_threshold;
         c.glow_spread = st.glow_spread;
         c.spectral = st.spectral;
+        c.transparent_background = st.transparent;
         c.bump_intensity = st.bump_intensity;
         c.fov_deg = st.fov;
         c.elevation_deg = st.elevation;
@@ -1355,6 +1362,7 @@ impl App {
         st.bump_intensity = c.scene.bump_intensity;
         st.fov = c.fov_deg;
         st.spectral = c.spectral;
+        st.transparent = c.transparent_background;
         // ビューアだけの項目は、起動時と同じ決め方（コマンドライン、既定）で。覚えた値は使わない
         ViewerSettings::new(&self.vo, &remember::ViewValues::new()).apply(st);
         st.mask_choice = mask_choice_of(&c.scene);
@@ -1477,6 +1485,8 @@ impl App {
         c.env_rotation_deg = self.st.env_rotation_deg;
         c.env_intensity = self.st.env_intensity;
         c.spectral = self.st.spectral;
+        // MP4 は透明にできないので、動画の書き出しの間は背景を描く
+        c.transparent_background = self.st.transparent && self.video.is_none();
         let cam = orbit_camera(self.st.target, self.st.distance, self.st.elevation, self.st.azimuth, self.st.fov, w as f32 / h.max(1) as f32);
         self.st.tan_half_fov_y = cam.tan_half_fov_y;
         // ピント：決めた点があれば、今のカメラからその点までの距離（カメラを動かしても合わせ続ける）。無ければ注視点（0 = 自動）
@@ -1634,7 +1644,7 @@ impl App {
         let g = self.gpu.as_mut().unwrap();
         g.ctx.wait_idle();
         let t = g.prog.targets();
-        let made = Denoiser::new(g.ctx, t, DenoiseQuality::Fast).and_then(|d| Tonemapper::with_views(g.ctx, d.output().view, t.albedo.view, t.normal.view, t.width, t.height).map(|tm| (d, tm)));
+        let made = Denoiser::new(g.ctx, t, DenoiseQuality::Fast).and_then(|d| Tonemapper::with_color(g.ctx, d.output().view, t).map(|tm| (d, tm)));
         match made {
             Ok((d, tm)) => {
                 g.tone_denoised = Some(tm);
@@ -3282,17 +3292,19 @@ impl App {
             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(|e| format!("{e:?}"))?;
         }
         // サンプルを流している間は累積の画像を読まず、前に描いた画像をそのまま見せる
+        // 背景を透明にしているなら、透明な所を市松模様にして見せる（累積しているフレームの設定で決める）
+        let background = Background::for_display(g.prog.frame().transparent_background);
         let disp = if show_denoised {
             let t = g.tone_denoised.as_ref().unwrap();
             if !busy {
                 // 結果を元の画像と強さで混ぜる（軽いので毎フレーム。強さのスライダーがすぐ効く）
                 g.denoiser.as_ref().unwrap().record_output(cmd, self.st.denoise_strength, xyz);
-                t.record(cmd, self.st.exposure, self.st.mode, xyz, &self.st.glow_params());
+                t.record(cmd, self.st.exposure, self.st.mode, xyz, &self.st.glow_params(), background);
             }
             t.output()
         } else {
             if !busy {
-                g.tone.record(cmd, self.st.exposure, self.st.mode, xyz, &self.st.glow_params());
+                g.tone.record(cmd, self.st.exposure, self.st.mode, xyz, &self.st.glow_params(), background);
             }
             g.tone.output()
         };
@@ -3724,6 +3736,7 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         show_smd: true,
         show_tht: true,
         spectral: cfg.spectral,
+        transparent: cfg.transparent_background,
         rotating: false,
         panning: false,
         press_at: None,
@@ -4047,7 +4060,7 @@ mod tests {
         // 描き直すもの：その id を変えたら立つ印
         let expect = |id: &str| -> &'static str {
             match id {
-                "env.intensity" | "env.rotation" | "camera.fov" | "color.spectral" => "frame",
+                "env.intensity" | "env.rotation" | "env.transparent" | "camera.fov" | "color.spectral" => "frame",
                 id if id.starts_with("lens.") => "frame",
                 "surface.bump" | "surface.substrate" => "materials",
                 "surface.mask" => "mask",

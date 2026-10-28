@@ -252,6 +252,12 @@ struct RenderArgs {
     /// RGB rendering (overrides the spectral mode remembered for the board or set in <name>.krbr)
     #[arg(long, conflicts_with = "spectral")]
     rgb: bool,
+    /// transparent background: pixels where the camera sees only the environment are transparent (PNG with alpha, EXR alpha)
+    #[arg(long)]
+    transparent: bool,
+    /// opaque background (overrides the transparent background remembered for the board or set in <name>.krbr)
+    #[arg(long, conflicts_with = "transparent")]
+    opaque: bool,
     /// camera lens: pinhole (default), thin, realistic
     #[arg(long, value_parser = parse_lens)]
     lens: Option<LensModel>,
@@ -390,6 +396,7 @@ impl RenderArgs {
             builtin_settings_only: false,
             validate: self.validate,
             spectral: if self.spectral { Some(true) } else if self.rgb { Some(false) } else { None },
+            transparent_background: if self.transparent { Some(true) } else if self.opaque { Some(false) } else { None },
             lens: self.lens,
             f_number: self.f_number,
             focal_length: self.focal_length,

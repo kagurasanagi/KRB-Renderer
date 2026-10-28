@@ -90,7 +90,7 @@ layout(set = 0, binding = KRBR_BINDING_FRAME, std140) uniform Frame {
     vec4 camUp;       // xyz: 上方向 * tan(半画角)
     vec4 camForward;
     vec4 boardMap;    // x,y: 距離場（boardTex）の原点のワールド X,Z、z,w: 1/幅, 1/奥行き
-    vec4 envParams;   // x: 強度, y: 回転（rad）, z: 間接光の放射輝度の上限（0 で無効）
+    vec4 envParams;   // x: 強度, y: 回転（rad）, z: 間接光の放射輝度の上限（0 で無効）, w: 1 なら背景を透明にする（transparentBackground）
     uvec4 dims;       // x,y: 出力解像度, z,w: 環境マップ分布の解像度
     uvec4 counts;     // x: 最大深さ（経路の線分は x + 1 本まで。maxPathLength）, y: ロシアンルーレット開始深さ（PT のみ）
     vec4 maskParams;  // x: 銅の上のレジストの厚み, y: 基材の上, z: 銅の縁の上, w: 縁から中央への変化の距離（mm）
@@ -129,6 +129,10 @@ layout(push_constant) uniform Push {
 
 // 経路の線分の数（カメラ・光源を含めた頂点の数 − 1）の上限。PT・BDPT・VCM で同じ意味にする
 uint maxPathLength() { return F.counts.x + 1u; }
+
+// 背景を透明にする：カメラの光線が何にも当たらなければ、環境光を足さない（黒、アルファは accumPosition.w から求める）。
+// 環境光は、映り込みと照明にはそのまま使う
+bool transparentBackground() { return F.envParams.w > 0.5; }
 
 float tanHalfFovY() { return length(F.camUp.xyz); }
 // 画素を単位とした、ピンホールの像面までの距離

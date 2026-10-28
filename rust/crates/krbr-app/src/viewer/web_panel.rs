@@ -296,6 +296,7 @@ impl App {
         }
         env.push(slider("env.intensity", fl!("env-intensity"), st.env_intensity as f64, 0.05, 8.0, true, 2, ""));
         env.push(slider("env.rotation", fl!("env-rotation"), st.env_rotation_deg as f64, -180.0, 180.0, false, 0, "°"));
+        env.push(tip(check("env.transparent", fl!("env-transparent"), st.transparent), fl!("env-transparent-tip")));
         sections.push(self.group_section("lighting", fl!("panel-lighting"), None, env));
 
         // カメラ：画角・視点・視点の操作
@@ -493,6 +494,12 @@ impl App {
             "env.rotation" => {
                 st.env_rotation_deg = f as f32;
                 st.changed.frame = true;
+            }
+            "env.transparent" => {
+                if b != st.transparent {
+                    st.transparent = b;
+                    st.changed.frame = true;
+                }
             }
             "exposure.ev" => st.exposure = f as f32,
             "glow.strength" => st.glow = f as f32,

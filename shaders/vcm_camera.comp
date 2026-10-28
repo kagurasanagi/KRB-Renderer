@@ -203,8 +203,10 @@ void main() {
             // 環境光に当たった（s = 0）
             vec4 Le = envSpectrum(cam.dir);
             if (cam.pathLength == 1u) {
-                L += maskTerminated(cam.throughput * Le, cam.terminated);
-                albedo = clamp(envRadiance(cam.dir), 0.0, 1.0);
+                if (!transparentBackground()) {
+                    L += maskTerminated(cam.throughput * Le, cam.terminated);
+                    albedo = clamp(envRadiance(cam.dir), 0.0, 1.0);
+                }
             } else {
                 float directPdfW = envLightPdfW(cam.dir);  // 環境光の「点」の確率密度は立体角あたり（LightEmission.directPdf と同じ）
                 float emissionPdfW = envEmissionPdfW(directPdfW);
