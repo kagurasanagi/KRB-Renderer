@@ -21,6 +21,8 @@
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFPrs_DocumentExplorer.hxx>
 
+#include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
@@ -56,6 +58,22 @@ std::string labelName(const TDF_Label& label) {
 
 std::once_flag g_occtInit;
 
+// 最後の変換の時間の内訳（ミリ秒。並びは krbr_step.h の krbr_step_last_timings）。変換を呼んだスレッドごと
+thread_local double g_timings[KRBR_STEP_TIMINGS] = {};
+
+double msSince(std::chrono::steady_clock::time_point t) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+}
+
+// 区間の時間を測る：lap(i) で前の lap（または作ったとき）からの時間を g_timings[i] に入れる
+struct Laps {
+    std::chrono::steady_clock::time_point t = std::chrono::steady_clock::now();
+    void lap(int i) {
+        g_timings[i] = msSince(t);
+        t = std::chrono::steady_clock::now();
+    }
+};
+
 // メモリを確保しないで書く（例外の後始末の中からも呼ぶので）
 void setError(char* err, size_t len, std::string_view msg) noexcept {
     if (!err || len == 0) return;
@@ -73,6 +91,7 @@ bool tessellate(const std::filesystem::path& p, double linear, double angular, M
         Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_Printer));
     });
     try {
+        Laps laps;
         Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
         Handle(TDocStd_Document) doc;
         app->NewDocument("BinXCAF", doc);
@@ -89,11 +108,13 @@ bool tessellate(const std::filesystem::path& p, double linear, double angular, M
             app->Close(doc);
             return false;
         }
+        laps.lap(0);
         if (!reader.Transfer(doc)) {
             error = "STEP transfer failed";
             app->Close(doc);
             return false;
         }
+        laps.lap(1);
         Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
         NCollection_Sequence<TDF_Label> roots;
         shapes->GetFreeShapes(roots);
@@ -102,6 +123,7 @@ bool tessellate(const std::filesystem::path& p, double linear, double angular, M
             BRepMesh_IncrementalMesh mesher(s, linear, false, angular, true);
             (void)mesher;
         }
+        laps.lap(2);
 
         PartTable table;
         // ルート（製品全体）の名前は部位の区別にならないので、部位名からは除く
@@ -144,6 +166,7 @@ bool tessellate(const std::filesystem::path& p, double linear, double angular, M
         }
         out.parts = std::move(table.parts);
         app->Close(doc);
+        laps.lap(3);
         if (out.mesh.triangleCount() == 0) {
             error = "tessellation produced no triangles";
             return false;
@@ -166,6 +189,8 @@ extern "C" {
 KRBR_STEP_API int krbr_step_to_mesh_file(const char* step_file, double linear_deflection, double angular_deflection,
                                          const char* out_file, char* err, size_t err_len) {
     try {
+        std::fill(std::begin(g_timings), std::end(g_timings), 0.0);
+        const auto t0 = std::chrono::steady_clock::now();
         if (!step_file || !out_file) {
             setError(err, err_len, "null path");
             return 1;
@@ -173,13 +198,18 @@ KRBR_STEP_API int krbr_step_to_mesh_file(const char* step_file, double linear_de
         ModelMesh mesh;
         std::string error;
         if (!tessellate(u8path(step_file), linear_deflection, angular_deflection, mesh, error)) {
+            g_timings[5] = msSince(t0);
             setError(err, err_len, error);
             return 2;
         }
+        const auto tw = std::chrono::steady_clock::now();
         if (!writeMeshFile(u8path(out_file), mesh)) {
+            g_timings[5] = msSince(t0);
             setError(err, err_len, std::string("cannot write ") + out_file);
             return 3;
         }
+        g_timings[4] = msSince(tw);
+        g_timings[5] = msSince(t0);
         return 0;
     } catch (const std::exception& e) {
         setError(err, err_len, e.what());
@@ -191,5 +221,12 @@ KRBR_STEP_API int krbr_step_to_mesh_file(const char* step_file, double linear_de
 
 KRBR_STEP_API int krbr_step_api_version(void) { return KRBR_STEP_API_VERSION; }
 KRBR_STEP_API int krbr_step_mesh_file_version(void) { return static_cast<int>(kMeshFileVersion); }
+
+KRBR_STEP_API size_t krbr_step_last_timings(double* ms, size_t n) {
+    if (!ms) return 0;
+    const size_t k = std::min<size_t>(n, KRBR_STEP_TIMINGS);
+    std::copy(g_timings, g_timings + k, ms);
+    return k;
+}
 
 }  // extern "C"

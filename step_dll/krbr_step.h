@@ -30,6 +30,12 @@ KRBR_STEP_API int krbr_step_to_mesh_file(const char* step_file, double linear_de
 KRBR_STEP_API int krbr_step_api_version(void);
 KRBR_STEP_API int krbr_step_mesh_file_version(void);
 
+// 呼んだスレッドで最後の krbr_step_to_mesh_file にかかった時間の内訳（ミリ秒）を ms に n 個まで書き、書いた数を返す。
+// 並び：0 ReadFile、1 Transfer、2 BRepMesh（分割）、3 三角形の取り出し、4 .krbm の書き出し、5 全体。
+// 失敗した変換では、そこまでの段階だけが 0 以外。後から足した関数なので、無い DLL もある（呼ぶ側は有無を確かめる）
+#define KRBR_STEP_TIMINGS 6
+KRBR_STEP_API size_t krbr_step_last_timings(double* ms, size_t n);
+
 #ifdef __cplusplus
 }
 #endif

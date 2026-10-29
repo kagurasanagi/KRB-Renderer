@@ -44,10 +44,16 @@ const STEP_API_VERSION: c_int = 1;
 
 type ToMeshFileFn = unsafe extern "C" fn(*const c_char, c_double, c_double, *const c_char, *mut c_char, usize) -> c_int;
 type VersionFn = unsafe extern "C" fn() -> c_int;
+type TimingsFn = unsafe extern "C" fn(*mut c_double, usize) -> usize;
+
+/// krbr_step_last_timings の並び（krbr_step.h）
+const STEP_TIMING_NAMES: [&str; 6] = ["read", "transfer", "mesh", "extract", "write", "total"];
 
 struct StepDll {
     _lib: libloading::Library,
     to_mesh_file: ToMeshFileFn,
+    /// 最後の変換の時間の内訳（後から足した関数なので、古い DLL には無い）
+    last_timings: Option<TimingsFn>,
 }
 
 // 安全性：関数ポインタはライブラリと同じ寿命で、ライブラリは一度読んだら解放しない
@@ -94,11 +100,12 @@ fn load_step_dll() -> Result<StepDll, String> {
         }
     }
     .map_err(|e| format!("cannot load {}: {e}", path.display()))?;
-    let (api, file, func) = unsafe {
+    let (api, file, func, last_timings) = unsafe {
         let api: libloading::Symbol<VersionFn> = lib.get(b"krbr_step_api_version\0").map_err(|e| e.to_string())?;
         let file: libloading::Symbol<VersionFn> = lib.get(b"krbr_step_mesh_file_version\0").map_err(|e| e.to_string())?;
         let func: libloading::Symbol<ToMeshFileFn> = lib.get(b"krbr_step_to_mesh_file\0").map_err(|e| e.to_string())?;
-        (api(), file(), *func)
+        let timings = lib.get::<TimingsFn>(b"krbr_step_last_timings\0").ok().map(|f| *f);
+        (api(), file(), *func, timings)
     };
     if api != STEP_API_VERSION || file != MESH_FILE_VERSION as c_int {
         return Err(format!(
@@ -106,7 +113,7 @@ fn load_step_dll() -> Result<StepDll, String> {
         ));
     }
     krbr_core::debug!("STEP converter: {}", path.display());
-    Ok(StepDll { _lib: lib, to_mesh_file: func })
+    Ok(StepDll { _lib: lib, to_mesh_file: func, last_timings })
 }
 
 /// STEP 変換器 DLL が使えるか（使えなければ理由）
@@ -125,11 +132,19 @@ fn tessellate_step(p: &Path, params: MeshParams) -> Result<ModelMesh, String> {
     let mut err = vec![0u8; 512];
     // 変換器（OpenCASCADE）はプロセスの中で 1 本ずつ呼ぶ（読み込みの先読み・組み立て・裏の分割が同時に呼びうる）
     static CONVERTER: Mutex<()> = Mutex::new(());
-    let _one_at_a_time = CONVERTER.lock().unwrap_or_else(|e| e.into_inner());
+    let t_wait = Instant::now();
+    let one_at_a_time = CONVERTER.lock().unwrap_or_else(|e| e.into_inner());
+    let wait_ms = t_wait.elapsed().as_secs_f64() * 1000.0;
     // 安全性：引数は NUL 終端の UTF-8 文字列と、長さを添えたバッファ
     let rc = unsafe {
         (dll.to_mesh_file)(step_c.as_ptr(), params.linear_deflection, params.angular_deflection, out_c.as_ptr(), err.as_mut_ptr() as *mut c_char, err.len())
     };
+    // 内訳は変換を呼んだスレッドの値なので、次の変換が始まる前（ロックを持っている間）に読む
+    let mut timings = [0.0f64; STEP_TIMING_NAMES.len()];
+    // 安全性：timings は長さを渡した領域
+    let have_timings = dll.last_timings.is_some_and(|f| unsafe { f(timings.as_mut_ptr(), timings.len()) } == timings.len());
+    drop(one_at_a_time);
+    let t_read = Instant::now();
     let result = if rc != 0 {
         let msg = err.iter().position(|&b| b == 0).map(|i| String::from_utf8_lossy(&err[..i]).into_owned()).unwrap_or_default();
         Err(if msg.is_empty() { format!("converter returned {rc}") } else { msg })
@@ -137,6 +152,16 @@ fn tessellate_step(p: &Path, params: MeshParams) -> Result<ModelMesh, String> {
         read_mesh_file(&tmp).map_err(|e| format!("cannot read converter output: {e}"))
     };
     let _ = std::fs::remove_file(&tmp);
+    if have_timings {
+        // 速度改善の目安（perf_design.md の M0）：DLL の中の段階ごとの時間、ほかの変換を待った時間、一時ファイルを読み直した時間
+        let parts: Vec<String> = STEP_TIMING_NAMES.iter().zip(timings).map(|(n, ms)| format!("{n} {ms:.0}")).collect();
+        krbr_core::debug!(
+            "STEP timings (ms): {}: {}, waited {wait_ms:.0}, reread {:.0}",
+            p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
+            parts.join(", "),
+            t_read.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     result
 }
 
