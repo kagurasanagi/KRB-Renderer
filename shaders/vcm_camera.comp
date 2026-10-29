@@ -78,17 +78,22 @@ LightVertexShade shadeLightVertex(LightVertex lv) {
 // カメラ側の頂点と光源側の頂点をつなぐ（s > 1）。カメラ側の throughput もかけ、波長の打ち切りは両側を合わせて 1 回だけ扱う。
 // camRough：カメラ側のこの頂点までの、間接光の上限の数え方での頂点の数（この頂点を含む）
 vec4 connectVertices(LightVertex lv, SubPath cam, Shade cs, CamVertex cv, VcmConst vc, uint camRough) {
-    LightVertexShade lvs = shadeLightVertex(lv);
-    vec3 d = lvs.pos - cv.pos;
+    // 位置と幾何法線（保存した値そのもの）とカメラ側だけで決まる棄却を先に行い、残ったものだけ光源側をシェーディングする
+    // （shadeVertex は凹凸のノイズや距離場を読むので重い）。shadeLightVertex は保存した乱数（lv.dirs.w）だけを使い、
+    // カメラ側の乱数を進めないので、呼ぶ順を変えても結果は同じ
+    vec3 lpos = lv.posInst.xyz;
+    vec3 lng = octDecode(lv.dirs.x);
+    vec3 d = lpos - cv.pos;
     float dist2 = dot(d, d);
     if (dist2 <= 1e-12) return vec4(0.0);
     float dist = sqrt(dist2);
     d /= dist;
-    if (dot(d, cv.ng) <= 0.0 || dot(-d, lvs.ng) <= 0.0) return vec4(0.0);
+    if (dot(d, cv.ng) <= 0.0 || dot(-d, lng) <= 0.0) return vec4(0.0);
     vec3 lc = toLocal(d, cv.t, cv.b, cv.ns);
     if (lc.z <= 0.0) return vec4(0.0);
     vec4 fc = bsdfEval(cs, cv.v, lc);
     if (fc.x + fc.y + fc.z + fc.w <= 0.0) return vec4(0.0);
+    LightVertexShade lvs = shadeLightVertex(lv);
     vec3 lt, lb;
     basis(lvs.ns, lt, lb);
     vec3 lv_v = toLocal(lvs.wo, lt, lb, lvs.ns), ll = toLocal(-d, lt, lb, lvs.ns);
