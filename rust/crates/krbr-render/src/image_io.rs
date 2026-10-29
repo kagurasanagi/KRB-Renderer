@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use krbr_scene::material::{linear_to_srgb_f, srgb_to_linear_f};
+use krbr_pbr::material::{linear_to_srgb_f, srgb_to_linear_f};
 
 /// RGBA float のリニア画像
 #[derive(Debug, Clone, Default)]

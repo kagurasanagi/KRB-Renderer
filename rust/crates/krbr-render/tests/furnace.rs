@@ -9,8 +9,8 @@ use common::*;
 use glam::{DVec3, Vec3};
 use krbr_core::mesh::Mesh;
 use krbr_render::Context;
-use krbr_scene::camera::orbit_camera;
-use krbr_scene::material::Material;
+use krbr_pbr::camera::orbit_camera;
+use krbr_pbr::material::Material;
 
 struct FurnaceResult {
     mean: f64,
@@ -160,7 +160,7 @@ fn measured_metals_rgb_matches_spectral() {
     let ctx = context();
     for id in ["Au", "Cu", "Cr", "Os", "CuZn30"] {
         let mut m = Material { specular_roughness: 0.3, ..Default::default() };
-        m.set_conductor(krbr_scene::conductor::find(id).unwrap());
+        m.set_conductor(krbr_pbr::conductor::find(id).unwrap());
         let rgb = furnace(&ctx, &m, 128, false, IntegratorKind::Pt).mean_rgb;
         let spec = furnace(&ctx, &m, 128, true, IntegratorKind::Pt).mean_rgb;
         let bdpt = furnace(&ctx, &m, 64, true, IntegratorKind::Bdpt).mean_rgb;

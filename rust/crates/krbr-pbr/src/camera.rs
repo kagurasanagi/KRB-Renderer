@@ -114,6 +114,20 @@ pub fn frame_camera(p: &CameraParams, points: &[Vec3]) -> Camera {
     orbit_camera(target.as_vec3(), dist as f32, p.elevation_deg, p.azimuth_deg, p.fov_deg, aspect)
 }
 
+impl Camera {
+    /// position から target を見るカメラ。up は画面の上のおおよその向き（視線と平行なら Y、それも平行なら Z を使う）。
+    /// fov_y_deg は縦の画角、aspect は横 / 縦
+    pub fn look_at(position: Vec3, target: Vec3, up: Vec3, fov_y_deg: f32, aspect: f32) -> Camera {
+        let to = target - position;
+        let distance = to.length();
+        let forward = if distance > 0.0 { to / distance } else { Vec3::NEG_Z };
+        let up_hint = [up, Vec3::Y, Vec3::Z].into_iter().find(|u| u.length_squared() > 0.0 && forward.cross(u.normalize()).length() > 1e-4).unwrap_or(Vec3::Y);
+        let right = forward.cross(up_hint).normalize();
+        let up = right.cross(forward);
+        Camera { position, forward, right, up, tan_half_fov_y: (fov_y_deg.to_radians() / 2.0).tan(), aspect, target, distance: distance.max(1e-3) }
+    }
+}
+
 /// 注視点のまわりを回るカメラ
 pub fn orbit_camera(target: Vec3, distance: f32, elevation_deg: f64, azimuth_deg: f64, fov_deg: f64, aspect: f32) -> Camera {
     let (fwd, right, up) = basis(elevation_deg, azimuth_deg);
@@ -166,5 +180,17 @@ mod tests {
         }
         assert!((cam.forward.length() - 1.0).abs() < 1e-5);
         assert!(cam.position.y > 0.0); // 仰角 35° で上から
+    }
+
+    /// look_at は同じ位置・注視点の orbit_camera と同じ向き。視線が up と平行でも向きが決まる
+    #[test]
+    fn look_at_matches_orbit() {
+        let o = orbit_camera(Vec3::new(5.0, 1.0, -3.0), 120.0, 35.0, 45.0, 30.0, 1.5);
+        let l = Camera::look_at(o.position, o.target, Vec3::Y, 30.0, 1.5);
+        let close = |a: Vec3, b: Vec3| (a - b).length() < 1e-4;
+        assert!(close(l.forward, o.forward) && close(l.right, o.right) && close(l.up, o.up));
+        assert!((l.tan_half_fov_y - o.tan_half_fov_y).abs() < 1e-6 && (l.distance - o.distance).abs() < 1e-3);
+        let down = Camera::look_at(Vec3::new(0.0, 100.0, 0.0), Vec3::ZERO, Vec3::Y, 30.0, 1.0);
+        assert!(close(down.forward, Vec3::NEG_Y) && down.right.is_finite() && (down.right.length() - 1.0).abs() < 1e-5);
     }
 }

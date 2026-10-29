@@ -3,8 +3,8 @@
 //! シェーダと共有する定数（バインディング番号など）は shader_consts.rs
 
 use glam::{UVec4, Vec3, Vec4};
-use krbr_scene::material::{Material, MaterialKind};
-use krbr_scene::spectrum::Rgb2SpecTable;
+use krbr_pbr::material::{Material, MaterialKind};
+use krbr_pbr::spectrum::Rgb2SpecTable;
 
 use crate::shader_consts::{CONDUCTOR_LAMBDA_MIN, CONDUCTOR_LAMBDA_STEP, CONDUCTOR_SAMPLES, LENS_PUPIL_BINS, LUMINANCE_WEIGHTS, MAX_LENS_SURFACES};
 use crate::vk::GpuPod;
@@ -181,8 +181,8 @@ const _: () = assert!(std::mem::size_of::<GpuLightVertex>() == 96);
 const _: () = assert!(std::mem::size_of::<FrameUbo>() == (23 + MAX_LENS_SURFACES + LENS_PUPIL_BINS) * 16);
 const _: () = assert!(std::mem::size_of::<PushConstants>() == 8);
 // 金属の表の波長の格子は krbr-scene の表と同じ
-const _: () = assert!(CONDUCTOR_SAMPLES as usize == krbr_scene::conductor::SAMPLES);
-const _: () = assert!(CONDUCTOR_LAMBDA_MIN as f32 == krbr_scene::conductor::LAMBDA_MIN && CONDUCTOR_LAMBDA_STEP as f32 == krbr_scene::conductor::LAMBDA_STEP);
+const _: () = assert!(CONDUCTOR_SAMPLES as usize == krbr_pbr::conductor::SAMPLES);
+const _: () = assert!(CONDUCTOR_LAMBDA_MIN as f32 == krbr_pbr::conductor::LAMBDA_MIN && CONDUCTOR_LAMBDA_STEP as f32 == krbr_pbr::conductor::LAMBDA_STEP);
 
 // 安全性：どれも repr(C) で、上の assert により隙間が無い（パディングはフィールドとして明示してある）
 unsafe impl GpuPod for GpuVertex {}

@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use krbr_scene::IntegratorKind;
+use krbr_pbr::IntegratorKind;
 
 use crate::gpu_scene::GpuScene;
 use crate::image_io::ImageF;
@@ -51,35 +51,30 @@ pub fn render_offscreen(ctx: &Context, scene: &GpuScene<'_>, s: &RenderSettings)
     let seconds = t0.elapsed().as_secs_f64();
     let aov = prog.readback()?;
     krbr_core::info!("render finished in {:.2} s ({:.1} ms/spp)", seconds, seconds * 1000.0 / s.spp.max(1) as f64);
-    let xyz = prog.xyz_output();
-    let denoised = s.denoise.and_then(|(q, strength)| match Denoiser::new(ctx, prog.targets(), q) {
-        Ok(d) => {
-            let run = || -> Result<(ImageF, f64), String> {
-                ctx.submit_and_wait(|_, cmd| d.record_prepare(cmd, xyz))?;
-                let ms = d.execute()?;
-                ctx.submit_and_wait(|_, cmd| d.record_output(cmd, strength, xyz))?;
-                Ok((d.read_output()?, ms))
-            };
-            match run() {
-                Ok((mut img, ms)) => {
-                    if xyz {
-                        xyz_to_linear_srgb(&mut img);
-                    }
-                    // 背景が透明なら、ノイズ除去していない画像のアルファを付ける（アルファはノイズが少ない）
-                    img.copy_alpha_from(&aov.color);
-                    krbr_core::info!("denoised in {:.0} ms ({}, quality {}, strength {:.2})", ms, d.device_name(), q.name(), strength);
-                    Some(img)
-                }
-                Err(e) => {
-                    krbr_core::warn!("{e}; writing the noisy image only");
-                    None
-                }
-            }
-        }
+    let denoised = s.denoise.and_then(|(q, strength)| match denoise(ctx, &prog, &aov.color, q, strength) {
+        Ok(img) => Some(img),
         Err(e) => {
-            krbr_core::warn!("denoiser not available ({e}); writing the noisy image only");
+            krbr_core::warn!("{e}; writing the noisy image only");
             None
         }
     });
     Ok(RenderOutput { color: aov.color, albedo: aov.albedo, normal: aov.normal, seconds, denoised })
+}
+
+/// prog の今の累積をノイズ除去（OIDN）した画像（リニア sRGB）。color は prog から読み戻した色（そのアルファを付ける）。
+/// strength は元の画像と混ぜる割合（0..1）
+pub fn denoise(ctx: &Context, prog: &Progressive<'_>, color: &ImageF, quality: DenoiseQuality, strength: f32) -> Result<ImageF, String> {
+    let xyz = prog.xyz_output();
+    let d = Denoiser::new(ctx, prog.targets(), quality).map_err(|e| format!("denoiser not available ({e})"))?;
+    ctx.submit_and_wait(|_, cmd| d.record_prepare(cmd, xyz))?;
+    let ms = d.execute()?;
+    ctx.submit_and_wait(|_, cmd| d.record_output(cmd, strength, xyz))?;
+    let mut img = d.read_output()?;
+    if xyz {
+        xyz_to_linear_srgb(&mut img);
+    }
+    // 背景が透明なら、ノイズ除去していない画像のアルファを付ける（アルファはノイズが少ない）
+    img.copy_alpha_from(color);
+    krbr_core::info!("denoised in {:.0} ms ({}, quality {}, strength {:.2})", ms, d.device_name(), quality.name(), strength);
+    Ok(img)
 }

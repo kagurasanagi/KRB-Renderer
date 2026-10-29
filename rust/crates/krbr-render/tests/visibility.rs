@@ -1,4 +1,4 @@
-//! 部品の表示・非表示（GpuScene::set_visible_mask）：隠した種類のインスタンスは、最初から無いシーンと同じに描ける。
+//! インスタンスの表示・非表示（GpuScene::set_visible_mask）：隠した種類のインスタンスは、最初から無いシーンと同じに描ける。
 //! 光線が通り抜けるだけでなく、隠した部品の発光体も光らない（選ばない）ことを、PT・BDPT・VCM で確かめる。画像は out/vis_*.png
 //!   cargo test --release -p krbr-render --test visibility -- --ignored --nocapture
 
@@ -7,11 +7,17 @@ mod common;
 use common::*;
 use glam::{Mat4, Vec3};
 use krbr_core::mesh::Mesh;
-use krbr_scene::camera::orbit_camera;
-use krbr_scene::scene::{visibility, Instance, InstanceOwner, Scene, SceneMesh};
+use krbr_pbr::camera::orbit_camera;
+use krbr_pbr::{RenderScene, MASK_ALL};
+
+/// 表示マスクのビット（基板のシーンの部品の種類と同じ並び）
+const BOARD: u8 = 1;
+const SMD: u8 = 2;
+const THROUGH_HOLE: u8 = 4;
+const OTHER: u8 = 8;
 
 /// 床（基板）、光る箱（表面実装の部品）、灰色の箱（スルーホールの部品）。with_* が false ならその部品を入れない
-fn scene(with_smd: bool, with_tht: bool) -> Scene {
+fn scene(with_smd: bool, with_tht: bool) -> RenderScene {
     let materials = vec![diffuse("floor", Vec3::splat(0.6)), emitter("led", 4000.0), diffuse("block", Vec3::new(0.5, 0.5, 0.55))];
     let mut floor = Mesh::default();
     add_quad(&mut floor, Vec3::new(-100.0, 0.0, -100.0), Vec3::new(100.0, 0.0, -100.0), Vec3::new(100.0, 0.0, 100.0), Vec3::new(-100.0, 0.0, 100.0), Vec3::Y, 0);
@@ -19,19 +25,18 @@ fn scene(with_smd: bool, with_tht: bool) -> Scene {
     add_box(&mut led, Vec3::new(-30.0, 0.0, -5.0), Vec3::new(-20.0, 8.0, 5.0), 1);
     let mut block = Mesh::default();
     add_box(&mut block, Vec3::new(5.0, 0.0, -15.0), Vec3::new(35.0, 25.0, 15.0), 2);
-    let mut s = Scene { materials, ..Default::default() };
-    let add = |mesh: Mesh, class: u8, s: &mut Scene| {
-        s.meshes.push(SceneMesh { name: "m".into(), mesh });
-        let owner = if class == visibility::BOARD { InstanceOwner::Board } else { InstanceOwner::Placeholder { footprint: 0 } };
-        s.instances.push(Instance { mesh: s.meshes.len() as u32 - 1, xform: Mat4::IDENTITY, material_base: 0, owner });
-        s.instance_class.push(class);
+    let mut s = RenderScene { materials, ..Default::default() };
+    let add = |mesh: Mesh, class: u8, s: &mut RenderScene| {
+        let m = s.add_mesh(mesh);
+        let i = s.add_instance(m, Mat4::IDENTITY, 0);
+        s.instances[i as usize].mask = class;
     };
-    add(floor, visibility::BOARD, &mut s);
+    add(floor, BOARD, &mut s);
     if with_smd {
-        add(led, visibility::SMD, &mut s);
+        add(led, SMD, &mut s);
     }
     if with_tht {
-        add(block, visibility::THROUGH_HOLE, &mut s);
+        add(block, THROUGH_HOLE, &mut s);
     }
     s
 }
@@ -46,9 +51,9 @@ fn hidden_parts_render_as_if_absent() {
     let full = scene(true, true);
     let (w, h, spp) = (160, 120, 1024);
     for (mask, name, smd, tht) in [
-        (visibility::ALL & !visibility::SMD, "no_smd", false, true),
-        (visibility::ALL & !visibility::THROUGH_HOLE, "no_tht", true, false),
-        (visibility::BOARD | visibility::OTHER, "board_only", false, false),
+        (MASK_ALL & !SMD, "no_smd", false, true),
+        (MASK_ALL & !THROUGH_HOLE, "no_tht", true, false),
+        (BOARD | OTHER, "board_only", false, false),
     ] {
         let mut gpu = gpu_scene(&ctx, &full, &env);
         gpu.set_visible_mask(mask).expect("visible mask");
@@ -71,7 +76,7 @@ fn hidden_parts_render_as_if_absent() {
             assert!(e < 1.5 * noise + 0.01, "{name} {integrator:?}: rel. RMSE {e} (noise {noise})");
         }
         // 全部を見せ直すと、元のシーンに戻る（CDF を送り直す）
-        gpu.set_visible_mask(visibility::ALL).expect("visible mask");
+        gpu.set_visible_mask(MASK_ALL).expect("visible mask");
         let back = render(&ctx, &gpu, w, h, 256, IntegratorKind::Pt, frame(cam, 8));
         let whole = render(&ctx, &gpu_scene(&ctx, &full, &env), w, h, 256, IntegratorKind::Pt, frame(cam, 8));
         assert_eq!(back.color.rgba, whole.color.rgba, "{name}: showing everything again");

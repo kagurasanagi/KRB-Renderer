@@ -9,10 +9,10 @@ use std::sync::{Mutex, MutexGuard};
 use glam::{Mat4, Vec2, Vec3};
 use krbr_core::mesh::Mesh;
 use krbr_render::{build_env_distribution, render_offscreen, Context, ContextOptions, FrameParams, GpuScene, ImageF, RenderOutput, RenderSettings};
-use krbr_scene::camera::Camera;
-pub use krbr_scene::IntegratorKind;
-use krbr_scene::material::Material;
-use krbr_scene::scene::{Instance, InstanceOwner, Scene, SceneMesh};
+use krbr_pbr::camera::Camera;
+pub use krbr_pbr::IntegratorKind;
+use krbr_pbr::material::Material;
+use krbr_pbr::RenderScene;
 
 /// GPU のテストは 1 つずつ走らせる（同じ実行ファイルの中のテストは並列に走るため）
 pub fn gpu_lock() -> MutexGuard<'static, ()> {
@@ -113,13 +113,11 @@ pub fn add_prism(m: &mut Mesh, xz: &[Vec2], y0: f32, y1: f32, mat: u32) {
 // ---------------------------------------------------------------- シーンと描画
 
 /// 1 つのメッシュ・1 つの配置だけのシーン（基板面の距離場は使わない）
-pub fn scene_of(materials: Vec<Material>, mesh: Mesh) -> Scene {
-    Scene {
-        materials,
-        meshes: vec![SceneMesh { name: "test_scene".into(), mesh }],
-        instances: vec![Instance { mesh: 0, xform: Mat4::IDENTITY, material_base: 0, owner: InstanceOwner::Board }],
-        ..Default::default()
-    }
+pub fn scene_of(materials: Vec<Material>, mesh: Mesh) -> RenderScene {
+    let mut s = RenderScene { materials, ..Default::default() };
+    let m = s.add_mesh(mesh);
+    s.add_instance(m, Mat4::IDENTITY, 0);
+    s
 }
 
 /// 一様な色の環境マップ
@@ -131,7 +129,7 @@ pub fn uniform_env(v: f32, w: u32, h: u32) -> ImageF {
     env
 }
 
-pub fn gpu_scene<'a>(ctx: &'a Context, s: &Scene, env: &ImageF) -> GpuScene<'a> {
+pub fn gpu_scene<'a>(ctx: &'a Context, s: &RenderScene, env: &ImageF) -> GpuScene<'a> {
     let mut gpu = GpuScene::new(ctx);
     gpu.build(s, env, &build_env_distribution(env, 2048), 1.0).expect("GPU scene");
     gpu

@@ -19,7 +19,7 @@
 
 ```
 cd rust
-cargo build --release                    # krbr.exe と、シェーダ（rust\target\release\shaders）
+cargo build --release                    # krbr.exe と、描画のコアの DLL（krbr_renderer.dll）。シェーダはどちらにも埋め込む
 cd ..
 scripts\build.cmd                        # STEP 変換器 DLL（build\release\step）。初回は vcpkg が OpenCASCADE をビルドするので時間がかかる
 scripts\build.cmd --clean                # build\release を消してやり直す（それ以外の引数は cmake --build に渡す）。MSVC を更新した後はこれが要ることがある（古いコンパイラの設定が CMake のキャッシュに残るため）
@@ -52,12 +52,11 @@ STEP の読み込み・三角形分割だけが OpenCASCADE（C++ のライブ�
 
 ## 配布
 
-**配布用の一式**：`powershell -ExecutionPolicy Bypass -File scripts\make_dist.ps1`（ビルド済みなら `-NoBuild`。Rust のクレートのライセンスの全文を作るのに `cargo install cargo-about --locked --features cli` が要る。設定は `rust\about.toml`、書式は `scripts\rust_licenses.hbs`）で、`dist\KRB-Renderer-<版>-win64\` と、その zip を作ります（約 100 MB、zip で約 65 MB。`dist/` は git に入れない）。集めるのは `rust\target\release`（krbr.exe とシェーダ）、`build\release\step`（STEP 変換器）、`third_party\oidn\bin`（OIDN）、Visual Studio の再頒布用の Visual C++ ランタイムです。フォルダごとどこへ置いても動きます（exe と同じフォルダのものだけを使う）。中身は次のとおりです。
+**配布用の一式**：`powershell -ExecutionPolicy Bypass -File scripts\make_dist.ps1`（ビルド済みなら `-NoBuild`。Rust のクレートのライセンスの全文を作るのに `cargo install cargo-about --locked --features cli` が要る。設定は `rust\about.toml`、書式は `scripts\rust_licenses.hbs`）で、`dist\KRB-Renderer-<版>-win64\` と、その zip を作ります（約 100 MB、zip で約 65 MB。`dist/` は git に入れない）。集めるのは `rust\target\release`（krbr.exe。シェーダは埋め込み）、`build\release\step`（STEP 変換器）、`third_party\oidn\bin`（OIDN）、Visual Studio の再頒布用の Visual C++ ランタイムです。フォルダごとどこへ置いても動きます（exe と同じフォルダのものだけを使う）。中身は次のとおりです。
 
 | 中身 | 内容 |
 |---|---|
 | `krbr.exe` | 本体（アイコン付き） |
-| `shaders\` | シェーダ（SPIR-V） |
 | `dll\step\` | STEP 変換器（`krbr_step.dll`）と OpenCASCADE の DLL |
 | `dll\oidn\` | ノイズ除去（`OpenImageDenoise*.dll`、`tbb12.dll`。CPU と CUDA のデバイス） |
 | `dll\vcruntime\` | Visual C++ ランタイム（`msvcp140*.dll`、`vcruntime140*.dll`、`concrt140.dll` の再頒布用ファイル。インストール不要） |
@@ -69,7 +68,7 @@ STEP の読み込み・三角形分割だけが OpenCASCADE（C++ のライブ�
 
 リポジトリの外に展開した zip だけで、空のキャッシュからの STEP の分割、ノイズ除去（CUDA）、kicad-cli のシルク、ビューア、プラグインのインストールが動くことを確かめています（リポジトリの中では、開発用の場所を探してしまうので、足りないファイルに気づけない）。
 
-**シェーダの探し方**：環境変数 `KRBR_SHADER_DIR`、exe と同じフォルダの `shaders\`、ビルドの出力（`rust\target\<profile>\shaders`。`deps\` に置かれるテストの実行ファイル用）の順です。
+**シェーダ**：`krbr-render` の `build.rs` が SPIR-V にして、ライブラリ（krbr.exe、krbr_renderer.dll）に埋め込みます。環境変数 `KRBR_SHADER_DIR` があれば、埋め込んだものの代わりにそのフォルダの `.spv` を読みます（シェーダだけを作り直して、Rust をビルドし直さずに試すとき）。
 
 **アイコン**：`krbr.exe` とビューアのウィンドウ、KiCad のツールバーのボタンは同じ絵です（元絵 `rust/krbr/assets/krbr_icon.png` から `scripts/make_icon.py` で各サイズを作り、`rust/krbr/assets/krbr.ico` を `build.rs` で exe に埋め込む）。
 
@@ -79,6 +78,7 @@ STEP の読み込み・三角形分割だけが OpenCASCADE（C++ のライブ�
 cd rust
 cargo test                                                                   # GPU を使わないもの
 cargo test --release -p krbr-render -- --ignored --nocapture                 # GPU の検証（下記。約 6 分）
+cargo test --release -p krbr-capi -- --ignored --nocapture                   # C API（krbr_renderer.dll）で描いて読み戻す（GPU が要る）
 cargo test --release -p krbr-app --test watch -- --ignored --nocapture       # 保存の監視（GPU と KiCad の 3D モデルが要る）
 cargo test --release -p krbr-app --test material -- --ignored --nocapture    # 材質の CLI（KiCad の 3D モデルが要る）
 cargo test --release -p krbr-app --test denoise -- --ignored --nocapture     # ノイズ除去（GPU と OIDN の DLL が要る）
@@ -142,6 +142,46 @@ GPU の検証（`rust/crates/krbr-render/tests/`。基準の値は以前の C++ 
 
 | 拡張 | 入り口 |
 |---|---|
-| **積分器の追加** | `krbr-scene` の `config.rs` の `IntegratorKind` に種類と名前を足し（設定ファイル・コマンドライン・ビューアの選択肢はここから作る）、`krbr-render` の `integrator.rs` の `Integrator` を実装して `create_integrator` に足します。計算シェーダと記述子の組は `kernel.rs` の `Kernel` / `scene_bindings` で作れます。シェーダは `krbr-render` の `build.rs` の一覧に足します。 |
+| **積分器の追加** | `krbr-pbr` の `integrator_kind.rs` の `IntegratorKind` に種類と名前を足し（設定ファイル・コマンドライン・ビューアの選択肢はここから作る）、`krbr-render` の `integrator.rs` の `Integrator` を実装して `create_integrator` に足します。計算シェーダと記述子の組は `kernel.rs` の `Kernel` / `scene_bindings` で作れます。シェーダは `krbr-render` の `build.rs` の一覧に足します。 |
 | **モデル形式の追加** | `krbr-model` の `library.rs` の `Format`（拡張子で判定）と `load_model`・`loader_key`（キャッシュのキー）に形式を足し、`krbr-kicad` の `resolver.rs` の候補の順に拡張子を足します（VRML の `vrml.rs` が例）。キャッシュ（`.krbm`）はそのまま使えます。 |
 | **材質の対応表の拡充** | `materials/*.toml` の `[material.<名前>]`（材質ライブラリ）と、`model_map.toml` の `[[rule]]`（ファイル名のワイルドカード、HSV の条件）。 |
+| **ほかのアプリから描く** | 下の「描画のコアをライブラリとして使う」。 |
+
+## 描画のコアをライブラリとして使う
+
+描画のコア（`krbr-pbr` と `krbr-render`）は KiCad に依存しないので、基板以外のシーンも描けます。Blender のレンダーエンジンのように、ほかのアプリに組み込むラッパーはこれを使います。
+
+| crate | 中身 |
+|---|---|
+| `krbr-pbr` | シーンの記述。材質（OpenPBR Surface と krbr の拡張。名前で値を設定する `Material::set_float` / `set_color` / `set_string`）、金属の測定値、分光の土台、カメラ（`Camera::look_at` など）・レンズ、`RenderScene`（メッシュ・材質・インスタンスを並べたもの）と、GPU 側が読む `SceneSource`。GPU にも KiCad にも依存しない |
+| `krbr-render` | Vulkan での描画。窓口は `session::Renderer`（`set_scene` → `set_frame` → `render_samples` を繰り返す → `readback` / `denoise`）。シーンは `&dyn SceneSource` で受け取るので、基板のシーン（`krbr-scene` の `Scene`）も `RenderScene` も同じように描ける |
+| `krbr-capi` | `Renderer` を C ABI にした DLL（`rust\target\release\krbr_renderer.dll`）。ヘッダは `rust/crates/krbr-capi/include/krbr_renderer.h`（関数の説明と約束はヘッダが正本） |
+
+- 依存の向きは `krbr-core` ← `krbr-pbr` ← `krbr-render` ← `krbr-capi`。基板の側（`krbr-kicad` / `krbr-geom` / `krbr-model` / `krbr-scene`）は `krbr-pbr` を使ってシーンを作るだけで、描画のコアからは見えない
+- 座標の単位は mm、Y が上の右手系。色はリニア。環境マップは正距円筒（画像の上端が +Y、横の中央が -Z）。読み戻す画像は RGBA の float で 1 行目が上
+- 頂点は位置と法線だけ（UV もテクスチャも無い）。材質は三角形ごとの番号で選ぶ
+- 基板専用の機能（レジストの厚みの距離場、`MaterialKind::Masked`、凹凸の織り目）は `SceneSource` の省略できる部分（`mask_params` / `mask_sdf`）と材質の項目で、使わなければ何もしない
+- インスタンスの表示マスク（8 bit）は、基板のシーンでは部品の種類（`krbr-scene` の `visibility`）。ほかのアプリでは自由に使ってよい（コレクションの表示・非表示など）
+- シェーダは DLL に埋め込み、OIDN は DLL と同じフォルダ（またはその `dll\oidn\`）から探すので、`krbr_renderer.dll` を読み込むアプリのフォルダに何も置かなくてよい。配布するときは DLL と OIDN の DLL 一式を並べる
+
+Python（Blender のアドオンなど）からは `ctypes` で読みます。最小の流れ：
+
+```python
+import ctypes as C
+k = C.CDLL(r"...\krbr_renderer.dll")
+k.krbr_renderer_create.restype = C.c_void_p        # ポインタを返す・受け取る関数は restype / argtypes を c_void_p に
+...
+r = k.krbr_renderer_create(0)
+s = k.krbr_scene_create()
+m = k.krbr_material_create(b"gold"); k.krbr_material_set_string(m, b"conductor", b"Au")
+k.krbr_scene_add_material(s, m)
+k.krbr_scene_add_mesh(s, positions, None, n_vertices, indices, n_triangles, None)   # 法線は NULL なら滑らかに求める
+k.krbr_scene_add_instance(s, 0, matrix16, 0, 0xFF)
+k.krbr_renderer_set_scene(r, s)
+k.krbr_renderer_set_resolution(r, 1280, 720)
+k.krbr_renderer_set_camera(r, pos3, target3, up3, 40.0)
+k.krbr_renderer_render(r, 64)                       # 少しずつ呼べば途中経過を表示・中断できる
+k.krbr_renderer_read(r, 0, buf, 1280 * 720 * 4)     # 0 色、1 アルベド、2 法線。ノイズ除去は krbr_renderer_denoise
+```
+
+C API の使い方の全体は `rust/crates/krbr-capi/tests/capi.rs`（材質・メッシュ・配置を作って描き、材質だけを送り直す）にあります。

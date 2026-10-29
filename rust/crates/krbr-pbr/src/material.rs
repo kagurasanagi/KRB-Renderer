@@ -267,12 +267,163 @@ impl Material {
     }
 }
 
-// sRGB とリニアの変換・16 進の色の解析は krbr-model（3D モデルの面の色と共有）に 1 つだけ置く。0..1 に収めてから変換する
-pub use krbr_model::color::{linear_to_srgb, linear_to_srgb_f, parse_hex_rgb, srgb_to_linear, srgb_to_linear_f};
+/// OpenPBR のパラメータの型と、材質の中の場所
+pub enum Param {
+    F(fn(&mut Material) -> &mut f32),
+    C(fn(&mut Material) -> &mut Vec3),
+    B(fn(&mut Material) -> &mut bool),
+}
+
+macro_rules! f {
+    ($name:literal, $field:ident) => {
+        ($name, Param::F(|m: &mut Material| &mut m.$field))
+    };
+}
+macro_rules! c {
+    ($name:literal, $field:ident) => {
+        ($name, Param::C(|m: &mut Material| &mut m.$field))
+    };
+}
+macro_rules! b {
+    ($name:literal, $field:ident) => {
+        ($name, Param::B(|m: &mut Material| &mut m.$field))
+    };
+}
+
+/// OpenPBR Surface のパラメータの一覧（名前は仕様と同じ。材質の TOML の読み書きと、名前で値を設定する set_* が使う）
+pub fn params() -> Vec<(&'static str, Param)> {
+    vec![
+        f!("base_weight", base_weight),
+        c!("base_color", base_color),
+        f!("base_diffuse_roughness", base_diffuse_roughness),
+        f!("base_metalness", base_metalness),
+        f!("specular_weight", specular_weight),
+        c!("specular_color", specular_color),
+        f!("specular_roughness", specular_roughness),
+        f!("specular_roughness_anisotropy", specular_roughness_anisotropy),
+        f!("specular_ior", specular_ior),
+        f!("transmission_weight", transmission_weight),
+        c!("transmission_color", transmission_color),
+        f!("transmission_depth", transmission_depth),
+        c!("transmission_scatter", transmission_scatter),
+        f!("transmission_scatter_anisotropy", transmission_scatter_anisotropy),
+        f!("transmission_dispersion_scale", transmission_dispersion_scale),
+        f!("transmission_dispersion_abbe_number", transmission_dispersion_abbe_number),
+        f!("subsurface_weight", subsurface_weight),
+        c!("subsurface_color", subsurface_color),
+        f!("subsurface_radius", subsurface_radius),
+        c!("subsurface_radius_scale", subsurface_radius_scale),
+        f!("subsurface_scatter_anisotropy", subsurface_scatter_anisotropy),
+        f!("fuzz_weight", fuzz_weight),
+        c!("fuzz_color", fuzz_color),
+        f!("fuzz_roughness", fuzz_roughness),
+        f!("coat_weight", coat_weight),
+        c!("coat_color", coat_color),
+        f!("coat_roughness", coat_roughness),
+        f!("coat_roughness_anisotropy", coat_roughness_anisotropy),
+        f!("coat_ior", coat_ior),
+        f!("coat_darkening", coat_darkening),
+        f!("thin_film_weight", thin_film_weight),
+        f!("thin_film_thickness", thin_film_thickness),
+        f!("thin_film_ior", thin_film_ior),
+        f!("emission_luminance", emission_luminance),
+        c!("emission_color", emission_color),
+        f!("geometry_opacity", geometry_opacity),
+        b!("geometry_thin_walled", geometry_thin_walled),
+    ]
+}
+
+
+/// [krbr] の拡張のうち数の項目
+const KRBR_FLOATS: &[&str] = &["bump_strength", "bump_scale", "roughness_variation"];
+
+/// 測定値の金属の色を決める項目（書くと測定値の金属ではなくなる）
+pub const CONDUCTOR_PARAMS: &[&str] = &["base_color", "specular_color", "base_metalness"];
+
+impl Material {
+    /// 数のパラメータを名前で設定する（OpenPBR の名前、真偽値は 0 以外を真、krbr の拡張の bump_strength / bump_scale /
+    /// roughness_variation）。色のパラメータに数を渡すと灰色。測定値の金属の色（CONDUCTOR_PARAMS）を書くと測定値の金属
+    /// ではなくなる。知らない名前は Err
+    pub fn set_float(&mut self, name: &str, v: f32) -> Result<(), String> {
+        if let Some((_, p)) = params().into_iter().find(|(n, _)| *n == name) {
+            match p {
+                Param::F(get) => *get(self) = v,
+                Param::C(get) => *get(self) = Vec3::splat(v),
+                Param::B(get) => *get(self) = v != 0.0,
+            }
+            if CONDUCTOR_PARAMS.contains(&name) {
+                self.conductor = None;
+            }
+            return Ok(());
+        }
+        match name {
+            "bump_strength" => self.bump_strength = v,
+            "bump_scale" => self.bump_scale = v,
+            "roughness_variation" => self.roughness_variation = v,
+            _ => return Err(format!("unknown number parameter '{name}'")),
+        }
+        Ok(())
+    }
+
+    /// 色のパラメータ（リニア）を名前で設定する。測定値の金属の色（CONDUCTOR_PARAMS）を書くと測定値の金属ではなくなる
+    pub fn set_color(&mut self, name: &str, c: Vec3) -> Result<(), String> {
+        match params().into_iter().find(|(n, _)| *n == name) {
+            Some((_, Param::C(get))) => *get(self) = c,
+            _ => return Err(format!("unknown color parameter '{name}'")),
+        }
+        if CONDUCTOR_PARAMS.contains(&name) {
+            self.conductor = None;
+        }
+        Ok(())
+    }
+
+    /// 文字列の項目（krbr の拡張）を名前で設定する：bump_pattern（none / noise / weave）、conductor（測定値の金属の名前。
+    /// "none" でやめる）、category。知らない名前・値は Err
+    pub fn set_string(&mut self, name: &str, v: &str) -> Result<(), String> {
+        match name {
+            "bump_pattern" => self.bump_pattern = v.parse()?,
+            "category" => self.category = Some(v.parse()?),
+            "conductor" if v == "none" => self.conductor = None,
+            "conductor" => self.set_conductor(crate::conductor::find(v).ok_or_else(|| format!("unknown conductor '{v}' ({})", crate::conductor::all().map(|c| c.id).collect::<Vec<_>>().join(" / ")))?),
+            _ if KRBR_FLOATS.contains(&name) || params().iter().any(|(n, _)| *n == name) => return Err(format!("'{name}' is not a string parameter")),
+            _ => return Err(format!("unknown parameter '{name}'")),
+        }
+        Ok(())
+    }
+}
+
+// sRGB とリニアの変換・16 進の色の解析は krbr-core（3D モデルの面の色と共有）に 1 つだけ置く。0..1 に収めてから変換する
+pub use krbr_core::color::{linear_to_srgb, linear_to_srgb_f, parse_hex_rgb, srgb_to_linear, srgb_to_linear_f};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 名前で設定する：OpenPBR の数・色・真偽値と krbr の拡張。測定値の金属の色を書くと測定値の金属ではなくなる
+    #[test]
+    fn set_by_name() {
+        let mut m = Material::default();
+        m.set_float("specular_roughness", 0.1).unwrap();
+        m.set_color("base_color", Vec3::new(0.1, 0.2, 0.3)).unwrap();
+        m.set_float("coat_color", 0.5).unwrap();
+        m.set_float("geometry_thin_walled", 1.0).unwrap();
+        m.set_float("bump_strength", 0.05).unwrap();
+        m.set_string("bump_pattern", "noise").unwrap();
+        assert_eq!((m.specular_roughness, m.base_color, m.coat_color), (0.1, Vec3::new(0.1, 0.2, 0.3), Vec3::splat(0.5)));
+        assert!(m.geometry_thin_walled && m.bump_strength == 0.05 && m.bump_pattern == BumpPattern::Noise);
+        assert!(m.set_float("no_such_thing", 1.0).is_err());
+        assert!(m.set_color("specular_roughness", Vec3::ONE).is_err());
+        assert!(m.set_string("bump_pattern", "zigzag").is_err());
+        assert!(m.set_string("base_weight", "1").is_err());
+
+        m.set_string("conductor", "Au").unwrap();
+        assert!(m.conductor.is_some() && m.base_metalness == 1.0);
+        m.set_float("base_metalness", 1.0).unwrap();
+        assert_eq!(m.conductor, None);
+        m.set_string("conductor", "Au").unwrap();
+        m.set_string("conductor", "none").unwrap();
+        assert_eq!(m.conductor, None);
+    }
 
     #[test]
     fn abbe_number_dispersion() {

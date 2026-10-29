@@ -1,4 +1,4 @@
-//! sRGB（表示値）とリニアの変換。krbr-model（STEP の面の色）と krbr-scene（材質・設定の色）の両方がこれを使う。
+//! sRGB（表示値）とリニアの変換。krbr-model（STEP の面の色）と krbr-pbr（材質の色）の両方がこれを使う。
 //! 範囲外の値（STEP や設定に書かれた 1 を超える値・負の値）は 0..1 に収めてから変換する
 
 use glam::Vec3;

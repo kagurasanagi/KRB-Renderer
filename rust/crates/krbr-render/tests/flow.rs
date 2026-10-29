@@ -5,8 +5,8 @@ use common::*;
 use glam::Vec3;
 use krbr_core::mesh::Mesh;
 use krbr_render::{flow, Progressive};
-use krbr_scene::material::Material;
-use krbr_scene::{orbit_camera, IntegratorKind};
+use krbr_pbr::material::Material;
+use krbr_pbr::{orbit_camera, IntegratorKind};
 
 const W: u32 = 192;
 const H: u32 = 128;

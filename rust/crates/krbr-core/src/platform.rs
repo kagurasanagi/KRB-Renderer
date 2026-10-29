@@ -44,6 +44,40 @@ pub fn exe_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// このコードを含むモジュール（exe、または DLL として読み込まれた krbr_renderer.dll）のあるフォルダ。
+/// ほかのアプリに読み込まれた DLL では exe_dir はそのアプリのフォルダなので、DLL の横の同梱物はこちらで探す
+pub fn module_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetModuleHandleExW(flags: u32, address: *const u16, module: *mut *mut std::ffi::c_void) -> i32;
+            fn GetModuleFileNameW(module: *mut std::ffi::c_void, name: *mut u16, size: u32) -> u32;
+        }
+        const FROM_ADDRESS: u32 = 0x4;
+        const UNCHANGED_REFCOUNT: u32 = 0x2;
+        let mut module = std::ptr::null_mut();
+        let mut buf = vec![0u16; 32768];
+        // 安全性：この関数のアドレスから、それを含むモジュールを引く（参照数は増やさない）。buf は長さを渡した領域
+        let n = unsafe {
+            if GetModuleHandleExW(FROM_ADDRESS | UNCHANGED_REFCOUNT, module_dir as *const u16, &mut module) == 0 {
+                return exe_dir();
+            }
+            GetModuleFileNameW(module, buf.as_mut_ptr(), buf.len() as u32)
+        };
+        if n == 0 || n as usize >= buf.len() {
+            return exe_dir();
+        }
+        let path = PathBuf::from(std::ffi::OsString::from_wide(&buf[..n as usize]));
+        path.parent().map(Path::to_path_buf).unwrap_or_else(exe_dir)
+    }
+    #[cfg(not(windows))]
+    {
+        exe_dir()
+    }
+}
+
 /// 開発中の同梱物の場所：実行ファイルのフォルダから上へたどり、STEP 変換器 DLL の CMake のビルド出力 `<リポジトリ>\build\release\<rel>` に
 /// probe があればそのフォルダ（rust\target\release\krbr.exe からも、deps\ に置かれるテストの実行ファイルからも見つかる）
 pub fn dev_build_dir(rel: &str, probe: &str) -> Option<PathBuf> {
@@ -456,6 +490,12 @@ pub mod registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// exe に組み込まれていれば、モジュールのフォルダは exe のフォルダ
+    #[test]
+    fn module_dir_of_an_exe_is_exe_dir() {
+        assert_eq!(module_dir(), exe_dir());
+    }
 
     #[test]
     fn documents_folder_is_found() {

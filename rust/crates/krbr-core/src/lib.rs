@@ -1,6 +1,7 @@
-//! KRB Renderer の土台：ログ、パス（設定・キャッシュの場所）、ハッシュ。
+//! KRB Renderer の土台：ログ、パス（設定・キャッシュの場所）、ハッシュ、三角形メッシュ、sRGB とリニアの変換。
 //! ファイルの置き場所と XXH64 のキーは、以前の C++ 版と同じにしてある（同じキャッシュを読み書きできるように）。
 
+pub mod color;
 pub mod file_watcher;
 pub mod log;
 pub mod mesh;

@@ -12,8 +12,8 @@ use common::*;
 use glam::Vec3;
 use krbr_core::mesh::Mesh;
 use krbr_render::{Context, GpuScene, RenderOutput};
-use krbr_scene::camera::{orbit_camera, Camera};
-use krbr_scene::material::Material;
+use krbr_pbr::camera::{orbit_camera, Camera};
+use krbr_pbr::material::Material;
 use krbr_scene::material_library::MaterialLibrary;
 
 fn render_with(ctx: &Context, gpu: &GpuScene<'_>, cam: Camera, (w, h): (u32, u32), spp: u32, integrator: IntegratorKind, seed: u32) -> RenderOutput {

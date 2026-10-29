@@ -7,12 +7,14 @@ license.workspace = true
 
 [dependencies]
 krbr-core = { path = "../krbr-core" }
-krbr-kicad = { path = "../krbr-kicad" }
-krbr-geom = { path = "../krbr-geom" }
-krbr-scene = { path = "../krbr-scene" }
+krbr-pbr = { path = "../krbr-pbr" }
 glam.workspace = true
 ash = { version = "0.38", default-features = false, features = ["loaded", "std", "debug"] }
 gpu-allocator = { version = "0.28", default-features = false, features = ["vulkan", "std"] }
 exr = "1.74"
 libloading = "0.8"
 image = { version = "0.25", default-features = false, features = ["png", "hdr"] }
+
+# テストで内蔵の材質（材質ライブラリ）を使う
+[dev-dependencies]
+krbr-scene = { path = "../krbr-scene" }

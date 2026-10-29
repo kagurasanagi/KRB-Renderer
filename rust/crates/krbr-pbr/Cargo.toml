@@ -1,0 +1,10 @@
+[package]
+name = "krbr-pbr"
+description = "KRB Renderer: 描画するシーンの記述（材質 OpenPBR、金属の測定値、分光の土台、カメラ・レンズ、メッシュの配置）。GPU にも KiCad にも依存しない"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+krbr-core = { path = "../krbr-core" }
+glam.workspace = true

@@ -2,7 +2,7 @@
 # フォルダごとどこへ置いても動く（ポータブル版）。インストーラや KiCad の PCM パッケージもこれを元に作る。
 #   powershell -ExecutionPolicy Bypass -File scripts\make_dist.ps1            # ビルドしてからまとめる
 #   powershell -ExecutionPolicy Bypass -File scripts\make_dist.ps1 -NoBuild   # ビルド済みのものをまとめる
-# 中身：krbr.exe、shaders\、dll\（step：STEP 変換器と OpenCASCADE、oidn：ノイズ除去、vcruntime：Visual C++ ランタイム）、
+# 中身：krbr.exe（シェーダは埋め込み）、dll\（step：STEP 変換器と OpenCASCADE、oidn：ノイズ除去、vcruntime：Visual C++ ランタイム）、
 #       使い方、ライセンス（Rust のクレートの分は cargo-about で作る。KiCad のプラグインは krbr.exe に埋め込んであり、ビューアの「設定 → KiCad プラグイン」で入れる）
 # 直下には DLL を置かない。krbr.exe は Visual C++ ランタイムを静的に組み込んでいて（rust\.cargo\config.toml）、
 # 起動の直後に dll\vcruntime を DLL の探し先に足す（STEP 変換器・OIDN の DLL が使う）
@@ -20,7 +20,6 @@ $stepOut = Join-Path $repo "build\release\step"  # STEP 変換器 DLL（scripts\
 $oidnBin = Join-Path $repo "third_party\oidn\bin"  # scripts\get_oidn.ps1 が置く公式のバイナリ
 $rustExe = Join-Path $repo "rust\target\release\krbr.exe"
 $launcherExe = Join-Path $repo "rust\target\release\KRB-Renderer.exe"  # コンソールを出さずにビューアを開く起動役
-$rustShaders = Join-Path $repo "rust\target\release\shaders"  # cargo build（krbr-render の build.rs）が glslc で作る
 
 # Visual Studio（Visual C++ ランタイムの再頒布用ファイル）
 $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath 2>$null
@@ -31,22 +30,21 @@ if (-not $NoBuild) {
     Write-Host "== STEP 変換器 DLL のビルド（CMake）"
     & cmd /c (Join-Path $PSScriptRoot "build.cmd")
     if ($LASTEXITCODE -ne 0) { throw "scripts\build.cmd に失敗" }
-    Write-Host "== Rust 版のビルド（シェーダも作る）"
+    Write-Host "== Rust 版のビルド（シェーダも作って krbr.exe に埋め込む）"
     Push-Location (Join-Path $repo "rust")
     cargo build --release
     if ($LASTEXITCODE -ne 0) { throw "cargo build に失敗" }
     Pop-Location
 }
-foreach ($p in @($rustExe, "$rustShaders\pathtrace.comp.spv", "$stepOut\krbr_step.dll", "$oidnBin\OpenImageDenoise.dll")) {
+foreach ($p in @($rustExe, "$stepOut\krbr_step.dll", "$oidnBin\OpenImageDenoise.dll")) {
     if (-not (Test-Path $p)) { throw "見つかりません: $p（-NoBuild を外してビルドしてください。OIDN は scripts\get_oidn.ps1）" }
 }
 
 Write-Host "== $dst にまとめる"
 if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
-New-Item -ItemType Directory -Force "$dst\shaders", "$dst\dll\step", "$dst\dll\oidn", "$dst\dll\vcruntime", "$dst\licenses" | Out-Null
+New-Item -ItemType Directory -Force "$dst\dll\step", "$dst\dll\oidn", "$dst\dll\vcruntime", "$dst\licenses" | Out-Null
 Copy-Item $rustExe $dst
 Copy-Item $launcherExe $dst
-Copy-Item "$rustShaders\*.spv" "$dst\shaders"
 Copy-Item "$stepOut\krbr_step.dll", "$stepOut\TK*.dll" "$dst\dll\step"
 # ノイズ除去（OIDN）。HIP・SYCL のデバイスは使わないので入れない
 Copy-Item "$oidnBin\OpenImageDenoise.dll", "$oidnBin\OpenImageDenoise_core.dll", "$oidnBin\OpenImageDenoise_device_cpu.dll", "$oidnBin\OpenImageDenoise_device_cuda.dll", "$oidnBin\tbb12.dll" "$dst\dll\oidn"
@@ -102,7 +100,6 @@ KRB Renderer $version  KiCad の基板の物理ベースのレンダラー
 ■ フォルダの中身（フォルダごと移動して使えます。中のファイルは動かさないでください）
 ・KRB-Renderer.exe  ビューアを開く（コンソールを出さない起動役。中で krbr.exe を動かす）
 ・krbr.exe          本体（コマンドライン）
-・shaders\          シェーダ
 ・dll\step\         STEP 変換器（3D モデルの読み込み）と OpenCASCADE
 ・dll\oidn\         ノイズ除去（Intel Open Image Denoise）
 ・dll\vcruntime\    Visual C++ ランタイム（インストール不要）

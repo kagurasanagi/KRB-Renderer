@@ -2271,6 +2271,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "krbr-capi"
+version = "0.2.0"
+dependencies = [
+ "glam",
+ "krbr-core",
+ "krbr-pbr",
+ "krbr-render",
+]
+
+[[package]]
 name = "krbr-core"
 version = "0.2.1"
 dependencies = [
@@ -2311,6 +2321,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "krbr-pbr"
+version = "0.2.0"
+dependencies = [
+ "glam",
+ "krbr-core",
+]
+
+[[package]]
 name = "krbr-render"
 version = "0.2.1"
 dependencies = [
@@ -2320,8 +2338,7 @@ dependencies = [
  "gpu-allocator",
  "image",
  "krbr-core",
- "krbr-geom",
- "krbr-kicad",
+ "krbr-pbr",
  "krbr-scene",
  "libloading",
 ]
@@ -2335,6 +2352,7 @@ dependencies = [
  "krbr-geom",
  "krbr-kicad",
  "krbr-model",
+ "krbr-pbr",
  "toml 0.8.23",
  "toml_edit 0.22.27",
 ]

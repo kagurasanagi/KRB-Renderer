@@ -25,8 +25,8 @@ const KICAD_COLORS: &[(&str, [f32; 3])] = &[
     ("orange_body", [0.809, 0.426, 0.148]),
 ];
 
-/// 変換は crate::color に 1 つだけ置く（以前はここに 0..1 に収めない別の実装があった）
-pub use crate::color::srgb_to_linear;
+/// 変換は krbr_core::color に 1 つだけ置く（以前はここに 0..1 に収めない別の実装があった）
+pub use krbr_core::color::srgb_to_linear;
 
 impl ModelPart {
     pub fn linear_color(&self) -> Vec3 {

@@ -7,8 +7,8 @@
 //! （ボケた画素は、混ざった点の平均になる）
 
 use glam::{DVec3, Vec3};
-use krbr_scene::lens::{LensModel, LensParams};
-use krbr_scene::Camera;
+use krbr_pbr::lens::{LensModel, LensParams};
+use krbr_pbr::Camera;
 
 /// 主光線の表の数（フィルムの中心から隅の少し外まで）
 const CHIEF_RAYS: usize = 96;
@@ -182,7 +182,7 @@ pub fn depth(position: &[[f32; 4]], cur: &Camera) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krbr_scene::orbit_camera;
+    use krbr_pbr::orbit_camera;
 
     #[test]
     fn a_point_moves_with_the_camera() {

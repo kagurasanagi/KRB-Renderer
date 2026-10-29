@@ -11,16 +11,22 @@
                  │                                    │
                  └▶ krbr-model (STEP DLL, VRML, cache) ┼▶ krbr-scene ─▶ krbr-render (Vulkan) ─▶ PNG / EXR
 HDR ─────────────────────────────────────────────────────────────────▶ krbr-render (env_map)
+
+ほかのアプリ（Blender など）─▶ krbr-capi（krbr_renderer.dll）─▶ krbr-render
 ```
+
+描画のコア（`krbr-pbr` と `krbr-render`）は KiCad に依存しません。`krbr-render` はシーンを `krbr-pbr` の `SceneSource`（メッシュ・材質・インスタンスと、省略できるレジストの距離場）として読むので、`krbr-scene` が組み立てた基板のシーンも、ほかのアプリが `RenderScene` に並べたシーンも同じように描けます（[開発者向け](development.md)の「描画のコアをライブラリとして使う」）。
 
 | crate | ファイル | 役割 |
 |---|---|---|
-| krbr-core | `log`, `platform`, `mesh`, `file_watcher` | ログ、OS 依存部（キャッシュ・設定の場所、DLL の探し先、ウィンドウを出さない子プロセス）、XXH64、三角形メッシュ、保存の検出 |
+| krbr-core | `log`, `platform`, `mesh`, `color`, `file_watcher` | ログ、OS 依存部（キャッシュ・設定の場所、DLL の探し先、ウィンドウを出さない子プロセス）、XXH64、三角形メッシュ、sRGB とリニアの変換、保存の検出 |
 | krbr-kicad | `sexpr`, `parser`, `board`, `resolver`, `stroke_text` | S 式パーサ → `Board`（外形・層構成・配線・パッド・ビア・ベタ・シルク・穴・部品・3D モデル指定）。座標はすべて基板座標に変換済み。差分（`diff_boards`）。パス解決（`${KIPRJMOD}`, `${KICADn_3DMODEL_DIR}`, `${KISYS3DMOD}`、`kicad_common.json`、`.wrl`→`.step` の差し替え、追加検索フォルダ）。kicad-cli に渡す線フォントだけの基板のコピー |
 | krbr-geom | `shapes`, `board_mesh`, `relief`, `tiles`, `raster`, `svg_reader` | パッド・配線・図形の多角形化（Clipper2、10 nm 単位の整数座標）。Edge.Cuts の輪郭の連結、穴あけ、上下面の三角形分割、側面・穴の内壁（メッキ穴は別材質）。凹凸の形状とタイル、被覆率のラスタライズと距離場。kicad-cli の SVG の読み込み |
 | krbr-model | `library`, `mesh_file`, `part`, `vrml` | 3D モデルの読み込み（メッシュキャッシュ、無ければ STEP 変換器 DLL か VRML の読み込み器）、`.krbm`、部位（名前と色） |
-| krbr-scene | `scene`, `config`, `material`, `material_library`, `conductor`, `model_map`, `solder`, `camera`, `lens`, `spectrum`, `mask_presets` | 設定ファイル、材質（OpenPBR）と割り当て、組み込みの材質（`builtin_materials.toml`）、金属の測定値、部品の配置（KiCad 3D ビューアと同じ変換の順序）、はんだフィレット、代替の箱、カメラの自動調整・レンズ、等色関数と RGB → スペクトルの表 |
-| krbr-render | `vk`, `gpu_scene`, `env_map`, `integrator`, `kernel`, `renderer`, `tonemapper`, `glow`, `denoiser`, `image_io`, `studio_env` | Vulkan（ash。表示は必要なときだけ）、BLAS/TLAS、環境マップの分布と内蔵のスタジオ、積分器と累積（`Progressive`：オフラインとビューアで共通）、表示用のトーンマッピングとグロー、ノイズ除去、画像の入出力。`build.rs` がシェーダをビルドする |
+| krbr-pbr | `material`, `conductor`, `spectrum`, `camera`, `lens`, `scene`, `integrator_kind` | 描画するシーンの記述（KiCad にも GPU にも依存しない）：材質（OpenPBR）、金属の測定値、等色関数と RGB → スペクトルの表、カメラ・レンズ、`RenderScene` と `SceneSource`、積分器の種類 |
+| krbr-scene | `scene`, `config`, `material_io`, `material_library`, `model_map`, `solder`, `mask_presets` | 設定ファイル、材質の読み書きと割り当て、組み込みの材質（`builtin_materials.toml`）、部品の配置（KiCad 3D ビューアと同じ変換の順序）、はんだフィレット、代替の箱、カメラの自動調整。`krbr-pbr` のモジュールを同じ名前（`krbr_scene::material` など）で見せる |
+| krbr-render | `vk`, `gpu_scene`, `env_map`, `integrator`, `kernel`, `renderer`, `session`, `tonemapper`, `glow`, `denoiser`, `image_io`, `studio_env` | Vulkan（ash。表示は必要なときだけ）、BLAS/TLAS、環境マップの分布と内蔵のスタジオ、積分器と累積（`Progressive`：オフラインとビューアで共通）、表示用のトーンマッピングとグロー、ノイズ除去、画像の入出力、ほかのアプリ向けの窓口（`session::Renderer`）。`build.rs` がシェーダをビルドして埋め込む |
+| krbr-capi | `lib.rs`, `include/krbr_renderer.h` | `Renderer` の C ABI（`krbr_renderer.dll`）。Blender などのラッパーから呼ぶ |
 | krbr-app | `prepare`, `viewer`, `swapchain`, `selection`, `material_editor`, `preview`, `swatch_cache`, `watch`, `kicad_cli`, `material_cmd`, `kicad_plugin`, `remember` | シーンの準備（render / view / watch 共通）、リアルタイム表示（winit + egui）、部品の選択、材質エディタと見本・部品のプレビュー、見本のキャッシュと焼き付け、保存の監視、kicad-cli の呼び出し、材質の CLI、KiCad のプラグイン、最後に使った環境マップ |
 | krbr（exe） | `main.rs` | コマンドライン（clap）。`build.rs` がアイコンを埋め込む |
 | shaders | `pathtrace.comp`, `vcm_light.comp`, `vcm_camera.comp`, `camera.glsl`, `ptcore.glsl`, `bidir.glsl`, `scene.glsl`, `lights.glsl`, `bsdf.glsl`, `spectral.glsl`, `env.glsl`, `sampling.glsl`, `common.glsl` | パストレーサー、BDPT / VCM の光源側・カメラ側、交点と材質の組み立て、光源（環境光・発光面）、BSDF、分光、環境マップの重点的サンプリング |

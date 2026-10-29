@@ -2,9 +2,9 @@
 //! Progressive が出力先の画像と積分器を持ち、サンプルを積み増す
 
 use ash::vk;
-use krbr_scene::camera::Camera;
-use krbr_scene::lens::LensParams;
-use krbr_scene::IntegratorKind;
+use krbr_pbr::camera::Camera;
+use krbr_pbr::lens::LensParams;
+use krbr_pbr::IntegratorKind;
 
 use crate::gpu_scene::GpuScene;
 use crate::gpu_types::{FrameUbo, GpuLightVertex, PushConstants};
@@ -353,7 +353,7 @@ pub struct AovImages {
 
 /// CIE XYZ（分光モードの累積）→ リニア sRGB（その場で書き換える）
 pub fn xyz_to_linear_srgb(img: &mut ImageF) {
-    let m = krbr_scene::spectrum::xyz_to_linear_srgb();
+    let m = krbr_pbr::spectrum::xyz_to_linear_srgb();
     for px in img.rgba.chunks_exact_mut(4) {
         let c = m * glam::Vec3::new(px[0], px[1], px[2]);
         px[0] = c.x;

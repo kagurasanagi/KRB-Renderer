@@ -36,7 +36,7 @@ pub const BINDING_CONDUCTORS: u32 = 25;
 /// カメラの光線が最初に当たった点の累積（動画のフローを求める）
 pub const BINDING_ACCUM_POSITION: u32 = 26;
 
-/// 金属の n, k の表の波長の格子（krbr_scene::conductor と同じ値。gpu_types.rs で確かめる）
+/// 金属の n, k の表の波長の格子（krbr_pbr::conductor と同じ値。gpu_types.rs で確かめる）
 pub const CONDUCTOR_LAMBDA_MIN: u32 = 360;
 pub const CONDUCTOR_LAMBDA_STEP: u32 = 5;
 pub const CONDUCTOR_SAMPLES: u32 = 95;

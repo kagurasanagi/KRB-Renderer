@@ -325,6 +325,47 @@ impl Scene {
     }
 }
 
+/// GPU 側（krbr-render）が読む形。インスタンスの表示マスクは部品の種類（visibility のビット）
+impl krbr_pbr::SceneSource for Scene {
+    fn mesh_count(&self) -> usize {
+        self.meshes.len()
+    }
+    fn mesh(&self, index: usize) -> &Mesh {
+        &self.meshes[index].mesh
+    }
+    fn materials(&self) -> &[Material] {
+        &self.materials
+    }
+    fn instance_count(&self) -> usize {
+        self.instances.len()
+    }
+    fn instance(&self, index: usize) -> krbr_pbr::RenderInstance {
+        let i = &self.instances[index];
+        krbr_pbr::RenderInstance { mesh: i.mesh, xform: i.xform, material_base: i.material_base, mask: self.class_of(index) }
+    }
+    fn mask_params(&self) -> krbr_pbr::MaskParams {
+        let m = &self.mask;
+        krbr_pbr::MaskParams { on_copper: m.on_copper, on_substrate: m.on_substrate, at_edge: m.at_edge, falloff: m.falloff, pool: m.pool, pool_falloff: m.pool_falloff, copper: m.copper }
+    }
+    fn mask_sdf(&self) -> Option<krbr_pbr::MaskSdf<'_>> {
+        let g = &self.sdf_grid;
+        if g.width == 0 || self.sdf_image[0].is_empty() {
+            return None;
+        }
+        // 基板の座標（mm）からワールドへは、外形の中心を原点に移すだけ（X → X、基板の Y → ワールドの Z）
+        let origin = g.origin - self.board.center;
+        Some(krbr_pbr::MaskSdf {
+            width: g.width,
+            height: g.height,
+            origin: glam::Vec2::new(origin.x as f32, origin.y as f32),
+            size: glam::Vec2::new((g.width as f64 / g.px_per_mm) as f32, (g.height as f64 / g.px_per_mm) as f32),
+            range_mm: krbr_geom::raster::SDF_RANGE_MM as f32,
+            layers: [&self.sdf_image[0], &self.sdf_image[1]],
+            dirty: &self.sdf_dirty,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SceneOptions {
     /// auto / ENIG / HASL / OSP

@@ -10,7 +10,7 @@ use common::*;
 use glam::{Vec2, Vec3};
 use krbr_core::mesh::Mesh;
 use krbr_render::ImageF;
-use krbr_scene::camera::Camera;
+use krbr_pbr::camera::Camera;
 use krbr_scene::material_library::MaterialLibrary;
 
 const W: u32 = 960;

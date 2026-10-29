@@ -2,9 +2,8 @@
 
 use ash::vk;
 use glam::{Mat3, Vec3, Vec4};
-use krbr_geom::raster::SDF_RANGE_MM;
-use krbr_scene::scene::Scene;
-use krbr_scene::spectrum;
+use krbr_pbr::scene::{MaskSdf, SceneSource, MASK_ALL};
+use krbr_pbr::spectrum;
 
 use crate::env_map::EnvDistribution;
 use crate::gpu_types::*;
@@ -26,7 +25,7 @@ fn make_sampler(dev: &ash::Device, u: vk::SamplerAddressMode, v: vk::SamplerAddr
     unsafe { dev.create_sampler(&sci, None) }.map_err(|e| format!("vkCreateSampler: {e:?}"))
 }
 
-fn to_gpu_materials(materials: &[krbr_scene::Material], bump_intensity: f32) -> Vec<GpuMaterial> {
+fn to_gpu_materials(materials: &[krbr_pbr::Material], bump_intensity: f32) -> Vec<GpuMaterial> {
     let spec = spectrum::loaded_rgb2spec_table();
     materials
         .iter()
@@ -36,11 +35,6 @@ fn to_gpu_materials(materials: &[krbr_scene::Material], bump_intensity: f32) -> 
             to_gpu(&m, spec)
         })
         .collect()
-}
-
-/// シーンに基板の距離場（レジストの厚みを求める RG8 の 2 層）があるか
-fn has_board_sdf(sc: &Scene) -> bool {
-    sc.sdf_grid.width > 0 && !sc.sdf_image[0].is_empty()
 }
 
 pub struct GpuScene<'a> {
@@ -64,7 +58,7 @@ pub struct GpuScene<'a> {
     pub emitter_count: u32,
     /// 見えている発光体の Σ(輝度 × 面積)。0 なら発光体を選ばない
     pub emitter_power: f32,
-    /// 見せるインスタンスの種類（krbr_scene::visibility のビット）。光線の cull mask になる
+    /// 見せるインスタンスの表示マスク（RenderInstance::mask と照合するビット）。光線の cull mask になる
     pub visible_mask: u8,
     /// 発光体の表の三角形ごとの、輝度 × 面積とインスタンスの種類（見せる種類を変えたときに CDF を作り直す）
     emitter_weights: Vec<f64>,
@@ -117,7 +111,7 @@ impl<'a> GpuScene<'a> {
             emitter_cdf: Buffer::default(),
             emitter_count: 0,
             emitter_power: 0.0,
-            visible_mask: krbr_scene::visibility::ALL,
+            visible_mask: MASK_ALL,
             emitter_weights: Vec::new(),
             emitter_classes: Vec::new(),
             env_average_luminance: 0.0,
@@ -150,7 +144,7 @@ impl<'a> GpuScene<'a> {
     }
 
     /// シーン・環境マップを GPU へ送る。VRAM が足りないなどで失敗したら Err（作った分は Drop が解放する。この GpuScene では描かない）
-    pub fn build(&mut self, sc: &Scene, env: &ImageF, dist: &EnvDistribution, bump_intensity: f32) -> Result<(), String> {
+    pub fn build(&mut self, sc: &dyn SceneSource, env: &ImageF, dist: &EnvDistribution, bump_intensity: f32) -> Result<(), String> {
         let t0 = std::time::Instant::now();
         let lap = |what: &str, t: &mut std::time::Instant| {
             krbr_core::debug!("GPU scene: {what} {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
@@ -170,7 +164,7 @@ impl<'a> GpuScene<'a> {
             "GPU scene: {} triangles, {} BLAS, {} instances, env {}x{} (distribution {}x{})",
             self.triangle_count,
             self.blas.len(),
-            sc.instances.len(),
+            sc.instance_count(),
             self.env_width,
             self.env_height,
             self.env_dist_w,
@@ -181,7 +175,7 @@ impl<'a> GpuScene<'a> {
 
     /// シーンの形状・配置・材質と基板の距離場を作り直す（環境マップはそのまま。積分器は作り直しが必要）。
     /// 失敗したら Err で、形状は作りかけのまま（作り直しが成功するまで、この GpuScene では描かない）
-    pub fn rebuild_geometry(&mut self, sc: &Scene, bump_intensity: f32) -> Result<(), String> {
+    pub fn rebuild_geometry(&mut self, sc: &dyn SceneSource, bump_intensity: f32) -> Result<(), String> {
         self.ctx.wait_idle();
         self.destroy_geometry();
         self.build_geometry(sc, bump_intensity)?;
@@ -190,15 +184,14 @@ impl<'a> GpuScene<'a> {
         Ok(())
     }
 
-    fn update_sdf_tiles(&mut self, sc: &Scene) -> Result<(), String> {
-        if sc.sdf_dirty.is_empty() {
+    fn update_sdf_tiles(&mut self, g: &MaskSdf<'_>) -> Result<(), String> {
+        if g.dirty.is_empty() {
             return Ok(());
         }
-        let g = &sc.sdf_grid;
         // 作り直したタイルの画素を詰めて 1 回で送る
         let mut staging: Vec<u8> = Vec::new();
         let mut regions: Vec<vk::BufferImageCopy> = Vec::new();
-        for &(side, [x0, y0, x1, y1]) in &sc.sdf_dirty {
+        for &(side, [x0, y0, x1, y1]) in g.dirty {
             if x1 <= x0 || y1 <= y0 {
                 continue;
             }
@@ -212,7 +205,7 @@ impl<'a> GpuScene<'a> {
             );
             for y in y0..y1 {
                 let row = (y * g.width + x0) * 2;
-                staging.extend_from_slice(&sc.sdf_image[side][row..row + (x1 - x0) * 2]);
+                staging.extend_from_slice(&g.layers[side][row..row + (x1 - x0) * 2]);
             }
         }
         if regions.is_empty() {
@@ -230,23 +223,24 @@ impl<'a> GpuScene<'a> {
         r
     }
 
-    fn build_geometry(&mut self, sc: &Scene, bump_intensity: f32) -> Result<(), String> {
+    fn build_geometry(&mut self, sc: &dyn SceneSource, bump_intensity: f32) -> Result<(), String> {
         let ctx = self.ctx;
 
         // ---- メッシュを 1 本のバッファにまとめる
         // 大きさは先に分かるので、伸ばしながら写し直さない（凹凸のタイルで数百万の頂点になる）
-        let mut verts: Vec<GpuVertex> = Vec::with_capacity(sc.meshes.iter().map(|m| m.mesh.positions.len()).sum());
-        let mut idx: Vec<u32> = Vec::with_capacity(sc.meshes.iter().map(|m| m.mesh.indices.len()).sum());
-        let mut tmat: Vec<u32> = Vec::with_capacity(sc.meshes.iter().map(|m| m.mesh.tri_material.len()).sum());
-        let mut infos: Vec<GpuMeshInfo> = Vec::with_capacity(sc.meshes.len());
-        for m in &sc.meshes {
+        let meshes = || (0..sc.mesh_count()).map(|k| sc.mesh(k));
+        let mut verts: Vec<GpuVertex> = Vec::with_capacity(meshes().map(|m| m.positions.len()).sum());
+        let mut idx: Vec<u32> = Vec::with_capacity(meshes().map(|m| m.indices.len()).sum());
+        let mut tmat: Vec<u32> = Vec::with_capacity(meshes().map(|m| m.tri_material.len()).sum());
+        let mut infos: Vec<GpuMeshInfo> = Vec::with_capacity(sc.mesh_count());
+        for m in meshes() {
             infos.push(GpuMeshInfo { vertex_offset: verts.len() as u32, index_offset: idx.len() as u32, tri_offset: tmat.len() as u32, pad: 0 });
-            verts.extend(m.mesh.positions.iter().zip(&m.mesh.normals).map(|(p, n)| GpuVertex { pos: *p, pad0: 0.0, nrm: *n, pad1: 0.0 }));
-            idx.extend_from_slice(&m.mesh.indices);
-            tmat.extend_from_slice(&m.mesh.tri_material);
+            verts.extend(m.positions.iter().zip(&m.normals).map(|(p, n)| GpuVertex { pos: *p, pad0: 0.0, nrm: *n, pad1: 0.0 }));
+            idx.extend_from_slice(&m.indices);
+            tmat.extend_from_slice(&m.tri_material);
         }
         self.triangle_count = tmat.len();
-        let mats = to_gpu_materials(&sc.materials, bump_intensity);
+        let mats = to_gpu_materials(sc.materials(), bump_intensity);
 
         self.vertices = ctx.create_device_buffer(as_bytes(&verts), GEOM_USAGE)?;
         self.indices = ctx.create_device_buffer(as_bytes(&idx), GEOM_USAGE)?;
@@ -258,24 +252,24 @@ impl<'a> GpuScene<'a> {
         let vertex_stride = std::mem::size_of::<GpuVertex>() as u64;
         let index_size = std::mem::size_of::<u32>() as u64;
         let scratch_align = ctx.as_props.min_acceleration_structure_scratch_offset_alignment as u64;
-        let n_mesh = sc.meshes.len();
+        let n_mesh = sc.mesh_count();
         let mut geoms: Vec<vk::AccelerationStructureGeometryKHR> = Vec::with_capacity(n_mesh);
         let mut ranges: Vec<vk::AccelerationStructureBuildRangeInfoKHR> = Vec::with_capacity(n_mesh);
         let mut scratch_offsets: Vec<u64> = Vec::with_capacity(n_mesh);
         let mut scratch_total = 0u64;
         self.blas = vec![vk::AccelerationStructureKHR::null(); n_mesh];
         self.blas_buffers = Vec::with_capacity(n_mesh);
-        for (i, m) in sc.meshes.iter().enumerate() {
+        for (i, m) in meshes().enumerate() {
             let tri = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
                 .vertex_format(vk::Format::R32G32B32_SFLOAT)
                 .vertex_data(vk::DeviceOrHostAddressConstKHR { device_address: self.vertices.address + infos[i].vertex_offset as u64 * vertex_stride })
                 .vertex_stride(vertex_stride)
-                .max_vertex(m.mesh.positions.len().max(1) as u32 - 1)
+                .max_vertex(m.positions.len().max(1) as u32 - 1)
                 .index_type(vk::IndexType::UINT32)
                 .index_data(vk::DeviceOrHostAddressConstKHR { device_address: self.indices.address + infos[i].index_offset as u64 * index_size });
             let geom = vk::AccelerationStructureGeometryKHR::default().geometry_type(vk::GeometryTypeKHR::TRIANGLES).geometry(vk::AccelerationStructureGeometryDataKHR { triangles: tri }).flags(vk::GeometryFlagsKHR::OPAQUE);
             geoms.push(geom);
-            let prims = m.mesh.triangle_count() as u32;
+            let prims = m.triangle_count() as u32;
             ranges.push(vk::AccelerationStructureBuildRangeInfoKHR::default().primitive_count(prims));
         }
         for i in 0..n_mesh {
@@ -298,7 +292,7 @@ impl<'a> GpuScene<'a> {
         // ---- TLAS（配置ごと）
         let mut inst: Vec<vk::AccelerationStructureInstanceKHR> = Vec::new();
         let mut inst_info: Vec<GpuInstanceInfo> = Vec::new();
-        for (k, i) in sc.instances.iter().enumerate() {
+        for i in (0..sc.instance_count()).map(|k| sc.instance(k)) {
             let w2o = Mat3::from_mat4(i.xform).inverse();
             let mut ii = GpuInstanceInfo { mesh: i.mesh, material_base: i.material_base, ..Default::default() };
             for c in 0..3 {
@@ -314,8 +308,8 @@ impl<'a> GpuScene<'a> {
             let addr = unsafe { ctx.as_device.get_acceleration_structure_device_address(&vk::AccelerationStructureDeviceAddressInfoKHR::default().acceleration_structure(self.blas[i.mesh as usize])) };
             inst.push(vk::AccelerationStructureInstanceKHR {
                 transform: vk::TransformMatrixKHR { matrix },
-                // マスクはインスタンスの種類（visibility のビット）。シェーダは見せる種類を cull mask にして光線を飛ばす
-                instance_custom_index_and_mask: vk::Packed24_8::new((inst_info.len() - 1) as u32, sc.class_of(k)),
+                // マスクはインスタンスの表示マスク。シェーダは見せるビット（visible_mask）を cull mask にして光線を飛ばす
+                instance_custom_index_and_mask: vk::Packed24_8::new((inst_info.len() - 1) as u32, i.mask),
                 instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0, vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE.as_raw() as u8),
                 acceleration_structure_reference: vk::AccelerationStructureReferenceKHR { device_handle: addr },
             });
@@ -374,15 +368,15 @@ impl<'a> GpuScene<'a> {
         self.build_emitters(sc)
     }
 
-    fn build_emitters(&mut self, sc: &Scene) -> Result<(), String> {
+    fn build_emitters(&mut self, sc: &dyn SceneSource) -> Result<(), String> {
         let (mut lo, mut hi) = (Vec3::splat(1e30), Vec3::splat(-1e30));
         let mut em: Vec<GpuEmitter> = Vec::new();
         let (mut weights, mut classes) = (Vec::new(), Vec::new());
         // 発光体を選ぶ確率は 輝度 × 面積 に比例させる。シェーダの emitterPdfA は材質の発光から同じ式（emission_radiance と
         // 輝度の重み LUMINANCE_WEIGHTS）で求めるので、ここと食い違わない
-        let emissions: Vec<Vec3> = sc.materials.iter().map(emission_radiance).collect();
-        for (k, i) in sc.instances.iter().enumerate() {
-            let m = &sc.meshes[i.mesh as usize].mesh;
+        let emissions: Vec<Vec3> = sc.materials().iter().map(emission_radiance).collect();
+        for i in (0..sc.instance_count()).map(|k| sc.instance(k)) {
+            let m = sc.mesh(i.mesh as usize);
             let mirrored = i.xform.determinant() < 0.0;
             for p in &m.positions {
                 let w = i.xform.transform_point3(*p);
@@ -408,7 +402,7 @@ impl<'a> GpuScene<'a> {
                 }
                 em.push(GpuEmitter { p0: v[0].extend(f32::from_bits(mat)), p1: v[1].extend(area), p2: v[2].extend(0.0) });
                 weights.push(y as f64 * area as f64);
-                classes.push(sc.class_of(k));
+                classes.push(i.mask);
             }
         }
         if lo.x > hi.x {
@@ -469,22 +463,23 @@ impl<'a> GpuScene<'a> {
 
     /// 基板テクスチャ（レジストの厚みの距離場）を送る。大きさが同じ距離場なら、作り直したタイルの範囲だけを送る
     /// （形状を作り直していないタイルの距離場は変わらない。外形が変わればタイルのキャッシュが全部作り直すので、全部が送られる）
-    fn upload_board_texture(&mut self, sc: &Scene) -> Result<(), String> {
+    fn upload_board_texture(&mut self, sc: &dyn SceneSource) -> Result<(), String> {
         let ctx = self.ctx;
         if self.board_sampler == vk::Sampler::null() {
             self.board_sampler = make_sampler(&ctx.device, vk::SamplerAddressMode::CLAMP_TO_EDGE, vk::SamplerAddressMode::CLAMP_TO_EDGE)?;
         }
-        let g = &sc.sdf_grid;
-        let sdf = has_board_sdf(sc);
-        if sdf && self.board_image_is_sdf && self.board_image.width == g.width as u32 && self.board_image.height == g.height as u32 {
-            return self.update_sdf_tiles(sc);
+        let sdf = sc.mask_sdf();
+        if let Some(g) = &sdf {
+            if self.board_image_is_sdf && self.board_image.width == g.width as u32 && self.board_image.height == g.height as u32 {
+                return self.update_sdf_tiles(g);
+            }
         }
         ctx.destroy_image(&mut self.board_image);
         self.board_image_is_sdf = false;
-        if sdf {
+        if let Some(g) = &sdf {
             // 距離場（RG8、表・裏の 2 層）
             self.board_image = ctx.create_image_2d(g.width as u32, g.height as u32, 2, vk::Format::R8G8_UNORM, vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)?;
-            ctx.upload_image_parts(&self.board_image, &[&sc.sdf_image[0], &sc.sdf_image[1]], vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
+            ctx.upload_image_parts(&self.board_image, &g.layers, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?;
             self.board_image_is_sdf = true;
         } else {
             // 距離場が無い（基板の凹凸を作らないシーン）。記述子には画像が要るので、同じ形式の 1x1 の画像を置く。
@@ -497,20 +492,19 @@ impl<'a> GpuScene<'a> {
 
     /// レジストの厚みの定数・距離場の対応をシーンから求める。距離場を作り直したかどうかに関係なく
     /// 毎回呼ぶ（設定の厚み、スタックアップの銅の厚み、外形の大きさは、距離場の大きさが同じでも変わりうる）
-    fn update_board_params(&mut self, sc: &Scene) {
-        let m = &sc.mask;
+    fn update_board_params(&mut self, sc: &dyn SceneSource) {
+        let m = sc.mask_params();
         self.mask_params = Vec4::new(m.on_copper, m.on_substrate, m.at_edge, m.falloff);
-        let center = sc.board.center;
-        if self.board_image_is_sdf {
-            let g = &sc.sdf_grid;
-            let size_x = g.width as f64 / g.px_per_mm;
-            let size_z = g.height as f64 / g.px_per_mm;
-            self.board_map = Vec4::new((g.origin.x - center.x) as f32, (g.origin.y - center.y) as f32, (1.0 / size_x) as f32, (1.0 / size_z) as f32);
-            // 距離場の 8 bit の値を mm に戻す範囲（krbr-geom の encode_sdf と同じ値。シェーダの sdfDecode が使う）
-            self.mask_params2 = Vec4::new(m.pool, m.pool_falloff, m.copper, SDF_RANGE_MM as f32);
-        } else {
-            self.board_map = Vec4::new(-center.x as f32, -center.y as f32, 1.0, 1.0);
-            self.mask_params2 = Vec4::new(m.pool, m.pool_falloff, m.copper, 0.0);
+        match sc.mask_sdf() {
+            Some(g) if self.board_image_is_sdf => {
+                self.board_map = Vec4::new(g.origin.x, g.origin.y, 1.0 / g.size.x, 1.0 / g.size.y);
+                // 距離場の 8 bit の値を mm に戻す範囲（シェーダの sdfDecode が使う）
+                self.mask_params2 = Vec4::new(m.pool, m.pool_falloff, m.copper, g.range_mm);
+            }
+            _ => {
+                self.board_map = Vec4::new(0.0, 0.0, 1.0, 1.0);
+                self.mask_params2 = Vec4::new(m.pool, m.pool_falloff, m.copper, 0.0);
+            }
         }
     }
 
@@ -544,7 +538,7 @@ impl<'a> GpuScene<'a> {
         let data: Vec<Vec4> = (0..n).map(|i| Vec4::new(t.data[i * 3], t.data[i * 3 + 1], t.data[i * 3 + 2], 0.0)).collect();
         self.rgb2spec = self.ctx.create_device_buffer(as_bytes(&data), vk::BufferUsageFlags::STORAGE_BUFFER)?;
         self.rgb2spec_scale = self.ctx.create_device_buffer(as_bytes(&t.scale), vk::BufferUsageFlags::STORAGE_BUFFER)?;
-        let nk: Vec<[f32; 2]> = krbr_scene::conductor::Conductor::gpu_table();
+        let nk: Vec<[f32; 2]> = krbr_pbr::conductor::Conductor::gpu_table();
         let flat: Vec<f32> = nk.iter().flatten().copied().collect();
         self.conductors = self.ctx.create_device_buffer(as_bytes(&flat), vk::BufferUsageFlags::STORAGE_BUFFER)?;
         Ok(())
@@ -552,7 +546,7 @@ impl<'a> GpuScene<'a> {
 
     /// 材質を送り直す（GPU が待機中に呼ぶこと）。発光体の表（どの三角形が光るか、選ぶ確率）は形状から作るのでここでは
     /// 作り直せない。発光が変わった材質や、材質の数の違いは Err にする（その場合は rebuild_geometry で送り直す）
-    pub fn update_materials(&mut self, materials: &[krbr_scene::Material], bump_intensity: f32) -> Result<(), String> {
+    pub fn update_materials(&mut self, materials: &[krbr_pbr::Material], bump_intensity: f32) -> Result<(), String> {
         if materials.iter().map(emission_radiance).ne(self.emissions.iter().copied()) {
             return Err("the emission of a material changed; the light table needs rebuild_geometry".into());
         }

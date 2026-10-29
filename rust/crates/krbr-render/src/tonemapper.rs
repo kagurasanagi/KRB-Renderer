@@ -222,7 +222,7 @@ impl<'a> Tonemapper<'a> {
     /// background: 背景を透明にした画像のアルファの扱い（画像の表示のときだけ）
     pub fn record(&self, cmd: vk::CommandBuffer, exposure_ev: f32, mode: DisplayMode, xyz_input: bool, glow: &glow::GlowParams, background: Background) {
         let dev = &self.ctx.device;
-        let m = krbr_scene::spectrum::xyz_to_linear_srgb();
+        let m = krbr_pbr::spectrum::xyz_to_linear_srgb();
         let w = if xyz_input { 1.0 } else { 0.0 };
         let xyz_to_rgb = [m.col(0).extend(w), m.col(1).extend(w), m.col(2).extend(w)];
         let exposure_scale = 2f32.powf(exposure_ev);

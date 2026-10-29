@@ -79,12 +79,12 @@ unsafe impl Send for Oidn {}
 unsafe impl Sync for Oidn {}
 
 fn load_oidn() -> Result<Oidn, String> {
-    // 配布用の一式の dll\oidn、exe と同じフォルダ、開発中は scripts\get_oidn.ps1 が置く公式のバイナリ（<repo>/third_party/oidn/bin）
+    // 配布用の一式の dll\oidn、exe と同じフォルダ（ほかのアプリに読み込まれた krbr_renderer.dll なら、その DLL の横の
+    // dll\oidn と同じフォルダ）、開発中は scripts\get_oidn.ps1 が置く公式のバイナリ（<repo>/third_party/oidn/bin）
     let name = "OpenImageDenoise.dll";
-    let mut path = krbr_core::platform::dll_dir("oidn").join(name);
-    if !path.exists() {
-        path = krbr_core::platform::exe_dir().join(name);
-    }
+    let (exe, module) = (krbr_core::platform::exe_dir(), krbr_core::platform::module_dir());
+    let candidates = [module.join("dll").join("oidn"), module, exe.join("dll").join("oidn"), exe];
+    let mut path = candidates.iter().map(|d| d.join(name)).find(|p| p.exists()).unwrap_or_else(|| candidates[0].join(name));
     if !path.exists() {
         // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR は完全なパスが要るので、.. を含めずに組み立てる
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(3).unwrap_or(std::path::Path::new("."));
@@ -418,7 +418,7 @@ impl<'a> Denoiser<'a> {
     /// xyz_input: 累積が CIE XYZ（分光モード。Progressive::xyz_output）なら true、リニア sRGB なら false。
     /// OIDN は RGB を前提にしているので、XYZ はここでリニア sRGB に直して渡す
     pub fn record_prepare(&self, cmd: vk::CommandBuffer, xyz_input: bool) {
-        let push = PrepPush { width: self.width, height: self.height, _pad: [0; 2], xyz_to_rgb: color_matrix(krbr_scene::spectrum::xyz_to_linear_srgb(), xyz_input) };
+        let push = PrepPush { width: self.width, height: self.height, _pad: [0; 2], xyz_to_rgb: color_matrix(krbr_pbr::spectrum::xyz_to_linear_srgb(), xyz_input) };
         self.prep.dispatch(self.ctx, cmd, &push, self.width, self.height);
         // 書き込みを、完了の待機後に OIDN（外部・CPU）から読めるようにする
         memory_barrier(&self.ctx.device, cmd, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::HOST, vk::AccessFlags2::HOST_READ);
@@ -438,7 +438,7 @@ impl<'a> Denoiser<'a> {
     pub fn record_output(&self, cmd: vk::CommandBuffer, strength: f32, xyz_input: bool) {
         let dev = &self.ctx.device;
         memory_barrier(dev, cmd, vk::PipelineStageFlags2::HOST, vk::AccessFlags2::HOST_WRITE, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_READ);
-        let push = BlendPush { width: self.width, height: self.height, strength, _pad: 0, rgb_to_xyz: color_matrix(krbr_scene::spectrum::linear_srgb_to_xyz(), xyz_input) };
+        let push = BlendPush { width: self.width, height: self.height, strength, _pad: 0, rgb_to_xyz: color_matrix(krbr_pbr::spectrum::linear_srgb_to_xyz(), xyz_input) };
         self.blend.dispatch(self.ctx, cmd, &push, self.width, self.height);
         memory_barrier(dev, cmd, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::COPY, vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::TRANSFER_READ);
     }

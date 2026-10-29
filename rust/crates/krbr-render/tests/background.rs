@@ -10,10 +10,10 @@ use glam::Vec3;
 use krbr_core::mesh::Mesh;
 use krbr_render::image_io::tonemap_rgba8;
 use krbr_render::ImageF;
-use krbr_scene::camera::orbit_camera;
+use krbr_pbr::camera::orbit_camera;
 
 /// 真ん中に浮かべた灰色の板と箱（画面の四隅には何も無い）
-fn scene() -> krbr_scene::scene::Scene {
+fn scene() -> krbr_pbr::RenderScene {
     let mut m = Mesh::default();
     add_quad(&mut m, Vec3::new(-30.0, 0.0, -20.0), Vec3::new(30.0, 0.0, -20.0), Vec3::new(30.0, 0.0, 20.0), Vec3::new(-30.0, 0.0, 20.0), Vec3::Y, 0);
     add_box(&mut m, Vec3::new(-8.0, 0.0, -8.0), Vec3::new(8.0, 10.0, 8.0), 1);

@@ -8,9 +8,9 @@ use common::*;
 use glam::{Vec2, Vec3};
 use krbr_core::mesh::Mesh;
 use krbr_render::{Context, ImageF, RenderOutput};
-use krbr_scene::camera::Camera;
-use krbr_scene::lens::{LensModel, LensParams};
-use krbr_scene::material::Material;
+use krbr_pbr::camera::Camera;
+use krbr_pbr::lens::{LensModel, LensParams};
+use krbr_pbr::material::Material;
 
 const W: u32 = 640;
 const H: u32 = 400;

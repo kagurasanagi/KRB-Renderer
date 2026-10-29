@@ -1,4 +1,5 @@
-//! シェーダ（<repo>/shaders の GLSL）を glslc で SPIR-V にして、target/<profile>/shaders（krbr.exe の横）に置く。
+//! シェーダ（<repo>/shaders の GLSL）を glslc で SPIR-V にして OUT_DIR/shaders に置き、それをライブラリに埋め込む表
+//! （OUT_DIR/embedded_shaders.rs）を作る。埋め込むので、exe の横にシェーダのフォルダが無くても（DLL として読み込まれても）動く。
 //! 積分器（レイを飛ばすもの）は、ray query 版（.comp.spv）に加えて ray tracing pipeline 版（.rgen.spv）も作る。
 //! ray_query を持たない GPU（GTX 10 系など）では後者と rt_*.spv を使う。
 //! glslc は 環境変数 GLSLC、%VULKAN_SDK%\Bin、PATH の順に探す（Vulkan SDK に付属。配布の zip を使うだけなら不要）
@@ -48,9 +49,8 @@ fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     // canonicalize は Windows で \\?\ 付きのパスになり、glslc が #include を解決できないので使わない
     let src_dir = manifest.ancestors().nth(3).expect("repository root").join("shaders");
-    // OUT_DIR = target/<profile>/build/krbr-render-<hash>/out
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let dst = out_dir.ancestors().nth(3).expect("target profile directory").join("shaders");
+    let dst = out_dir.join("shaders");
     std::fs::create_dir_all(&dst).expect("create shader output directory");
 
     println!("cargo:rerun-if-env-changed=GLSLC");
@@ -59,8 +59,6 @@ fn main() {
     for e in std::fs::read_dir(&src_dir).expect("read shaders directory").flatten() {
         println!("cargo:rerun-if-changed={}", e.path().display());
     }
-    // 開発中（cargo run / cargo test）の実行ファイルが、exe の横に無くても見つけられるように
-    println!("cargo:rustc-env=KRBR_BUILD_SHADER_DIR={}", dst.display());
 
     let glslc = find_glslc().unwrap_or_else(|e| panic!("{e}"));
     let defines: Vec<String> = shader_consts::glsl_defines().into_iter().map(|(k, v)| format!("-D{k}={v}")).collect();
@@ -100,4 +98,12 @@ fn main() {
     if !errors.is_empty() {
         panic!("shader compilation failed:\n{}", errors.join("\n"));
     }
+
+    // 埋め込みの表：(ファイル名, SPIR-V)
+    let mut table = String::from("pub static EMBEDDED_SHADERS: &[(&str, &[u8])] = &[\n");
+    for (out, _) in &jobs {
+        table += &format!("    ({out:?}, include_bytes!({:?})),\n", dst.join(out).display().to_string());
+    }
+    table += "];\n";
+    std::fs::write(out_dir.join("embedded_shaders.rs"), table).expect("write embedded_shaders.rs");
 }

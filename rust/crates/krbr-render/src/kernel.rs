@@ -5,8 +5,8 @@ use std::sync::{Mutex, OnceLock};
 
 use ash::vk;
 use glam::{UVec4, Vec4};
-use krbr_scene::lens::{LensModel, LensParams, LensSystem};
-use krbr_scene::spectrum;
+use krbr_pbr::lens::{LensModel, LensParams, LensSystem};
+use krbr_pbr::spectrum;
 
 use crate::gpu_scene::GpuScene;
 use crate::gpu_types::{FrameUbo, PushConstants};
@@ -195,7 +195,7 @@ pub struct RealisticFilm {
 }
 
 /// 実レンズのフィルム（fill_lens と、動画のフロー（crate::flow）が使う）
-pub fn realistic_film(l: &LensParams, cam: &krbr_scene::Camera) -> RealisticFilm {
+pub fn realistic_film(l: &LensParams, cam: &krbr_pbr::Camera) -> RealisticFilm {
     let focus = if l.focus_distance_mm > 0.0 { l.focus_distance_mm } else { cam.distance };
     // F 値は設計値（開放）から絞る方向にだけ効く。絞りの面の有効径を縮める
     let sys = lens_system_for(&l.lens_file).stopped_down(l.f_number);
@@ -250,12 +250,11 @@ pub fn fill_lens(u: &mut FrameUbo, fp: &FrameParams) {
     }
 }
 
-/// SPIR-V（shader_dir() の name）を読んでシェーダモジュールを作る
+/// SPIR-V（crate::shader_spirv の name）を読んでシェーダモジュールを作る
 pub(crate) fn load_shader(dev: &ash::Device, name: &str) -> Result<vk::ShaderModule, String> {
-    let p = crate::shader_dir().join(name);
-    let code = std::fs::read(&p).map_err(|e| format!("cannot read shader {}: {e}", p.display()))?;
+    let code = crate::shader_spirv(name)?;
     if code.len() % 4 != 0 {
-        return Err(format!("bad shader {} ({} bytes, not a multiple of 4)", p.display(), code.len()));
+        return Err(format!("bad shader {name} ({} bytes, not a multiple of 4)", code.len()));
     }
     let words: Vec<u32> = code.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     let ci = vk::ShaderModuleCreateInfo::default().code(&words);

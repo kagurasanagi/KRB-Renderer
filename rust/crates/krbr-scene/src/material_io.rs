@@ -4,72 +4,7 @@ use glam::Vec3;
 use toml::Value;
 
 use crate::conductor;
-use crate::material::{BumpPattern, Category, Material, Sellmeier};
-
-enum Param {
-    F(fn(&mut Material) -> &mut f32),
-    C(fn(&mut Material) -> &mut Vec3),
-    B(fn(&mut Material) -> &mut bool),
-}
-
-macro_rules! f {
-    ($name:literal, $field:ident) => {
-        ($name, Param::F(|m: &mut Material| &mut m.$field))
-    };
-}
-macro_rules! c {
-    ($name:literal, $field:ident) => {
-        ($name, Param::C(|m: &mut Material| &mut m.$field))
-    };
-}
-macro_rules! b {
-    ($name:literal, $field:ident) => {
-        ($name, Param::B(|m: &mut Material| &mut m.$field))
-    };
-}
-
-/// OpenPBR Surface のパラメータの一覧
-fn params() -> Vec<(&'static str, Param)> {
-    vec![
-        f!("base_weight", base_weight),
-        c!("base_color", base_color),
-        f!("base_diffuse_roughness", base_diffuse_roughness),
-        f!("base_metalness", base_metalness),
-        f!("specular_weight", specular_weight),
-        c!("specular_color", specular_color),
-        f!("specular_roughness", specular_roughness),
-        f!("specular_roughness_anisotropy", specular_roughness_anisotropy),
-        f!("specular_ior", specular_ior),
-        f!("transmission_weight", transmission_weight),
-        c!("transmission_color", transmission_color),
-        f!("transmission_depth", transmission_depth),
-        c!("transmission_scatter", transmission_scatter),
-        f!("transmission_scatter_anisotropy", transmission_scatter_anisotropy),
-        f!("transmission_dispersion_scale", transmission_dispersion_scale),
-        f!("transmission_dispersion_abbe_number", transmission_dispersion_abbe_number),
-        f!("subsurface_weight", subsurface_weight),
-        c!("subsurface_color", subsurface_color),
-        f!("subsurface_radius", subsurface_radius),
-        c!("subsurface_radius_scale", subsurface_radius_scale),
-        f!("subsurface_scatter_anisotropy", subsurface_scatter_anisotropy),
-        f!("fuzz_weight", fuzz_weight),
-        c!("fuzz_color", fuzz_color),
-        f!("fuzz_roughness", fuzz_roughness),
-        f!("coat_weight", coat_weight),
-        c!("coat_color", coat_color),
-        f!("coat_roughness", coat_roughness),
-        f!("coat_roughness_anisotropy", coat_roughness_anisotropy),
-        f!("coat_ior", coat_ior),
-        f!("coat_darkening", coat_darkening),
-        f!("thin_film_weight", thin_film_weight),
-        f!("thin_film_thickness", thin_film_thickness),
-        f!("thin_film_ior", thin_film_ior),
-        f!("emission_luminance", emission_luminance),
-        c!("emission_color", emission_color),
-        f!("geometry_opacity", geometry_opacity),
-        b!("geometry_thin_walled", geometry_thin_walled),
-    ]
-}
+use crate::material::{params, BumpPattern, Category, Material, Param, Sellmeier, CONDUCTOR_PARAMS};
 
 fn as_f32(v: &Value) -> Option<f32> {
     match v {
@@ -94,8 +29,6 @@ const KRBR_KEYS: &[&str] = &["bump_pattern", "bump_strength", "bump_scale", "rou
 /// 測定値の金属をやめる（[krbr] conductor に書く名前）
 pub const NO_CONDUCTOR: &str = "none";
 
-/// 測定値の金属の色を決める項目（書くと測定値の金属ではなくなる。conductor も書けばそちらが勝つ）
-const CONDUCTOR_PARAMS: &[&str] = &["base_color", "specular_color", "base_metalness"];
 
 fn sellmeier_coefficients(v: &Value) -> Option<[f32; 3]> {
     match v {

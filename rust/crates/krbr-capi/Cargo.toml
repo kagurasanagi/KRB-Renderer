@@ -1,0 +1,17 @@
+[package]
+name = "krbr-capi"
+description = "KRB Renderer: 描画のコア（krbr-render）を C ABI の DLL（krbr_renderer.dll）にしたもの。Blender などのラッパーから呼ぶ"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "krbr_renderer"
+# cdylib：ほかのアプリから読み込む DLL。rlib：このクレートのテストから呼ぶ
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+krbr-core = { path = "../krbr-core" }
+krbr-pbr = { path = "../krbr-pbr" }
+krbr-render = { path = "../krbr-render" }
+glam.workspace = true
