@@ -65,7 +65,7 @@ fn shoot(ctx: &Context, o: &RenderOptions, krbr_text: &str) -> Shot {
     let cam = initial_camera(&prep, o, cfg.width, cfg.height);
     let mut gpu = GpuScene::new(ctx);
     gpu.build(&prep.scene, &prep.env, &prep.dist, cfg.scene.bump_intensity).unwrap();
-    let rs = RenderSettings { width: cfg.width, height: cfg.height, spp: cfg.spp, integrator: cfg.integrator, frame: frame_params(cfg, cam, o.seed), denoise: None };
+    let rs = RenderSettings { width: cfg.width, height: cfg.height, spp: cfg.spp, integrator: cfg.integrator, frame: frame_params(cfg, cam, o.seed), denoise: None, gpu_limit: Default::default() };
     let out = render_offscreen(ctx, &gpu, &rs).unwrap();
     let display = tonemap_rgba8(&out.color, cfg.exposure_ev, &glow_params(cfg)).iter().map(|&v| v as f32 / 255.0).collect();
     Shot { display, color: out.color, albedo: out.albedo }

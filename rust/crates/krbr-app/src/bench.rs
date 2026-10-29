@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use krbr_core::{info, warn};
-use krbr_render::{render_offscreen, GpuScene, RenderSettings};
+use krbr_render::{render_offscreen, GpuLimit, GpuScene, RenderSettings};
 use krbr_scene::{IntegratorKind, LensModel};
 
 use crate::prepare::{frame_params, initial_camera, prepare_scene_and_context, trace_method_name, RenderOptions};
@@ -100,7 +100,8 @@ pub fn cmd_bench(b: &BenchOptions) -> anyhow::Result<()> {
     for (name, integrator, spectral) in CASES {
         let mut frame = frame_params(cfg, cam, 0);
         frame.spectral = spectral;
-        let mut rs = RenderSettings { width: b.width, height: b.height, spp: WARMUP_SPP, integrator, frame, denoise: None };
+        // 上限（state.toml・--gpu-limit）は効かせない（GPU どうしを比べるため）
+        let mut rs = RenderSettings { width: b.width, height: b.height, spp: WARMUP_SPP, integrator, frame, denoise: None, gpu_limit: GpuLimit::unlimited() };
         render_offscreen(&ctx, &gpu, &rs).map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
         rs.spp = b.spp;
         let out = render_offscreen(&ctx, &gpu, &rs).map_err(|e| anyhow::anyhow!("{name}: {e}"))?;

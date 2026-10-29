@@ -20,6 +20,10 @@ struct Cli {
     /// run the commands without a window (render / watch / geom / models) at the normal CPU priority (default: below normal)
     #[arg(long, global = true)]
     normal_priority: bool,
+    /// upper limit of the GPU usage in percent (approximate; render / watch / view). Default: the one set in the viewer, else 100.
+    /// Not applied to bench
+    #[arg(long, global = true, value_name = "PERCENT", value_parser = clap::value_parser!(u32).range(10..=100))]
+    gpu_limit: Option<u32>,
     #[command(subcommand)]
     command: Command,
 }
@@ -666,6 +670,15 @@ fn main() {
         krbr_core::platform::lower_process_priority();
     }
     krbr_core::debug!("process priority: {}", if krbr_core::platform::process_priority_is_low() { "below normal" } else { "normal" });
+    if let Some(p) = cli.gpu_limit {
+        krbr_app::remember::set_gpu_limit_for_process(p);
+    }
+    if matches!(cli.command, Command::Render(_) | Command::Watch(_) | Command::View(_)) {
+        let p = krbr_app::remember::gpu_limit();
+        if p < 100 {
+            info!("GPU usage limited to about {p} % ({}; --gpu-limit 100 to lift it)", if cli.gpu_limit.is_some() { "--gpu-limit" } else { "set in the viewer" });
+        }
+    }
     let result = match &cli.command {
         Command::Info { pcb, models } => cmd_info(pcb, *models),
         Command::Render(args) if args.pcb.is_none() => Err(anyhow::anyhow!("give a .kicad_pcb file (krbr render <board>.kicad_pcb)")),

@@ -224,6 +224,8 @@ mode-image = 画像
 mode-albedo = アルベド
 mode-normal = 法線
 max-spp = 最大 spp
+gpu-limit = GPU 使用率の上限
+gpu-limit-tip = GPU を使う割合の上限（目安）。下げると発熱・消費電力・ファンの音が減り、描くのは遅くなります。krbr render / watch にも効きます（bench には効きません。--gpu-limit で一時的に変えられます）
 
 panel-camera = カメラ
 camera-fov = 画角

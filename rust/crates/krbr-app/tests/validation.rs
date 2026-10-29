@@ -48,7 +48,7 @@ fn gpu_work_passes_the_validation_layer() {
             for kind in IntegratorKind::ALL {
                 let what = format!("{kind} {lens:?} {}", if spectral { "spectral, transparent background" } else { "rgb" });
                 // 1 回の描画（krbr render）。ノイズ除去があれば、その結果も読み戻す
-                let rs = RenderSettings { width: w, height: h, spp: 2, integrator: kind, frame: frame_params(cfg, cam, 0), denoise: denoise.then_some((DenoiseQuality::Fast, 1.0)) };
+                let rs = RenderSettings { width: w, height: h, spp: 2, integrator: kind, frame: frame_params(cfg, cam, 0), denoise: denoise.then_some((DenoiseQuality::Fast, 1.0)), gpu_limit: Default::default() };
                 render_offscreen(&ctx, &gpu, &rs).unwrap_or_else(|e| panic!("{what}: {e}"));
                 // ビューアと同じ累積：1 つのコマンドに 3 サンプルを 2 回積み、トーンマッピングして読み戻す
                 let mut prog = Progressive::new(&ctx, &gpu, kind, w, h, frame_params(cfg, cam, 0)).unwrap_or_else(|e| panic!("{what}: {e}"));

@@ -8,6 +8,7 @@ pub mod denoiser;
 pub mod env_map;
 pub mod flow;
 pub mod glow;
+pub mod gpu_limit;
 pub mod gpu_scene;
 pub mod gpu_types;
 pub mod image_io;
@@ -22,6 +23,7 @@ pub mod vk;
 
 pub use denoiser::{denoiser_available, DenoiseQuality, Denoiser};
 pub use env_map::{build_env_distribution, EnvDistribution};
+pub use gpu_limit::GpuLimit;
 pub use gpu_scene::GpuScene;
 pub use image_io::ImageF;
 pub use integrator::{AovImages, FrameParams, Progressive, RenderTargets};

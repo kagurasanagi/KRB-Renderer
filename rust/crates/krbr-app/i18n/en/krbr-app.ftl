@@ -224,6 +224,8 @@ mode-image = Image
 mode-albedo = Albedo
 mode-normal = Normal
 max-spp = Max spp
+gpu-limit = GPU usage limit
+gpu-limit-tip = Upper limit of the share of time the GPU is used (approximate). Lower values reduce heat, power and fan noise, and render more slowly. Also applies to krbr render / watch (not to bench; --gpu-limit overrides it for one run)
 
 panel-camera = Camera
 camera-fov = Field of view

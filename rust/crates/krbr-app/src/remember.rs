@@ -664,6 +664,62 @@ pub fn remember_ui_language(lang: Option<&str>) {
     save(&file, &t);
 }
 
+// ---------------------------------------------------------------- GPU の使用率の上限（基板によらず 1 つ）
+
+/// このプロセスで決めた上限（%。0 = 決めていない）
+static GPU_LIMIT_FOR_PROCESS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn gpu_limit_in(t: &Table) -> Option<u32> {
+    let p = t.get("ui")?.get("gpu_limit")?.as_integer()?;
+    Some(krbr_render::GpuLimit::new(u32::try_from(p).ok()?).percent())
+}
+
+fn remember_gpu_limit_in(t: &mut Table, percent: u32) {
+    let ui = t.entry("ui").or_insert_with(|| Value::Table(Table::new()));
+    if let Some(ui) = ui.as_table_mut() {
+        ui.insert("gpu_limit".into(), Value::Integer(krbr_render::GpuLimit::new(percent).percent() as i64));
+    }
+}
+
+/// このプロセスでの上限を決める（--gpu-limit、ビューアのスライダー）。state.toml より優先する
+pub fn set_gpu_limit_for_process(percent: u32) {
+    GPU_LIMIT_FOR_PROCESS.store(krbr_render::GpuLimit::new(percent).percent(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// GPU の使用率の上限（%）：このプロセスで決めた値、無ければ state.toml の [ui] gpu_limit、無ければ 100。
+/// render / watch / view / 動画に効く（bench と C API には効かせない）
+pub fn gpu_limit() -> u32 {
+    match GPU_LIMIT_FOR_PROCESS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => gpu_limit_in(&load(&state_file())).unwrap_or(krbr_render::GpuLimit::MAX_PERCENT),
+        p => p,
+    }
+}
+
+/// ビューアのスライダーで決めた上限を覚える
+pub fn remember_gpu_limit(percent: u32) {
+    let file = state_file();
+    let mut t = load(&file);
+    remember_gpu_limit_in(&mut t, percent);
+    save(&file, &t);
+}
+
+#[cfg(test)]
+mod gpu_limit_tests {
+    use super::*;
+
+    #[test]
+    fn gpu_limit_round_trip_and_clamp() {
+        let mut t = Table::new();
+        assert_eq!(gpu_limit_in(&t), None);
+        remember_ui_language_in(&mut t, Some("ja"));
+        remember_gpu_limit_in(&mut t, 60);
+        assert_eq!(gpu_limit_in(&t), Some(60));
+        assert_eq!(ui_language_in(&t).as_deref(), Some("ja")); // 同じ [ui] のほかの値は残る
+        remember_gpu_limit_in(&mut t, 3);
+        assert_eq!(gpu_limit_in(&t), Some(krbr_render::GpuLimit::MIN_PERCENT));
+    }
+}
+
 #[cfg(test)]
 mod recent_tests {
     use super::*;

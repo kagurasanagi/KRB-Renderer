@@ -7,7 +7,7 @@ use ash::vk;
 use krbr_core::{info, warn, FileWatcher};
 use krbr_render::tonemapper::{Background, DisplayMode, Tonemapper};
 use krbr_render::vk::memory_barrier;
-use krbr_render::{image_io, Context, DenoiseQuality, Denoiser, FrameParams, GpuScene};
+use krbr_render::{image_io, Context, DenoiseQuality, Denoiser, FrameParams, GpuLimit, GpuScene};
 use krbr_scene::scene::MaterialFilesWatch;
 use krbr_scene::IntegratorKind;
 
@@ -210,11 +210,12 @@ impl<'a> Renderer<'a> {
         // PT に代えたら、次の更新からも PT にする（毎回作り直して失敗しない）
         self.integrator = prog.integrator_kind();
         let tone = Tonemapper::new(self.ctx, prog.targets()).map_err(|e| anyhow::anyhow!(e))?;
-        // 8 サンプルずつ投入する（GPU を長く占有しない）
+        // 8 サンプルずつ投入する（GPU を長く占有しない）。使用率の上限は描くたびに読み直す（ビューアで変えたら次から効く）
+        let mut limit = GpuLimit::new(crate::remember::gpu_limit());
         let mut left = self.spp;
         while left > 0 {
             let n = left.min(8);
-            self.ctx.submit_and_wait(|_, cmd| prog.record(cmd, n)).map_err(|e| anyhow::anyhow!(e))?;
+            limit.run(|| self.ctx.submit_and_wait(|_, cmd| prog.record(cmd, n))).map_err(|e| anyhow::anyhow!(e))?;
             left -= n;
         }
         // ノイズ除去（OIDN のデバイスとバッファは使い回し、累積の画像だけ参照し直す）

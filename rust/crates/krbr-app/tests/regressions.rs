@@ -50,7 +50,7 @@ fn render(ctx: &Context, o: &RenderOptions) -> (ImageF, ImageF, krbr_scene::Proj
     let cam = initial_camera(&prep, o, cfg.width, cfg.height);
     let mut gpu = GpuScene::new(ctx);
     gpu.build(&prep.scene, &prep.env, &prep.dist, cfg.scene.bump_intensity).unwrap();
-    let rs = RenderSettings { width: cfg.width, height: cfg.height, spp: cfg.spp, integrator: cfg.integrator, frame: frame_params(&cfg, cam, o.seed), denoise: None };
+    let rs = RenderSettings { width: cfg.width, height: cfg.height, spp: cfg.spp, integrator: cfg.integrator, frame: frame_params(&cfg, cam, o.seed), denoise: None, gpu_limit: Default::default() };
     let out = render_offscreen(ctx, &gpu, &rs).unwrap();
     (out.color, out.albedo, cfg)
 }

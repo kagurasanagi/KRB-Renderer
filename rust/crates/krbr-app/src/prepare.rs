@@ -9,7 +9,7 @@ use krbr_geom::tiles::ReliefTileCache;
 use krbr_kicad::{diff_boards, load_board, Board, BoardDiff, ModelResolver};
 use krbr_model::{MeshParams, ModelLibrary};
 use krbr_render::studio_env::{studio_environment, STUDIO};
-use krbr_render::{build_env_distribution, image_io, DenoiseQuality, is_builtin, load_environment_map, render_offscreen, Context, ContextOptions, FrameParams, GpuScene, Progressive, RenderSettings};
+use krbr_render::{build_env_distribution, image_io, DenoiseQuality, is_builtin, load_environment_map, render_offscreen, Context, ContextOptions, FrameParams, GpuLimit, GpuScene, Progressive, RenderSettings};
 use krbr_scene::config::{apply_mask_color_spec, load_project_config, write_default_configs, ProjectConfig};
 use krbr_scene::scene::{build_scene, load_material_setup, MaterialSetup, SceneContext};
 use krbr_scene::{frame_camera, orbit_camera, Camera, CameraParams, IntegratorKind, LensModel, MaterialResolver, Scene, SceneOptions};
@@ -532,7 +532,7 @@ pub fn cmd_render(o: &RenderOptions) -> anyhow::Result<()> {
         gpu.build(&prep.scene, &prep.env, &prep.dist, cfg.scene.bump_intensity).map_err(|e| anyhow::anyhow!("GPU scene: {e}"))?;
         prep.env.rgba = Vec::new();
         let denoise = o.denoise.unwrap_or(false).then_some((DenoiseQuality::High, o.denoise_strength.unwrap_or(1.0)));
-        let rs = RenderSettings { width: cfg.width, height: cfg.height, spp: cfg.spp, integrator: cfg.integrator, frame: frame_params(cfg, cam, o.seed), denoise };
+        let rs = RenderSettings { width: cfg.width, height: cfg.height, spp: cfg.spp, integrator: cfg.integrator, frame: frame_params(cfg, cam, o.seed), denoise, gpu_limit: GpuLimit::new(crate::remember::gpu_limit()) };
         render_offscreen(&ctx, &gpu, &rs).map_err(|e| anyhow::anyhow!("render failed: {e}"))?
     };
 

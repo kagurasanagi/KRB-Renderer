@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use krbr_pbr::IntegratorKind;
 
+use crate::gpu_limit::GpuLimit;
 use crate::gpu_scene::GpuScene;
 use crate::image_io::ImageF;
 use crate::denoiser::{DenoiseQuality, Denoiser};
@@ -19,6 +20,8 @@ pub struct RenderSettings {
     pub frame: FrameParams,
     /// ノイズ除去（OIDN）もする：品質と、元の画像と混ぜる強さ（0..1）
     pub denoise: Option<(DenoiseQuality, f32)>,
+    /// GPU の使用率の上限（サンプルの間に休む）
+    pub gpu_limit: GpuLimit,
 }
 
 pub struct RenderOutput {
@@ -37,8 +40,9 @@ pub fn render_offscreen(ctx: &Context, scene: &GpuScene<'_>, s: &RenderSettings)
     // 1 サンプルずつ投入して完了を待つ。GPU を長時間占有しないので、作業中の画面描画が止まりにくい
     let t0 = Instant::now();
     let mut last_log = t0;
+    let mut limit = s.gpu_limit.clone();
     for i in 0..s.spp {
-        ctx.submit_and_wait(|_, cmd| prog.record(cmd, 1))?;
+        limit.run(|| ctx.submit_and_wait(|_, cmd| prog.record(cmd, 1)))?;
         std::thread::yield_now();
         let now = Instant::now();
         if now.duration_since(last_log).as_secs_f64() > 2.0 || i + 1 == s.spp {

@@ -85,7 +85,7 @@ fn renders_match_the_reference_bit_for_bit() {
         let cam = initial_camera(&prep, &o, cfg.width, cfg.height);
         let mut gpu = GpuScene::new(&ctx);
         gpu.build(&prep.scene, &prep.env, &prep.dist, cfg.scene.bump_intensity).unwrap();
-        let rs = RenderSettings { width: cfg.width, height: cfg.height, spp: SPP, integrator: c.integrator, frame: frame_params(cfg, cam, SEED), denoise: None };
+        let rs = RenderSettings { width: cfg.width, height: cfg.height, spp: SPP, integrator: c.integrator, frame: frame_params(cfg, cam, SEED), denoise: None, gpu_limit: Default::default() };
         let out = render_offscreen(&ctx, &gpu, &rs).unwrap();
         let bytes = to_bytes(&[&out.color, &out.albedo, &out.normal]);
         let file = out_dir().join(format!("{}.f32", c.name));

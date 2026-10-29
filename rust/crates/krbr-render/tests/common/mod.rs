@@ -141,7 +141,7 @@ pub fn frame(camera: Camera, max_depth: u32) -> FrameParams {
 }
 
 pub fn render(ctx: &Context, gpu: &GpuScene<'_>, w: u32, h: u32, spp: u32, integrator: IntegratorKind, frame: FrameParams) -> RenderOutput {
-    let rs = RenderSettings { width: w, height: h, spp, integrator, frame, denoise: None };
+    let rs = RenderSettings { width: w, height: h, spp, integrator, frame, denoise: None, gpu_limit: Default::default() };
     render_offscreen(ctx, gpu, &rs).expect("render")
 }
 

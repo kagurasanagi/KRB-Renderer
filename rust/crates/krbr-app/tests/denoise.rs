@@ -39,7 +39,7 @@ fn denoising_a_4spp_image_approaches_the_reference() {
         let mut gpu = GpuScene::new(&ctx);
         gpu.build(&prep.scene, &prep.env, &prep.dist, prep.cfg.scene.bump_intensity).unwrap();
         let render = |spp: u32, denoise: Option<(DenoiseQuality, f32)>| -> RenderOutput {
-            let rs = RenderSettings { width: 480, height: 270, spp, integrator: IntegratorKind::Pt, frame: frame_params(&prep.cfg, cam, 1), denoise };
+            let rs = RenderSettings { width: 480, height: 270, spp, integrator: IntegratorKind::Pt, frame: frame_params(&prep.cfg, cam, 1), denoise, gpu_limit: Default::default() };
             render_offscreen(&ctx, &gpu, &rs).unwrap()
         };
         let reference = render(1024, None).color;

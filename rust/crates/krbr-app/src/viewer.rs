@@ -16,7 +16,7 @@ use krbr_render::glow::GlowParams;
 use krbr_render::tonemapper::{Background, DisplayMode, Tonemapper};
 use krbr_render::vk::{image_barrier, memory_barrier, Buffer};
 use krbr_render::studio_env::STUDIO;
-use krbr_render::{build_env_distribution, describe_environment, is_builtin, load_environment_map, Context, ContextOptions, DenoiseQuality, Denoiser, EnvDistribution, EnvironmentName, GpuScene, Progressive};
+use krbr_render::{build_env_distribution, describe_environment, is_builtin, load_environment_map, Context, ContextOptions, DenoiseQuality, Denoiser, EnvDistribution, EnvironmentName, GpuLimit, GpuScene, Progressive};
 use krbr_scene::config::apply_mask_color_spec;
 use krbr_scene::scene::{load_material_setup, raycast_pick_visible, MaterialFilesWatch, update_mask_material, update_substrate_material, visibility, MaterialAssignment};
 use krbr_scene::{mask_presets, orbit_camera, Camera, InstanceOwner, IntegratorKind, LensModel, MaterialLibrary, MaterialStage, Scene, SceneOptions};
@@ -1110,6 +1110,9 @@ struct App {
     win_seen: remember::WindowState,
     win_saved: remember::WindowState,
     win_changed_at: Instant,
+    /// GPU の使用率の上限（基板によらず 1 つ。テストには効かせない）と、スライダーで変えて、まだ覚えていない時刻
+    gpu_limit: GpuLimit,
+    gpu_limit_changed_at: Option<Instant>,
     /// 設定パネルの今の幅（egui のポイント）
     panel_width: f32,
     /// 設定パネルのグループ・詳細の開閉（開閉したものだけ。ほかは既定。ウィンドウの状態と一緒に覚える）
@@ -1364,6 +1367,11 @@ impl App {
 
     /// パネルの設定とウィンドウの状態が変わっていたら覚える（最後に変わってから 1 秒たったら。now なら待たずに）
     fn save_view(&mut self, now: bool) {
+        // GPU の使用率の上限（スライダーを動かし終えてから）
+        if self.gpu_limit_changed_at.is_some_and(|t| now || t.elapsed() >= Duration::from_secs(1)) {
+            self.gpu_limit_changed_at = None;
+            remember::remember_gpu_limit(self.gpu_limit.percent());
+        }
         // ウィンドウ（表示しないテストのときは覚えない）
         if !(self.vo.hidden || self.test.active()) {
             if let Some(w) = self.current_window() {
@@ -2228,6 +2236,8 @@ impl App {
         fresh.win_seen = self.win_seen.clone();
         fresh.win_saved = self.win_saved.clone();
         fresh.panel_width = self.panel_width;
+        fresh.gpu_limit = self.gpu_limit.clone();
+        fresh.gpu_limit_changed_at = self.gpu_limit_changed_at;
         fresh.st.show_panel = self.st.show_panel;
         fresh.frames = self.frames;
         let g = fresh.gpu.as_mut().unwrap();
@@ -3209,6 +3219,7 @@ impl App {
         // 1 本の GPU 時間の目標：動かしている間は短く（新しい視点を早く見せる）、止まっている間は表示の間隔くらい
         let target_ms = if moving { TARGET_FRAME_MS } else { (self.frame_interval.as_secs_f64() * 1000.0).max(TARGET_FRAME_MS) };
         for (add, gpu_ms, wall) in done {
+            self.gpu_limit.used(Duration::from_secs_f64(gpu_ms / 1000.0));
             self.last_gpu_ms = gpu_ms;
             // サンプルを積む GPU 時間が目標に収まるように、1 回に流す数を調整する
             let per_sample = gpu_ms / add.max(1) as f64;
@@ -3234,6 +3245,9 @@ impl App {
     /// 流しているバッチが max_in_flight 本になるまで足す（一時停止中・積み終えたときは足さない）
     fn fill_render_queue(&mut self) -> Result<(), String> {
         loop {
+            if !self.limit_allows() {
+                return Ok(());
+            }
             let Some(g) = self.gpu.as_ref() else { return Ok(()) };
             let samples = g.prog.samples();
             if self.st.paused || samples >= self.st.max_spp || g.in_flight.len() >= self.max_in_flight() {
@@ -3258,6 +3272,11 @@ impl App {
             self.rate_since = Instant::now();
             self.rate_samples = samples;
         }
+    }
+
+    /// 使用率の上限で、次を流してよいか（テストは休まない）
+    fn limit_allows(&mut self) -> bool {
+        self.test.active() || self.gpu_limit.ready()
     }
 
     /// 流したサンプルが終わるまで待つ（累積の画像やフレームの値を CPU から読み書きする前に）
@@ -3291,11 +3310,6 @@ impl App {
         } else {
             g.prog.record_overlapped(cmd, add);
         }
-        unsafe {
-            if g.timestamps_ok {
-                dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, g.timestamps, q + 1);
-            }
-        }
         // 積んだ累積を読んでトーンマッピングする（表示のキューは、この出力をタイムラインセマフォを待ってから貼る）
         let trace = g.ctx.trace_stages();
         memory_barrier(dev, cmd, trace | vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_READ);
@@ -3303,6 +3317,10 @@ impl App {
         // 次のバッチ（同じキューで続けて流れる）が累積を書く前に、トーンマッピングが読み終えるのを待つ
         memory_barrier(dev, cmd, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_READ, trace | vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE);
         unsafe {
+            // 終わりの時刻はトーンマッピングの後（バッチが GPU を使った時間として、使用率の上限にも使う）
+            if g.timestamps_ok {
+                dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, g.timestamps, q + 1);
+            }
             dev.end_command_buffer(cmd).map_err(|e| format!("{e:?}"))?;
             let (cmds, signal, values) = ([cmd], [g.timeline], [value]);
             let mut ts = vk::TimelineSemaphoreSubmitInfo::default().signal_semaphore_values(&values);
@@ -3357,6 +3375,10 @@ impl App {
         } else {
             self.samples_per_frame.min(max_spp - samples)
         };
+        // 使用率の上限で休んでいる間は流さない（次のフレームで確かめ直す。GpuLimit）
+        if !self.limit_allows() {
+            add = 0;
+        }
         // 累積をやり直した直後（新しい視点をすぐ見せる）・動画・テストは、積み終えるのを待ってから表示する
         if add > 0 && (samples == 0 || self.video.is_some() || self.test.active()) {
             self.submit_render(add)?;
@@ -4011,6 +4033,8 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         win_seen: win.clone(),
         win_saved: win.clone(),
         win_changed_at: Instant::now(),
+        gpu_limit: GpuLimit::new(remember::gpu_limit()),
+        gpu_limit_changed_at: None,
         panel_width: win.panel_width.unwrap_or(DEFAULT_PANEL_WIDTH),
         panel_open: win.sections.clone(),
         fit_frames: 0,

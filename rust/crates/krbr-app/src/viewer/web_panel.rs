@@ -424,6 +424,7 @@ impl App {
             select("display.ratio", None, &format!("{}", st.render_ratio), ratio_groups),
             note(fl!("ratio-hint"), "muted"),
             max_spp,
+            tip(slider("render.gpu_limit", fl!("gpu-limit"), self.gpu_limit.percent() as f64, GpuLimit::MIN_PERCENT as f64, GpuLimit::MAX_PERCENT as f64, false, 0, " %"), fl!("gpu-limit-tip")),
             radio("integrator", kind.as_str(), IntegratorKind::ALL.iter().map(|k| (k.as_str(), k.as_str().to_uppercase())).collect()),
             note(
                 match kind {
@@ -595,6 +596,15 @@ impl App {
             }
             "display.mode" => st.mode = display_mode_of(&s),
             "display.max_spp" => st.max_spp = 1 << (f.round() as u32).clamp(4, 16),
+            "render.gpu_limit" => {
+                // 基板によらず 1 つ。このプロセス（基板を開き直しても）に効かせ、動かし終えてから state.toml に覚える（save_view）
+                let p = GpuLimit::new(f.round() as u32).percent();
+                if p != self.gpu_limit.percent() {
+                    self.gpu_limit.set_percent(p);
+                    remember::set_gpu_limit_for_process(p);
+                    self.gpu_limit_changed_at = Some(std::time::Instant::now());
+                }
+            }
             "camera.fov" => {
                 st.fov = f;
                 st.changed.frame = true;
