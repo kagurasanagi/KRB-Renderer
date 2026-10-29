@@ -79,6 +79,7 @@ cd rust
 cargo test                                                                   # GPU を使わないもの
 cargo test --release -p krbr-render -- --ignored --nocapture                 # GPU の検証（下記。約 6 分）
 cargo test --release -p krbr-capi -- --ignored --nocapture                   # C API（krbr_renderer.dll）で描いて読み戻す（GPU が要る）
+cargo test --release -p krbr-app --test bitexact -- --ignored --nocapture    # 描画結果が基準（out/bitexact。KRBR_BITEXACT=save で作る）と同じか（速度改善の前後）
 cargo test --release -p krbr-app --test watch -- --ignored --nocapture       # 保存の監視（GPU と KiCad の 3D モデルが要る）
 cargo test --release -p krbr-app --test material -- --ignored --nocapture    # 材質の CLI（KiCad の 3D モデルが要る）
 cargo test --release -p krbr-app --test denoise -- --ignored --nocapture     # ノイズ除去（GPU と OIDN の DLL が要る）
