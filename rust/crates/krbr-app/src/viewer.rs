@@ -961,7 +961,8 @@ struct Gpu {
     /// サンプルを積むコマンド。表示とは別のキュー（ctx.render_queue。優先度が低い）へ流し、完了を待たずに次のフレームへ進む
     /// （重いシーンでも画面と操作が止まらない）。終わるまでは累積の画像に触らない。
     /// 最後にトーンマッピングまで済ませ（tone の slot 枚目の出力）、表示はその画像を貼るので、流している間も新しい画像が出る
-    render_cmd: vk::CommandBuffer,
+    /// バッチは 2 本まで流すので 2 つ（バッチの番号の偶奇で使い分ける。使い回すのは 2 つ前のバッチが終わってから）
+    render_cmds: [vk::CommandBuffer; 2],
     /// サンプルを積むバッチの完了（タイムラインセマフォ。値は流したバッチの通し番号）。表示はこれを待ってから出力を読む
     timeline: vk::Semaphore,
     /// 最後に流したバッチの番号と、そのトーンマッピングの出力
@@ -970,9 +971,12 @@ struct Gpu {
     /// 終わった最新のバッチの番号と、そのトーンマッピングの出力（表示が貼る画像）
     completed: u64,
     shown_slot: usize,
-    /// 流していて、まだ終わっていないバッチ
-    in_flight: Option<Batch>,
-    /// サンプルを積む GPU 時間（render_cmd の最初と最後。キューが時刻を測れなければ使わない）
+    /// 流していて、まだ終わっていないバッチ（古い順。max_in_flight 本まで）
+    in_flight: std::collections::VecDeque<Batch>,
+    /// 最後にバッチの完了に気づいた時刻（2 本流しているときに、待ち時間を重ねて数えないように）
+    last_done_at: Instant,
+    /// サンプルを積む GPU 時間（バッチごとに最初と最後の 2 つ。render_cmds と同じく番号の偶奇で使い分ける。
+    /// キューが時刻を測れなければ使わない）
     timestamps: vk::QueryPool,
     timestamps_ok: bool,
     ts_period_ms: f64,
@@ -1613,10 +1617,11 @@ impl App {
         let cmd = unsafe { dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(ctx.pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1)) }.map_err(|e| format!("{e:?}"))?[0];
         let acquired = unsafe { dev.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) }.map_err(|e| format!("{e:?}"))?;
         let fence = unsafe { dev.create_fence(&vk::FenceCreateInfo::default(), None) }.map_err(|e| format!("{e:?}"))?;
-        let render_cmd = unsafe { dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(ctx.render_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1)) }.map_err(|e| format!("{e:?}"))?[0];
+        let cmds = unsafe { dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(ctx.render_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(2)) }.map_err(|e| format!("{e:?}"))?;
+        let render_cmds = [cmds[0], cmds[1]];
         let mut timeline_type = vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE).initial_value(0);
         let timeline = unsafe { dev.create_semaphore(&vk::SemaphoreCreateInfo::default().push_next(&mut timeline_type), None) }.map_err(|e| format!("{e:?}"))?;
-        let timestamps = unsafe { dev.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(2), None) }.map_err(|e| format!("{e:?}"))?;
+        let timestamps = unsafe { dev.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(4), None) }.map_err(|e| format!("{e:?}"))?;
         let props = unsafe { ctx.instance.get_physical_device_properties(ctx.physical) };
         let ts_period_ms = props.limits.timestamp_period as f64 * 1e-6;
         let qprops = unsafe { ctx.instance.get_physical_device_queue_family_properties(ctx.physical) };
@@ -1625,7 +1630,7 @@ impl App {
         info!("viewer: {}x{}, up to {} spp. mouse: left drag=rotate, click=select a part, Ctrl+click=focus, right/middle drag=pan, wheel=zoom; keys: {}", swap.extent.width, swap.extent.height, self.st.max_spp, keys.join(", "));
         install_fonts(&self.egui_ctx, &self.language);
         self.egui_state = Some(EguiState::new(self.egui_ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, None));
-        self.gpu = Some(Gpu { ctx, gpu, swap, prog, tone, denoiser: None, tone_denoised: None, egui_renderer, cmd, acquired, fence, render_cmd, timeline, submitted: 0, submitted_slot: 0, completed: 0, shown_slot: 0, in_flight: None, timestamps, timestamps_ok, ts_period_ms });
+        self.gpu = Some(Gpu { ctx, gpu, swap, prog, tone, denoiser: None, tone_denoised: None, egui_renderer, cmd, acquired, fence, render_cmds, timeline, submitted: 0, submitted_slot: 0, completed: 0, shown_slot: 0, in_flight: Default::default(), last_done_at: Instant::now(), timestamps, timestamps_ok, ts_period_ms });
         let hidden = self.vo.hidden || self.test.active();
         if let (true, false, Some(proxy)) = (self.vo.web_ui, hidden, self.proxy.clone()) {
             // WebView を作るのは最初のフレームを出してから（step_web_ui）
@@ -3167,33 +3172,69 @@ impl App {
         }
     }
 
-    /// 流したサンプルが終わっていれば（wait なら終わるまで待って）、かかった時間を数え、次に流す数を決める
+    /// 流したバッチのうち終わったもの（wait なら全部が終わるまで待って）について、かかった時間を数え、次に流す数を決める
     fn poll_render(&mut self, wait: bool) {
+        let moving = self.last_change_at.elapsed() < Duration::from_millis(300);
         let Some(g) = self.gpu.as_mut() else { return };
-        let Some(Batch { value, add, slot, t0 }) = g.in_flight else { return };
+        let Some(last) = g.in_flight.back().copied() else { return };
         let dev = &g.ctx.device;
-        // 待てない・状態を取れない（デバイスを失ったなど）ときは、終わったことにする（次の GPU の処理がエラーを出す）
         if wait {
-            let (sems, values) = ([g.timeline], [value]);
+            let (sems, values) = ([g.timeline], [last.value]);
             let _ = unsafe { dev.wait_semaphores(&vk::SemaphoreWaitInfo::default().semaphores(&sems).values(&values), u64::MAX) };
         }
-        let done = wait || unsafe { dev.get_semaphore_counter_value(g.timeline) }.map_or(true, |v| v >= value);
-        if !done {
-            return;
+        // 待てない・状態を取れない（デバイスを失ったなど）ときは、全部終わったことにする（次の GPU の処理がエラーを出す）
+        let reached = if wait { last.value } else { unsafe { dev.get_semaphore_counter_value(g.timeline) }.unwrap_or(last.value) };
+        let mut done: Vec<(u32, f64, Duration)> = Vec::new();
+        while let Some(b) = g.in_flight.front().copied().filter(|b| b.value <= reached) {
+            g.in_flight.pop_front();
+            g.completed = b.value;
+            g.shown_slot = b.slot;
+            // 待ち時間は、流した時刻か前のバッチに気づいた時刻の遅い方から（2 本を重ねて数えない）
+            let now = Instant::now();
+            let wall = now - b.t0.max(g.last_done_at);
+            g.last_done_at = now;
+            let q = 2 * (b.value % 2) as u32;
+            let mut ts = [0u64; 2];
+            let ts_ok = g.timestamps_ok && unsafe { dev.get_query_pool_results(g.timestamps, q, &mut ts, vk::QueryResultFlags::TYPE_64) }.is_ok();
+            let gpu_ms = if ts_ok { ts[1].saturating_sub(ts[0]) as f64 * g.ts_period_ms } else { wall.as_secs_f64() * 1000.0 };
+            done.push((b.add, gpu_ms, wall));
         }
-        g.in_flight = None;
-        g.completed = value;
-        g.shown_slot = slot;
-        let wall = t0.elapsed();
-        let mut ts = [0u64; 2];
-        let ts_ok = g.timestamps_ok && unsafe { dev.get_query_pool_results(g.timestamps, 0, &mut ts, vk::QueryResultFlags::TYPE_64) }.is_ok();
-        self.last_gpu_ms = if ts_ok { ts[1].saturating_sub(ts[0]) as f64 * g.ts_period_ms } else { wall.as_secs_f64() * 1000.0 };
-        // サンプルを積む GPU 時間が目標に収まるように、1 回に流す数を調整する
-        let per_sample = self.last_gpu_ms / add.max(1) as f64;
-        self.samples_per_frame = (TARGET_FRAME_MS / per_sample.max(0.05)).clamp(1.0, 64.0) as u32;
-        self.accum_wall += wall;
-        self.accum_gpu_ms += self.last_gpu_ms;
-        self.accum_measured += add;
+        // 1 本の GPU 時間の目標：動かしている間は短く（新しい視点を早く見せる）、止まっている間は表示の間隔くらい
+        let target_ms = if moving { TARGET_FRAME_MS } else { (self.frame_interval.as_secs_f64() * 1000.0).max(TARGET_FRAME_MS) };
+        for (add, gpu_ms, wall) in done {
+            self.last_gpu_ms = gpu_ms;
+            // サンプルを積む GPU 時間が目標に収まるように、1 回に流す数を調整する
+            let per_sample = gpu_ms / add.max(1) as f64;
+            self.samples_per_frame = (target_ms / per_sample.max(0.05)).clamp(1.0, 64.0) as u32;
+            self.accum_wall += wall;
+            self.accum_gpu_ms += gpu_ms;
+            self.accum_measured += add;
+        }
+    }
+
+    /// 同時に流しておくバッチの数。止めて PT で積んでいる間は 2 本（1 本が終わってもすぐ次が始まり、GPU が空かない）。
+    /// 動かしている間（遅れを増やさない）・BDPT / VCM（Progressive::record の review_completed が前のバッチの光源側の頂点の数を
+    /// 見て、バッファを作り直すことがあるので、前のバッチが終わってから記録する）・動画・テストは 1 本
+    fn max_in_flight(&self) -> usize {
+        let moving = self.last_change_at.elapsed() < Duration::from_millis(300);
+        let pt = self.gpu.as_ref().is_some_and(|g| g.prog.integrator_kind() == IntegratorKind::Pt);
+        if moving || !pt || self.video.is_some() || self.test.active() {
+            1
+        } else {
+            2
+        }
+    }
+
+    /// 流しているバッチが max_in_flight 本になるまで足す（一時停止中・積み終えたときは足さない）
+    fn fill_render_queue(&mut self) -> Result<(), String> {
+        loop {
+            let Some(g) = self.gpu.as_ref() else { return Ok(()) };
+            let samples = g.prog.samples();
+            if self.st.paused || samples >= self.st.max_spp || g.in_flight.len() >= self.max_in_flight() {
+                return Ok(());
+            }
+            self.submit_render(self.samples_per_frame.min(self.st.max_spp - samples))?;
+        }
     }
 
     /// 視点を止めて積んでいる間、RATE_WINDOW ごとに実効のサンプルの速さ（表示・ノイズ除去・待ちも含めて 1 秒に積めた数）を
@@ -3224,28 +3265,33 @@ impl App {
         let (exposure, mode, glow) = (self.st.exposure, self.st.mode, self.st.glow_params());
         let g = self.gpu.as_mut().unwrap();
         let dev = &g.ctx.device;
-        let cmd = g.render_cmd;
+        let value = g.submitted + 1;
+        // 2 つ前のバッチ（同じコマンドバッファ・タイムスタンプを使った）は終わっている（流すのは 2 本まで）
+        debug_assert!(g.in_flight.len() < 2);
+        let cmd = g.render_cmds[(value % 2) as usize];
+        let q = 2 * (value % 2) as u32;
         let slot = (g.submitted_slot + 1) % TONE_SLOTS;
         let background = Background::for_display(g.prog.frame().transparent_background);
         unsafe {
             dev.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).map_err(|e| format!("{e:?}"))?;
             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(|e| format!("{e:?}"))?;
             if g.timestamps_ok {
-                dev.cmd_reset_query_pool(cmd, g.timestamps, 0, 2);
-                dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, g.timestamps, 0);
+                dev.cmd_reset_query_pool(cmd, g.timestamps, q, 2);
+                dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, g.timestamps, q);
             }
         }
         g.prog.record(cmd, add);
         unsafe {
             if g.timestamps_ok {
-                dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, g.timestamps, 1);
+                dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, g.timestamps, q + 1);
             }
         }
         // 積んだ累積を読んでトーンマッピングする（表示のキューは、この出力をタイムラインセマフォを待ってから貼る）
         let trace = g.ctx.trace_stages();
         memory_barrier(dev, cmd, trace | vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_READ);
         g.tone.record_to(cmd, slot, exposure, mode, g.prog.xyz_output(), &glow, background);
-        let value = g.submitted + 1;
+        // 次のバッチ（同じキューで続けて流れる）が累積を書く前に、トーンマッピングが読み終えるのを待つ
+        memory_barrier(dev, cmd, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_READ, trace | vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE);
         unsafe {
             dev.end_command_buffer(cmd).map_err(|e| format!("{e:?}"))?;
             let (cmds, signal, values) = ([cmd], [g.timeline], [value]);
@@ -3255,7 +3301,7 @@ impl App {
         }
         g.submitted = value;
         g.submitted_slot = slot;
-        g.in_flight = Some(Batch { value, add, slot, t0: Instant::now() });
+        g.in_flight.push_back(Batch { value, add, slot, t0: Instant::now() });
         Ok(())
     }
 
@@ -3277,7 +3323,7 @@ impl App {
         self.poll_render(false);
         let (samples, busy) = {
             let g = self.gpu.as_ref().unwrap();
-            (g.prog.samples(), g.in_flight.is_some())
+            (g.prog.samples(), g.in_flight.len() >= self.max_in_flight())
         };
         self.log_throughput(samples);
         // 累積をやり直したら（サンプル数が減ったら）、前のノイズ除去の結果は使わない
@@ -3307,13 +3353,13 @@ impl App {
             self.settle_render();
             add = 0;
         }
-        // 表示は累積の画像を読まない（バッチの最後のトーンマッピングの出力を貼る）ので、すぐ次を流す。
+        // 表示は累積の画像を読まない（バッチの最後のトーンマッピングの出力を貼る）ので、すぐ次を流す（max_in_flight 本まで）。
         // ただしノイズ除去をかけるフレームは、累積を読むので、表示の後に流す
         if add > 0 && !self.denoise_wanted(samples) {
-            self.submit_render(add)?;
+            self.fill_render_queue()?;
             add = 0;
         }
-        let busy = self.gpu.as_ref().unwrap().in_flight.is_some();
+        let busy = !self.gpu.as_ref().unwrap().in_flight.is_empty();
 
         // 前の表示から画面の書き換えの間隔（の 85 %）が経つまで待つ。ノイズ除去などで遅れたフレームの後に続けて表示すると、
         // スワップチェーンの画像を使い切り、次の画像が戻るのを（サンプルを積んでいる GPU の後で）長く待つことになる
@@ -3793,7 +3839,7 @@ impl App {
             el.exit();
             return;
         }
-        let idle = self.gpu.as_ref().map(|g| g.in_flight.is_none() && (g.prog.samples() >= self.st.max_spp || (self.st.paused && g.prog.samples() > 0))).unwrap_or(false) && !self.st.changed.frame && self.env_job.is_none() && self.reload_job.is_none() && !self.text_job.busy() && !self.text_dirty && !self.test.active() && !self.editor.busy()
+        let idle = self.gpu.as_ref().map(|g| g.in_flight.is_empty() && (g.prog.samples() >= self.st.max_spp || (self.st.paused && g.prog.samples() > 0))).unwrap_or(false) && !self.st.changed.frame && self.env_job.is_none() && self.reload_job.is_none() && !self.text_job.busy() && !self.text_dirty && !self.test.active() && !self.editor.busy()
             && self.web.as_ref().is_none_or(|w| w.moved().elapsed() > Duration::from_millis(300));
         if idle {
             // 収束したら GPU を休ませ、入力と保存を待つ（保存の通知で起きられなければ、100 ms ごとに起きて調べる）
