@@ -1088,26 +1088,30 @@ fn add_solder_fillets(s: &mut Scene, board: &Board, opts: &SceneOptions, lib: &c
     // パッドの面から離れた三角形は使わない（部品の上の方。はんだの高さの上限には届かない）
     let reach = s.board.thickness / 2.0 + 6.0;
     // 部品ごとの三角形とキー。キャッシュに無い部品だけを、並列に計算する
-    let mut jobs: Vec<(u32, u64, Vec<[DVec3; 3]>)> = Vec::new();
+    let mut jobs: Vec<(u32, u64, Vec<[DVec3; 3]>, Vec<bool>)> = Vec::new();
     for (fp, insts) in models {
         let mut tris: Vec<[DVec3; 3]> = Vec::new();
+        // はんだが付くのは金属の部位だけ（solder::footprint_fillets）
+        let mut metal: Vec<bool> = Vec::new();
         for &k in &insts {
             let inst = s.instances[k];
             let mesh = &s.meshes[inst.mesh as usize].mesh;
             let xf = inst.xform.as_dmat4();
-            for t in mesh.indices.chunks_exact(3) {
+            for (ti, t) in mesh.indices.chunks_exact(3).enumerate() {
                 // ワールド（X, Y = 上, Z）-> (基板座標 x, 基板座標 y, Y)
                 let w = [t[0], t[1], t[2]].map(|i| xf.transform_point3(mesh.positions[i as usize].as_dvec3()));
                 if w.iter().all(|p| p.y.abs() > reach) {
                     continue;
                 }
                 tris.push(w.map(|p| DVec3::new(p.x + center.x, p.z + center.y, p.y)));
+                let m = s.materials.get((inst.material_base + mesh.tri_material.get(ti).copied().unwrap_or(0)) as usize);
+                metal.push(m.is_some_and(|m| m.base_metalness >= 0.5 || m.conductor.is_some()));
             }
         }
-        let key = crate::solder::footprint_key(board, fp as usize, &tris, pad_top, center, mat);
-        jobs.push((fp, key, tris));
+        let key = crate::solder::footprint_key(board, fp as usize, &tris, &metal, pad_top, center, mat);
+        jobs.push((fp, key, tris, metal));
     }
-    let mut done: Vec<Option<Mesh>> = jobs.iter().map(|(_, key, _)| cache.take(*key)).collect();
+    let mut done: Vec<Option<Mesh>> = jobs.iter().map(|(_, key, _, _)| cache.take(*key)).collect();
     let todo: Vec<usize> = (0..jobs.len()).filter(|&i| done[i].is_none()).collect();
     if !todo.is_empty() {
         let next = std::sync::atomic::AtomicUsize::new(0);
@@ -1115,8 +1119,8 @@ fn add_solder_fillets(s: &mut Scene, board: &Board, opts: &SceneOptions, lib: &c
         let worker = || loop {
             let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let Some(&i) = todo.get(k) else { break };
-            let (fp, _, tris) = &jobs[i];
-            let m = crate::solder::footprint_fillets(board, *fp as usize, tris, pad_top, center, mat);
+            let (fp, _, tris, metal) = &jobs[i];
+            let m = crate::solder::footprint_fillets(board, *fp as usize, tris, metal, pad_top, center, mat);
             results.lock().unwrap().push((i, m));
         };
         let nthreads = krbr_core::platform::worker_threads().min(todo.len());
@@ -1135,7 +1139,7 @@ fn add_solder_fillets(s: &mut Scene, board: &Board, opts: &SceneOptions, lib: &c
         }
     }
     let (mut parts, mut tris_total) = (0, 0);
-    for ((fp, _, _), m) in jobs.iter().zip(done) {
+    for ((fp, _, _, _), m) in jobs.iter().zip(done) {
         let (fp, Some(m)) = (*fp, m) else { continue };
         if m.triangle_count() == 0 {
             continue;
