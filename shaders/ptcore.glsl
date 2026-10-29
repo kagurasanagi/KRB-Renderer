@@ -80,6 +80,10 @@ vec4 ptTrace(inout PtState st, uint depth0, inout Rng rng, inout vec3 albedo, in
             }
         }
 
+        // 最後の頂点：ここで終わる経路は光源に当たった分（上で足した）だけなので、シェーディング（凹凸のノイズなど）をしない。
+        // この後の st と rng は、呼び出し元も使わない（pathtrace.comp・vcm_camera.comp は ptTrace から戻ったら終える）。
+        // 最初の交点（depth 0）はアルベドと法線の AOV に要るので、シェーディングしてから下で同じ判定をする
+        if (depth != 0u && depth + 1u >= maxPathLength()) break;
         bool dispersive;
         Shade s = shadeVertex(hit, wo, frontFace, ns, rng, dispersive);
         // 分散のある材質では、屈折の向きが波長で変わるので代表波長以外を打ち切る
