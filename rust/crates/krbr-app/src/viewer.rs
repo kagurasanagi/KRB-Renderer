@@ -3219,13 +3219,12 @@ impl App {
         }
     }
 
-    /// 同時に流しておくバッチの数。止めて PT で積んでいる間は 2 本（1 本が終わってもすぐ次が始まり、GPU が空かない）。
-    /// 動かしている間（遅れを増やさない）・BDPT / VCM（Progressive::record の review_completed が前のバッチの光源側の頂点の数を
-    /// 見て、バッファを作り直すことがあるので、前のバッチが終わってから記録する）・動画・テストは 1 本
+    /// 同時に流しておくバッチの数。止めて積んでいる間は 2 本（1 本が終わってもすぐ次が始まり、GPU が空かない。
+    /// BDPT / VCM の光源側の頂点の数は、Progressive::record_overlapped が終わった方のバッチの結果で確かめる）。
+    /// 動かしている間（遅れを増やさない）・動画・テストは 1 本
     fn max_in_flight(&self) -> usize {
         let moving = self.last_change_at.elapsed() < Duration::from_millis(300);
-        let pt = self.gpu.as_ref().is_some_and(|g| g.prog.integrator_kind() == IntegratorKind::Pt);
-        if moving || !pt || self.video.is_some() || self.test.active() {
+        if moving || self.video.is_some() || self.test.active() {
             1
         } else {
             2
@@ -3287,7 +3286,11 @@ impl App {
                 dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, g.timestamps, q);
             }
         }
-        g.prog.record(cmd, add);
+        if g.in_flight.is_empty() {
+            g.prog.record(cmd, add);
+        } else {
+            g.prog.record_overlapped(cmd, add);
+        }
         unsafe {
             if g.timestamps_ok {
                 dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, g.timestamps, q + 1);

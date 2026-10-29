@@ -82,8 +82,10 @@ pub trait Integrator {
     fn update_frame(&mut self, fp: &FrameParams);
     /// sample_index 番目のサンプルを cmd に記録する（0 番目で累積を初期化）
     fn record_sample(&self, cmd: vk::CommandBuffer, sample_index: u32);
-    /// 前に記録したサンプルが GPU で終わった後の確かめ（容量の不足など）。Progressive::record が次を記録する前に呼ぶ
-    fn review_completed(&mut self) -> Result<(), String> {
+    /// 次のバッチを記録する前に Progressive::record が呼ぶ。GPU で終わったバッチの確かめ（容量の不足など）。
+    /// lag は終わったと分かっている最新のバッチが何本前か（1 = 直前、2 = 直前はまだ GPU で動いている）。
+    /// None は確かめるものが無い（累積をやり直した直後）
+    fn begin_batch(&mut self, _lag: Option<u32>) -> Result<(), String> {
         Ok(())
     }
 }
@@ -121,7 +123,7 @@ impl Integrator for PathTracer<'_> {
     }
 }
 
-/// 光源側の頂点：1 本の経路あたり平均この数まで保存できるように確保する（足りなければ review_completed で増やす）
+/// 光源側の頂点：1 本の経路あたり平均この数まで保存できるように確保する（足りなければ begin_batch で増やす）
 const LIGHT_VERTICES_PER_PATH: u64 = 4;
 /// 光源側の頂点のバッファの上限（VRAM の使いすぎを防ぐ）
 const LIGHT_VERTEX_BUFFER_MAX_BYTES: u64 = 512 << 20;
@@ -133,20 +135,23 @@ struct VcmBuffers<'a> {
     path_heads: Buffer,
     cell_heads: Buffer,
     counters: Buffer,
-    /// counters を毎回写して CPU から読む（容量の不足などを知らせるため）
-    counters_readback: Buffer,
+    /// counters を毎回写して CPU から読む（容量の不足などを知らせるため）。バッチごとに交互に使う
+    /// （ビューアは 2 本続けて流すので、動いているバッチが書く方ではなく、終わったバッチの方を読む）
+    counters_readback: [Buffer; 2],
     splat: Buffer,
 }
 
 impl<'a> VcmBuffers<'a> {
     fn new(ctx: &'a Context, paths: u64, capacity: u32) -> Result<Self, String> {
         let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
-        let mut b = Self { ctx, light_verts: Buffer::default(), path_heads: Buffer::default(), cell_heads: Buffer::default(), counters: Buffer::default(), counters_readback: Buffer::default(), splat: Buffer::default() };
+        let mut b = Self { ctx, light_verts: Buffer::default(), path_heads: Buffer::default(), cell_heads: Buffer::default(), counters: Buffer::default(), counters_readback: [Buffer::default(), Buffer::default()], splat: Buffer::default() };
         b.light_verts = ctx.create_buffer(light_vertex_bytes(capacity), usage, false, false)?;
         b.path_heads = ctx.create_buffer(paths * 4, usage, false, false)?;
         b.cell_heads = ctx.create_buffer(VCM_GRID_SIZE as u64 * 4, usage, false, false)?;
         b.counters = ctx.create_buffer(VCM_COUNTER_COUNT as u64 * 4, usage | vk::BufferUsageFlags::TRANSFER_SRC, false, false)?;
-        b.counters_readback = ctx.create_buffer(VCM_COUNTER_COUNT as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST, true, true)?;
+        for r in &mut b.counters_readback {
+            *r = ctx.create_buffer(VCM_COUNTER_COUNT as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST, true, true)?;
+        }
         b.splat = ctx.create_buffer(paths * VCM_SPLAT_FLOATS_PER_PIXEL as u64 * 4, usage, false, false)?;
         Ok(b)
     }
@@ -154,7 +159,8 @@ impl<'a> VcmBuffers<'a> {
 
 impl Drop for VcmBuffers<'_> {
     fn drop(&mut self) {
-        for b in [&mut self.light_verts, &mut self.path_heads, &mut self.cell_heads, &mut self.counters, &mut self.counters_readback, &mut self.splat] {
+        let [r0, r1] = &mut self.counters_readback;
+        for b in [&mut self.light_verts, &mut self.path_heads, &mut self.cell_heads, &mut self.counters, r0, r1, &mut self.splat] {
             self.ctx.destroy_buffer(b);
         }
     }
@@ -186,6 +192,8 @@ struct Bidirectional<'a> {
     buffers: VcmBuffers<'a>,
     /// 容量を増やせるか（増やすのに失敗したら false）
     growable: bool,
+    /// 記録したバッチの数（バッチ b は counters_readback[b % 2] に写す）
+    batches: u64,
     /// 容量を使い切った・セルの走査を打ち切った、を一度だけ知らせる
     warned_full: bool,
     warned_cell_walk: bool,
@@ -224,6 +232,7 @@ impl<'a> Bidirectional<'a> {
             camera,
             buffers,
             growable: true,
+            batches: 0,
             warned_full: false,
             warned_cell_walk: false,
         })
@@ -291,14 +300,19 @@ impl Integrator for Bidirectional<'_> {
         compute_barrier(self.ctx, cmd);
         self.camera.dispatch(cmd, PushConstants { sample_index, seed: self.seed }, self.width, self.height);
         compute_barrier(self.ctx, cmd);
-        // この繰り返しの数を CPU から読めるところへ写す（review_completed で見る）
+        // この繰り返しの数を CPU から読めるところへ写す（begin_batch で見る。begin_batch が batches を 1 つ進めてから記録する）
         let n = VCM_COUNTER_COUNT as u64 * 4;
-        unsafe { dev.cmd_copy_buffer(cmd, b.counters.buffer, b.counters_readback.buffer, &[vk::BufferCopy { src_offset: 0, dst_offset: 0, size: n }]) };
+        let readback = &b.counters_readback[((self.batches + 1) % 2) as usize];
+        unsafe { dev.cmd_copy_buffer(cmd, b.counters.buffer, readback.buffer, &[vk::BufferCopy { src_offset: 0, dst_offset: 0, size: n }]) };
         // 写し終えてから、CPU が読む・次の繰り返しの初めに数を書き直す（CLEAR の段階の vkCmdUpdateBuffer）
         memory_barrier(dev, cmd, vk::PipelineStageFlags2::COPY, vk::AccessFlags2::TRANSFER_WRITE, vk::PipelineStageFlags2::HOST | vk::PipelineStageFlags2::CLEAR, vk::AccessFlags2::HOST_READ | vk::AccessFlags2::TRANSFER_WRITE);
     }
-    fn review_completed(&mut self) -> Result<(), String> {
-        let Some(bytes) = self.buffers.counters_readback.mapped_bytes() else { return Ok(()) };
+    fn begin_batch(&mut self, lag: Option<u32>) -> Result<(), String> {
+        // 終わったバッチ（batches - lag 番目。0 から数える）の数を見てから、これから記録するバッチの番号に進める
+        let done = lag.and_then(|l| self.batches.checked_sub(l as u64));
+        self.batches += 1;
+        let Some(done) = done else { return Ok(()) };
+        let Some(bytes) = self.buffers.counters_readback[(done % 2) as usize].mapped_bytes() else { return Ok(()) };
         let counter = |i: u32| {
             let o = i as usize * 4;
             u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]])
@@ -454,11 +468,19 @@ impl<'a> Progressive<'a> {
 
     /// count サンプルを cmd に記録する。前に記録したコマンドの完了を待ってから呼ぶこと（その結果を確かめてから記録する）
     pub fn record(&mut self, cmd: vk::CommandBuffer, count: u32) {
+        self.record_batch(cmd, count, 1);
+    }
+
+    /// record と同じだが、前に記録したコマンドがまだ GPU で動いていてよい（同じキューに続けて流す）。
+    /// その前のコマンドは終わっていること。容量の不足などは、終わった方（2 本前）の結果で確かめる
+    pub fn record_overlapped(&mut self, cmd: vk::CommandBuffer, count: u32) {
+        self.record_batch(cmd, count, 2);
+    }
+
+    fn record_batch(&mut self, cmd: vk::CommandBuffer, count: u32, lag: u32) {
         if let Some(i) = &mut self.integrator {
-            if self.samples > 0 {
-                if let Err(e) = i.review_completed() {
-                    krbr_core::error!("{}: {e}", i.name());
-                }
+            if let Err(e) = i.begin_batch((self.samples > 0).then_some(lag)) {
+                krbr_core::error!("{}: {e}", i.name());
             }
             for _ in 0..count {
                 i.record_sample(cmd, self.samples);
