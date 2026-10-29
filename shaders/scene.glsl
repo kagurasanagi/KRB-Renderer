@@ -153,7 +153,9 @@ void addDetail(Material m, vec3 pObj, vec3 nObj, vec3 seed, float weight, float 
     // 凹凸は細かい倍音（fbm）を含むので早めに、粗さのむら（周期 scale × 2.7 の 1 段）は画素の数倍まで残す
     float strength = m.params2.y * weight * smoothstep(3.0, 12.0, px);
     float rv = m.params2.w * weight * smoothstep(3.0, 8.0, px * 2.7);
-    if (pattern == BUMP_NOISE) {
+    if (pattern == BUMP_NOISE && strength != 0.0) {
+        // 強さが 0（遠景で模様が画素より細かい、凹凸の強さ 0）なら、fbm（pcgHash 約 120 回）を計算しない。
+        // 足すのは 0 なので結果は同じ（d.grad は +0 から始まり、±0 を足しても変わらない）
         vec4 n = fbmd(pObj / scale + seed);
         d.grad += strength * n.yzw;
     } else if (pattern == BUMP_WEAVE) {
