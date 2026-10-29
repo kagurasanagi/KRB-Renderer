@@ -1064,6 +1064,9 @@ struct App {
     accum_wall: Duration,
     accum_gpu_ms: f64,
     accum_measured: u32,
+    /// 実効のサンプルの速さを測る区間の始まりと、そのときのサンプル数（log_throughput）
+    rate_since: Instant,
+    rate_samples: u32,
     last_change_at: Instant,
     last_frame_ms: f64,
     /// 最後に表示した時刻と、表示の間隔の下限（画面の書き換えの間隔から。1 秒ごとに確かめ直す）
@@ -1159,6 +1162,8 @@ fn viewport_px(r: egui::Rect, ppp: f32, w: u32, h: u32) -> Viewport {
 }
 
 const TARGET_FRAME_MS: f64 = 10.0; // 60fps（16.7 ms）に収まるよう、表示処理の分を残す
+/// 実効のサンプルの速さをログに出す間隔（log_throughput）
+const RATE_WINDOW: Duration = Duration::from_secs(10);
 
 /// 決まったサイズに合わせてウィンドウの大きさを変えるとき、合わせ直す最大のフレーム数。大きさを変えると、メニューの折り返しや
 /// パネル・ステータスバーの大きさも変わり、1 回では 3D 表示の領域が目標にならないことがある。目標に達したらそこで止める（通常 1〜2 フレーム）
@@ -3164,6 +3169,23 @@ impl App {
         self.accum_measured += add;
     }
 
+    /// 視点を止めて積んでいる間、RATE_WINDOW ごとに実効のサンプルの速さ（表示・ノイズ除去・待ちも含めて 1 秒に積めた数）を
+    /// ログに出す。accum_wall は流してから完了に気づくまでの時間の合計で、次を流すまでの空きを含まないので、別に測る。
+    /// 動かした・一時停止・積み終えた・動画のときは区間を始め直す（速度改善の前後の比較用。perf_design.md の M0）
+    fn log_throughput(&mut self, samples: u32) {
+        let still = !self.st.paused && samples < self.st.max_spp && samples >= self.rate_samples && self.video.is_none() && self.last_change_at.elapsed() >= Duration::from_millis(300);
+        let elapsed = self.rate_since.elapsed();
+        if still && elapsed >= RATE_WINDOW {
+            let n = samples - self.rate_samples;
+            let (w, h) = self.gpu.as_ref().map_or((0, 0), |g| (g.prog.targets().width, g.prog.targets().height));
+            info!("viewer: {:.1} spp/s ({} spp in {:.1} s, {:.1} ms/spp, render {}x{}, {} spp per batch)", n as f64 / elapsed.as_secs_f64(), n, elapsed.as_secs_f64(), elapsed.as_secs_f64() * 1000.0 / n.max(1) as f64, w, h, self.samples_per_frame);
+        }
+        if !still || elapsed >= RATE_WINDOW {
+            self.rate_since = Instant::now();
+            self.rate_samples = samples;
+        }
+    }
+
     /// 流したサンプルが終わるまで待つ（累積の画像やフレームの値を CPU から読み書きする前に）
     fn settle_render(&mut self) {
         self.poll_render(true);
@@ -3205,6 +3227,7 @@ impl App {
             let g = self.gpu.as_ref().unwrap();
             (g.prog.samples(), g.in_flight.is_some())
         };
+        self.log_throughput(samples);
         // 累積をやり直したら（サンプル数が減ったら）、前のノイズ除去の結果は使わない
         if samples < self.prev_samples {
             self.accum_epoch += 1;
@@ -3854,6 +3877,8 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         accum_wall: Duration::ZERO,
         accum_gpu_ms: 0.0,
         accum_measured: 0,
+        rate_since: Instant::now(),
+        rate_samples: 0,
         last_change_at: Instant::now(),
         last_frame_ms: 0.0,
         last_present_at: Instant::now(),
