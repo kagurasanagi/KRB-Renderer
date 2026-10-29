@@ -99,10 +99,12 @@ pub struct Tonemapper<'a> {
     ctx: &'a Context,
     width: u32,
     height: u32,
-    out: Image,
+    /// 出力（RGBA8）。ふつうは 1 枚。ビューアは、描いている間に表示が前の画像を読めるように複数枚を順に使う
+    outs: Vec<Image>,
     set_layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
-    set: vk::DescriptorSet,
+    /// 出力ごとの記述子の組（入力は同じ）
+    sets: Vec<vk::DescriptorSet>,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     // グロー：縮めた段（levels[0] が半分の解像度）と、足し上げた段（sums[i] = levels[i] + 広げた sums[i + 1]）
@@ -137,19 +139,30 @@ impl<'a> Tonemapper<'a> {
         Self::with_views(ctx, color, targets.albedo.view, targets.normal.view, targets.position.view, targets.width, targets.height)
     }
 
+    /// 出力を outputs 枚持つものを作る（record_to で書く先を選ぶ）
+    pub fn with_outputs(ctx: &'a Context, targets: &RenderTargets, outputs: usize) -> Result<Self, String> {
+        Self::build(ctx, targets.color.view, targets.albedo.view, targets.normal.view, targets.position.view, targets.width, targets.height, outputs)
+    }
+
     /// 画像を指定して作る。position はアルファ（背景を透明にしたとき）に使う、最初に当たった点の累積。
     /// 失敗したら Err（作った分は Drop が解放する）
     pub fn with_views(ctx: &'a Context, color: vk::ImageView, albedo: vk::ImageView, normal: vk::ImageView, position: vk::ImageView, width: u32, height: u32) -> Result<Self, String> {
+        Self::build(ctx, color, albedo, normal, position, width, height, 1)
+    }
+
+    #[allow(clippy::too_many_arguments)] // 入力の画像（with_views と同じ）と出力の枚数
+    fn build(ctx: &'a Context, color: vk::ImageView, albedo: vk::ImageView, normal: vk::ImageView, position: vk::ImageView, width: u32, height: u32, outputs: usize) -> Result<Self, String> {
         let dev = &ctx.device;
+        let outputs = outputs.max(1);
         // 資源は 1 つ作るたびにフィールドへ入れる。途中で失敗して返ると、Drop が作った分だけを破棄する（null は何もしない）
         let mut t = Self {
             ctx,
             width,
             height,
-            out: Image::default(),
+            outs: Vec::new(),
             set_layout: vk::DescriptorSetLayout::null(),
             pool: vk::DescriptorPool::null(),
-            set: vk::DescriptorSet::null(),
+            sets: Vec::new(),
             layout: vk::PipelineLayout::null(),
             pipeline: vk::Pipeline::null(),
             levels: Vec::new(),
@@ -171,7 +184,9 @@ impl<'a> Tonemapper<'a> {
         t.glow_layout = unsafe { dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&gl).push_constant_ranges(&gpcr), None) }.map_err(|e| format!("{e:?}"))?;
         t.glow_pipeline = compute_pipeline(dev, t.glow_layout, "glow.comp.spv")?;
 
-        t.out = ctx.create_image_2d(width, height, 1, vk::Format::R8G8B8A8_UNORM, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC)?;
+        for _ in 0..outputs {
+            t.outs.push(ctx.create_image_2d(width, height, 1, vk::Format::R8G8B8A8_UNORM, vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC)?);
+        }
         // グローの段（画像が小さすぎて段が無いときも、tonemap.comp に渡す 1×1 を作る）
         let sizes = glow::level_sizes(width, height);
         let make = |(w, h): (u32, u32)| ctx.create_image_2d(w, h, 1, vk::Format::R32G32B32A32_SFLOAT, vk::ImageUsageFlags::STORAGE);
@@ -181,19 +196,23 @@ impl<'a> Tonemapper<'a> {
         for &s in sizes.iter().take(sizes.len().saturating_sub(1)) {
             t.sums.push(make(s)?);
         }
-        let images: Vec<vk::Image> = std::iter::once(t.out.image).chain(t.levels.iter().map(|i| i.image)).chain(t.sums.iter().map(|i| i.image)).collect();
+        let images: Vec<vk::Image> = t.outs.iter().chain(&t.levels).chain(&t.sums).map(|i| i.image).collect();
         ctx.submit_and_wait(|dev, cmd| {
             for img in &images {
                 image_barrier(dev, cmd, *img, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL, vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, 1);
             }
         })?;
         let n_glow_sets = if sizes.is_empty() { 0 } else { 2 * sizes.len() as u32 - 1 };
-        let sizes_pool = [vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_IMAGE, descriptor_count: 6 + 3 * n_glow_sets }];
-        t.pool = unsafe { dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1 + n_glow_sets).pool_sizes(&sizes_pool), None) }.map_err(|e| format!("{e:?}"))?;
-        t.set = unsafe { dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(t.pool).set_layouts(&layouts)) }.map_err(|e| format!("{e:?}"))?[0];
+        let n_out = outputs as u32;
+        let sizes_pool = [vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_IMAGE, descriptor_count: 6 * n_out + 3 * n_glow_sets }];
+        t.pool = unsafe { dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(n_out + n_glow_sets).pool_sizes(&sizes_pool), None) }.map_err(|e| format!("{e:?}"))?;
         // 最上段：段が 1 つなら縮めた段、2 つ以上なら足し上げた段
         let top = t.sums.first().unwrap_or(&t.levels[0]).view;
-        write_storage_images(dev, t.set, &[color, albedo, normal, t.out.view, top, position]);
+        for k in 0..outputs {
+            let set = unsafe { dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(t.pool).set_layouts(&layouts)) }.map_err(|e| format!("{e:?}"))?[0];
+            write_storage_images(dev, set, &[color, albedo, normal, t.outs[k].view, top, position]);
+            t.sets.push(set);
+        }
 
         // グローの処理の並び：縮める（0 段目は累積画像から）→ 小さい段から足し上げる
         let n = sizes.len();
@@ -219,8 +238,14 @@ impl<'a> Tonemapper<'a> {
     }
 
     /// xyz_input: 累積が CIE XYZ（分光モード）なら true。glow: グロー（画像の表示のときだけかける）。
-    /// background: 背景を透明にした画像のアルファの扱い（画像の表示のときだけ）
+    /// background: 背景を透明にした画像のアルファの扱い（画像の表示のときだけ）。出力は output()（1 枚目）
     pub fn record(&self, cmd: vk::CommandBuffer, exposure_ev: f32, mode: DisplayMode, xyz_input: bool, glow: &glow::GlowParams, background: Background) {
+        self.record_to(cmd, 0, exposure_ev, mode, xyz_input, glow, background);
+    }
+
+    /// record と同じで、slot 枚目の出力（output_at）へ書く
+    #[allow(clippy::too_many_arguments)] // record の引数と書く先
+    pub fn record_to(&self, cmd: vk::CommandBuffer, slot: usize, exposure_ev: f32, mode: DisplayMode, xyz_input: bool, glow: &glow::GlowParams, background: Background) {
         let dev = &self.ctx.device;
         let m = krbr_pbr::spectrum::xyz_to_linear_srgb();
         let w = if xyz_input { 1.0 } else { 0.0 };
@@ -251,14 +276,23 @@ impl<'a> Tonemapper<'a> {
             };
             let pc = TonemapPush { exposure_scale, mode: mode as u32, width: self.width, height: self.height, xyz_to_rgb, glow: glow_v, background: Vec4::new(bg, CHECKER_PX, 0.0, 0.0) };
             dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
-            dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.layout, 0, &[self.set], &[]);
+            dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, self.layout, 0, &[self.sets[slot]], &[]);
             dev.cmd_push_constants(cmd, self.layout, vk::ShaderStageFlags::COMPUTE, 0, crate::vk::as_bytes(std::slice::from_ref(&pc)));
             dev.cmd_dispatch(cmd, self.width.div_ceil(8), self.height.div_ceil(8), 1);
         }
     }
 
     pub fn output(&self) -> &Image {
-        &self.out
+        &self.outs[0]
+    }
+
+    /// slot 枚目の出力（with_outputs で作ったとき）
+    pub fn output_at(&self, slot: usize) -> &Image {
+        &self.outs[slot]
+    }
+
+    pub fn outputs(&self) -> usize {
+        self.outs.len()
     }
 }
 
@@ -275,8 +309,7 @@ impl Drop for Tonemapper<'_> {
             dev.destroy_descriptor_set_layout(self.set_layout, None);
             dev.destroy_descriptor_set_layout(self.glow_set_layout, None);
         }
-        self.ctx.destroy_image(&mut self.out);
-        for img in self.levels.iter_mut().chain(self.sums.iter_mut()) {
+        for img in self.outs.iter_mut().chain(self.levels.iter_mut()).chain(self.sums.iter_mut()) {
             self.ctx.destroy_image(img);
         }
     }

@@ -307,7 +307,8 @@ impl Context {
         // bufferDeviceAddress（加速構造の入力）・synchronization2・maintenance4・dynamicRendering（表示）は Vulkan 1.3 で
         // 必須の機能なので、1.3 のデバイスを選んだ時点で使える。加速構造・ray query・ray tracing pipeline・atomic float は
         // query_info で対応を調べてから要求する
-        let mut f12 = vk::PhysicalDeviceVulkan12Features::default().buffer_device_address(true);
+        // timelineSemaphore も 1.3 で必須（ビューアが、サンプルを積むキューと表示のキューの間で使う）
+        let mut f12 = vk::PhysicalDeviceVulkan12Features::default().buffer_device_address(true).timeline_semaphore(true);
         let mut f13 = vk::PhysicalDeviceVulkan13Features::default().synchronization2(true).maintenance4(true).dynamic_rendering(true);
         let mut fas = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default().acceleration_structure(true);
         let mut frq = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);

@@ -929,6 +929,21 @@ fn install_fonts(ctx: &egui::Context, lang: &str) {
     ctx.set_fonts(fonts);
 }
 
+/// 流したバッチ（サンプルを積んでトーンマッピングするコマンド）
+#[derive(Clone, Copy)]
+struct Batch {
+    /// タイムラインセマフォの値（Gpu::submitted）
+    value: u64,
+    /// 積むサンプルの数
+    add: u32,
+    /// トーンマッピングの出力の番号
+    slot: usize,
+    t0: Instant,
+}
+
+/// 表示用のトーンマッピングの出力の枚数。表示が読んでいる画像を、流しているバッチが書かないように順に使う
+const TONE_SLOTS: usize = 3;
+
 /// GPU 側の資源一式（ウィンドウができてから作る）
 struct Gpu {
     ctx: &'static Context,
@@ -944,11 +959,19 @@ struct Gpu {
     acquired: vk::Semaphore,
     fence: vk::Fence,
     /// サンプルを積むコマンド。表示とは別のキュー（ctx.render_queue。優先度が低い）へ流し、完了を待たずに次のフレームへ進む
-    /// （重いシーンでも画面と操作が止まらない）。終わるまでは累積の画像に触らない
+    /// （重いシーンでも画面と操作が止まらない）。終わるまでは累積の画像に触らない。
+    /// 最後にトーンマッピングまで済ませ（tone の slot 枚目の出力）、表示はその画像を貼るので、流している間も新しい画像が出る
     render_cmd: vk::CommandBuffer,
-    render_fence: vk::Fence,
-    /// 流したサンプルの数と時刻（まだ終わっていない）
-    in_flight: Option<(u32, Instant)>,
+    /// サンプルを積むバッチの完了（タイムラインセマフォ。値は流したバッチの通し番号）。表示はこれを待ってから出力を読む
+    timeline: vk::Semaphore,
+    /// 最後に流したバッチの番号と、そのトーンマッピングの出力
+    submitted: u64,
+    submitted_slot: usize,
+    /// 終わった最新のバッチの番号と、そのトーンマッピングの出力（表示が貼る画像）
+    completed: u64,
+    shown_slot: usize,
+    /// 流していて、まだ終わっていないバッチ
+    in_flight: Option<Batch>,
     /// サンプルを積む GPU 時間（render_cmd の最初と最後。キューが時刻を測れなければ使わない）
     timestamps: vk::QueryPool,
     timestamps_ok: bool,
@@ -1583,7 +1606,7 @@ impl App {
         let gpu_ref: &'static GpuScene<'static> = unsafe { &*(&*gpu as *const GpuScene<'static>) };
         let prog = progressive_or_pt(ctx, gpu_ref, self.prep.cfg.integrator, swap.extent.width, swap.extent.height, frame)?;
         self.prep.cfg.integrator = prog.integrator_kind(); // PT に代えたら、パネルにもそう出す
-        let tone = Tonemapper::new(ctx, prog.targets())?;
+        let tone = Tonemapper::with_outputs(ctx, prog.targets(), TONE_SLOTS)?;
         let egui_renderer = EguiRenderer::with_gpu_allocator(ctx.allocator.clone(), ctx.device.clone(), RenderMode::DynamicRendering(DynamicRendering { color_attachment_format: swap.format, depth_attachment_format: None, stencil_attachment_format: None }), EguiOptions { in_flight_frames: 1, srgb_framebuffer: false, ..Default::default() })
             .map_err(|e| format!("egui renderer: {e}"))?;
         let dev = &ctx.device;
@@ -1591,7 +1614,8 @@ impl App {
         let acquired = unsafe { dev.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) }.map_err(|e| format!("{e:?}"))?;
         let fence = unsafe { dev.create_fence(&vk::FenceCreateInfo::default(), None) }.map_err(|e| format!("{e:?}"))?;
         let render_cmd = unsafe { dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(ctx.render_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1)) }.map_err(|e| format!("{e:?}"))?[0];
-        let render_fence = unsafe { dev.create_fence(&vk::FenceCreateInfo::default(), None) }.map_err(|e| format!("{e:?}"))?;
+        let mut timeline_type = vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE).initial_value(0);
+        let timeline = unsafe { dev.create_semaphore(&vk::SemaphoreCreateInfo::default().push_next(&mut timeline_type), None) }.map_err(|e| format!("{e:?}"))?;
         let timestamps = unsafe { dev.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(2), None) }.map_err(|e| format!("{e:?}"))?;
         let props = unsafe { ctx.instance.get_physical_device_properties(ctx.physical) };
         let ts_period_ms = props.limits.timestamp_period as f64 * 1e-6;
@@ -1601,7 +1625,7 @@ impl App {
         info!("viewer: {}x{}, up to {} spp. mouse: left drag=rotate, click=select a part, Ctrl+click=focus, right/middle drag=pan, wheel=zoom; keys: {}", swap.extent.width, swap.extent.height, self.st.max_spp, keys.join(", "));
         install_fonts(&self.egui_ctx, &self.language);
         self.egui_state = Some(EguiState::new(self.egui_ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, None));
-        self.gpu = Some(Gpu { ctx, gpu, swap, prog, tone, denoiser: None, tone_denoised: None, egui_renderer, cmd, acquired, fence, render_cmd, render_fence, in_flight: None, timestamps, timestamps_ok, ts_period_ms });
+        self.gpu = Some(Gpu { ctx, gpu, swap, prog, tone, denoiser: None, tone_denoised: None, egui_renderer, cmd, acquired, fence, render_cmd, timeline, submitted: 0, submitted_slot: 0, completed: 0, shown_slot: 0, in_flight: None, timestamps, timestamps_ok, ts_period_ms });
         let hidden = self.vo.hidden || self.test.active();
         if let (true, false, Some(proxy)) = (self.vo.web_ui, hidden, self.proxy.clone()) {
             // WebView を作るのは最初のフレームを出してから（step_web_ui）
@@ -3049,7 +3073,7 @@ impl App {
         let (rw, rh) = if self.st.locked && self.video.is_none() { (t.width, t.height) } else { (rw, rh) };
         if rw != t.width || rh != t.height {
             g.prog.resize(rw, rh)?;
-            g.tone = Tonemapper::new(g.ctx, g.prog.targets())?;
+            g.tone = Tonemapper::with_outputs(g.ctx, g.prog.targets(), TONE_SLOTS)?;
             // ノイズ除去は新しい大きさで作り直す
             if g.denoiser.is_some() {
                 g.tone_denoised = None;
@@ -3146,17 +3170,20 @@ impl App {
     /// 流したサンプルが終わっていれば（wait なら終わるまで待って）、かかった時間を数え、次に流す数を決める
     fn poll_render(&mut self, wait: bool) {
         let Some(g) = self.gpu.as_mut() else { return };
-        let Some((add, t0)) = g.in_flight else { return };
+        let Some(Batch { value, add, slot, t0 }) = g.in_flight else { return };
         let dev = &g.ctx.device;
         // 待てない・状態を取れない（デバイスを失ったなど）ときは、終わったことにする（次の GPU の処理がエラーを出す）
-        let done = wait || unsafe { dev.get_fence_status(g.render_fence) }.unwrap_or(true);
         if wait {
-            let _ = unsafe { dev.wait_for_fences(&[g.render_fence], true, u64::MAX) };
+            let (sems, values) = ([g.timeline], [value]);
+            let _ = unsafe { dev.wait_semaphores(&vk::SemaphoreWaitInfo::default().semaphores(&sems).values(&values), u64::MAX) };
         }
+        let done = wait || unsafe { dev.get_semaphore_counter_value(g.timeline) }.map_or(true, |v| v >= value);
         if !done {
             return;
         }
         g.in_flight = None;
+        g.completed = value;
+        g.shown_slot = slot;
         let wall = t0.elapsed();
         let mut ts = [0u64; 2];
         let ts_ok = g.timestamps_ok && unsafe { dev.get_query_pool_results(g.timestamps, 0, &mut ts, vk::QueryResultFlags::TYPE_64) }.is_ok();
@@ -3191,11 +3218,15 @@ impl App {
         self.poll_render(true);
     }
 
-    /// add サンプルをサンプル用のキューへ流す（完了は待たない。poll_render で確かめる）
+    /// add サンプルをサンプル用のキューへ流す（完了は待たない。poll_render で確かめる）。
+    /// 最後に、次のトーンマッピングの出力へ、今の表示の設定でトーンマッピングする
     fn submit_render(&mut self, add: u32) -> Result<(), String> {
+        let (exposure, mode, glow) = (self.st.exposure, self.st.mode, self.st.glow_params());
         let g = self.gpu.as_mut().unwrap();
         let dev = &g.ctx.device;
         let cmd = g.render_cmd;
+        let slot = (g.submitted_slot + 1) % TONE_SLOTS;
+        let background = Background::for_display(g.prog.frame().transparent_background);
         unsafe {
             dev.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).map_err(|e| format!("{e:?}"))?;
             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(|e| format!("{e:?}"))?;
@@ -3209,14 +3240,35 @@ impl App {
             if g.timestamps_ok {
                 dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, g.timestamps, 1);
             }
-            dev.end_command_buffer(cmd).map_err(|e| format!("{e:?}"))?;
-            dev.reset_fences(&[g.render_fence]).map_err(|e| format!("{e:?}"))?;
-            let cmds = [cmd];
-            let si = vk::SubmitInfo::default().command_buffers(&cmds);
-            dev.queue_submit(g.ctx.render_queue, &[si], g.render_fence).map_err(|e| format!("vkQueueSubmit: {e:?}"))?;
         }
-        g.in_flight = Some((add, Instant::now()));
+        // 積んだ累積を読んでトーンマッピングする（表示のキューは、この出力をタイムラインセマフォを待ってから貼る）
+        let trace = g.ctx.trace_stages();
+        memory_barrier(dev, cmd, trace | vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_WRITE, vk::PipelineStageFlags2::COMPUTE_SHADER, vk::AccessFlags2::SHADER_STORAGE_READ);
+        g.tone.record_to(cmd, slot, exposure, mode, g.prog.xyz_output(), &glow, background);
+        let value = g.submitted + 1;
+        unsafe {
+            dev.end_command_buffer(cmd).map_err(|e| format!("{e:?}"))?;
+            let (cmds, signal, values) = ([cmd], [g.timeline], [value]);
+            let mut ts = vk::TimelineSemaphoreSubmitInfo::default().signal_semaphore_values(&values);
+            let si = vk::SubmitInfo::default().command_buffers(&cmds).signal_semaphores(&signal).push_next(&mut ts);
+            dev.queue_submit(g.ctx.render_queue, &[si], vk::Fence::null()).map_err(|e| format!("vkQueueSubmit: {e:?}"))?;
+        }
+        g.submitted = value;
+        g.submitted_slot = slot;
+        g.in_flight = Some(Batch { value, add, slot, t0: Instant::now() });
         Ok(())
+    }
+
+    /// このフレームでノイズ除去をかけたいか（流しているバッチがあればかけられないので、呼ぶ側が確かめる）。C++ 版と同じ間隔：
+    /// GPU：動かしている間は毎フレーム fast、止まったら 150 ms ごとに high、収束時にもう一度。
+    /// CPU：数秒かかり画面が止まるので、収束時（最大 spp に達したとき）と D キー／ボタンのときだけ high でかける
+    fn denoise_wanted(&self, samples: u32) -> bool {
+        let Some(g) = self.gpu.as_ref() else { return false };
+        let on_cpu = g.denoiser.as_ref().is_some_and(|d| d.device_name() == "CPU");
+        let moving = self.last_change_at.elapsed() < Duration::from_millis(300);
+        let max_spp = self.st.max_spp;
+        let due = if on_cpu { samples >= max_spp || self.st.req.denoise_now } else { moving || samples >= max_spp || self.last_denoise_at.elapsed() > Duration::from_millis(150) };
+        self.st.denoise && g.denoiser.is_some() && self.st.mode == DisplayMode::Beauty && samples > 0 && (self.denoised_epoch != self.accum_epoch || self.denoised_samples != samples) && due
     }
 
     /// 流したサンプルが終わっていれば画像を描き直し、（必要なら）ノイズ除去して、画像と操作パネルを表示してから、次のサンプルを流す。
@@ -3255,6 +3307,12 @@ impl App {
             self.settle_render();
             add = 0;
         }
+        // 表示は累積の画像を読まない（バッチの最後のトーンマッピングの出力を貼る）ので、すぐ次を流す。
+        // ただしノイズ除去をかけるフレームは、累積を読むので、表示の後に流す
+        if add > 0 && !self.denoise_wanted(samples) {
+            self.submit_render(add)?;
+            add = 0;
+        }
         let busy = self.gpu.as_ref().unwrap().in_flight.is_some();
 
         // 前の表示から画面の書き換えの間隔（の 85 %）が経つまで待つ。ノイズ除去などで遅れたフレームの後に続けて表示すると、
@@ -3287,15 +3345,13 @@ impl App {
             }
         }
 
-        // このフレームでノイズ除去するか（画像の表示のときだけ。サンプルを流している間はしない）。C++ 版と同じ間隔：
-        // GPU：動かしている間は毎フレーム fast、止まったら 150 ms ごとに high、収束時にもう一度。
-        // CPU：数秒かかり画面が止まるので、収束時（最大 spp に達したとき）と D キー／ボタンのときだけ high でかける
+        // このフレームでノイズ除去するか（画像の表示のときだけ。サンプルを流している間はしない。denoise_wanted）
         let on_cpu = g.denoiser.as_ref().is_some_and(|d| d.device_name() == "CPU");
         let moving = self.last_change_at.elapsed() < Duration::from_millis(300);
         let samples = g.prog.samples();
-        let due = if on_cpu { samples >= max_spp || self.st.req.denoise_now } else { moving || samples >= max_spp || self.last_denoise_at.elapsed() > Duration::from_millis(150) };
         let beauty = self.st.mode == DisplayMode::Beauty;
-        let want = !busy && self.st.denoise && g.denoiser.is_some() && beauty && samples > 0 && (self.denoised_epoch != self.accum_epoch || self.denoised_samples != samples) && due;
+        let want = !busy && self.denoise_wanted(samples);
+        let g = self.gpu.as_mut().unwrap();
         if !busy {
             self.st.req.denoise_now = false;
         }
@@ -3337,10 +3393,12 @@ impl App {
             }
             t.output()
         } else {
+            // 流していなければ、今の表示の設定でトーンマッピングし直す（一時停止中・積み終えた後も露出などがすぐ効く）。
+            // 流している間は、終わった最新のバッチがトーンマッピングした画像をそのまま貼る
             if !busy {
-                g.tone.record(cmd, self.st.exposure, self.st.mode, xyz, &self.st.glow_params(), background);
+                g.tone.record_to(cmd, g.shown_slot, self.st.exposure, self.st.mode, xyz, &self.st.glow_params(), background);
             }
-            g.tone.output()
+            g.tone.output_at(g.shown_slot)
         };
         let swap_img = g.swap.images[image_index as usize];
         let extent = g.swap.extent;
@@ -3390,11 +3448,16 @@ impl App {
         }
         unsafe { dev.end_command_buffer(cmd).map_err(|e| format!("{e:?}"))? };
 
-        let wait = [g.acquired];
-        let stages = [vk::PipelineStageFlags::TRANSFER];
+        // 終わった最新のバッチ（completed）を待つ：CPU で確かめた値なので待たずに通るが、描画のキューが書いた出力・累積を
+        // 表示のキューが読むための、キューの間のメモリの依存になる
+        let wait = [g.acquired, g.timeline];
+        let wait_values = [0, g.completed];
+        let stages = [vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::COMPUTE_SHADER];
         let cmds = [cmd];
         let signal = [g.swap.render_done[image_index as usize]];
-        let si = vk::SubmitInfo::default().wait_semaphores(&wait).wait_dst_stage_mask(&stages).command_buffers(&cmds).signal_semaphores(&signal);
+        let signal_values = [0];
+        let mut ts = vk::TimelineSemaphoreSubmitInfo::default().wait_semaphore_values(&wait_values).signal_semaphore_values(&signal_values);
+        let si = vk::SubmitInfo::default().wait_semaphores(&wait).wait_dst_stage_mask(&stages).command_buffers(&cmds).signal_semaphores(&signal).push_next(&mut ts);
         let t0 = Instant::now();
         unsafe {
             dev.reset_fences(&[g.fence]).map_err(|e| format!("{e:?}"))?;
@@ -3945,7 +4008,7 @@ pub fn run_viewer(vo: ViewOptions) -> anyhow::Result<i32> {
         ctx.wait_idle();
         unsafe {
             ctx.device.destroy_query_pool(g.timestamps, None);
-            ctx.device.destroy_fence(g.render_fence, None);
+            ctx.device.destroy_semaphore(g.timeline, None);
             ctx.device.destroy_fence(g.fence, None);
             ctx.device.destroy_semaphore(g.acquired, None);
         }
