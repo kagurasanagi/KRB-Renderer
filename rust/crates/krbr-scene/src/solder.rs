@@ -6,12 +6,12 @@
 //!   金属の部位が無いか、金属がパッドの上で断面を作らないモデルは、全部の部位で探す
 //! - リードの高さ：接地部の真上の金属の面（はんだが登れる高さ）
 //! - 上の面：その点の真上（u0 より上）で一番近いモデルの面（はんだが超えてはいけない高さ：部品の腹・曲がったリードの下）
-//! - 樹脂の中：一番近い面が金属でない部位の上向きの面（フラットリードの部品の本体の底のように、樹脂が基板に接している）
+//! - 樹脂の中：真上にある金属でない面の数が奇数（フラットリードの部品の本体の底のように、樹脂が基板に接している）
 //!
-//! 表面実装：はんだは金属の接地部に引き上げられ、離れるほど下がる凹んだ形 h = H' · (1 − d / L)²（d は一番近い接地部までの距離）。
-//! 際の高さ H' はそこのリードの高さ H まで（それより上には行かない）、ただし際の傾きが MAX_CONTACT_SLOPE を超えない高さまで。
-//! 広がる距離 L は、はんだの体積（パッドの面積 × メタルマスクの厚み × 溶けた後に残る割合）に合うように決める。樹脂の中に隠れる分は体積に数えない（そこでも高さは周りから続けるので、本体の縁で崖にならない）。
-//! パッドの縁では一番近い縁までの距離の SMD_EDGE_SLOPE 倍まで（丸く下がる）、電極の横の狭い帯では幅の SMD_SLOPE 倍まで（壁にしない）。
+//! 表面実装：溶けたはんだが落ち着いた形（平衡形状）を、高さの場として解く。表面の広さ・金属の壁に引かれる力（濡れ）・
+//! 圧力 × 体積 の和を最小にする形で、表面張力がつり合った滑らかな面になる。パッドの縁で止まり（レジストは濡れない）、
+//! 金属の壁はその高さに金属がある分だけ登り（チップ抵抗の樹脂の側面は登らない）、樹脂の壁・本体に覆われたところでは引かれない。
+//! 体積は パッドの面積 × メタルマスクの厚み × 溶けた後に残る割合 で、圧力で合わせる。リードの上面より上には行かない。
 //! スルーホール：ランドの幅に傾きを掛けた高さ（ピンの高さまで）から、ランドの縁へ下がる。
 //! どこでも上の面より上には出さないので、リードや部品を突き抜けない。
 //! 表面実装はペーストの層（F.Paste / B.Paste）があるパッドの、部品の面だけ。スルーホールは表と裏（レジストの開いた面）。
@@ -27,15 +27,6 @@ use krbr_kicad::{Board, Pad, PadType, Side};
 const STENCIL_MM: f64 = 0.12;
 /// はんだペーストのうち、溶けた後にはんだとして残る体積の割合（残りはフラックス）
 const PASTE_METAL: f64 = 0.5;
-/// 表面実装のはんだの高さの上限：接地部から縁までの幅（接地部までの距離 + 一番近い縁までの距離）× これ。チップ部品の横のように、
-/// 電極の際にパッドが少ししか残らないところで、はんだが壁のように立たないようにする
-const SMD_SLOPE: f64 = 1.0;
-/// 表面実装のはんだの接地部の際の傾きの上限。はんだが少なくて広がる距離 L が短いときは、リードの高さまで登らずに低くなる
-/// （際の高さ H' = min(H, L × MAX_CONTACT_SLOPE / 2)。(1 − d / L)² の際の傾きは 2H' / L）
-const MAX_CONTACT_SLOPE: f64 = 1.5;
-/// 表面実装のはんだの高さの上限：パッドの一番近い縁までの距離 × これ。つま先の盛りの脇（流れと平行な縁）が、
-/// 垂直な崖にならずに丸く下がるように
-const SMD_EDGE_SLOPE: f64 = 3.0;
 /// スルーホールのフィレットの傾き（高さ / ランドの幅）：はんだ面、部品面（部品面へは穴を通って少しだけ上がる）
 const THT_SLOPE_SOLDER_SIDE: f64 = 0.9;
 const THT_SLOPE_COMPONENT_SIDE: f64 = 0.4;
@@ -55,11 +46,15 @@ const GRID_DIVISIONS: f64 = 24.0;
 const MAX_POINTS: usize = 250_000;
 /// 表面実装のはんだが登れるかを確かめる高さの段の数（接地部からリードの上面まで）
 const CLIMB_LEVELS: usize = 12;
-/// 段の境目の段差をならす回数（3 × 3 の平均）
-const LEVEL_SMOOTHING: usize = 2;
-/// 接地部までの距離をならす回数（3 × 3 の平均。格子の点から測った距離の段差を、鏡のようなはんだに映さない）
-const DIST_SMOOTHING: usize = 2;
-
+/// 表面実装のはんだが金属の壁際で立ち上がる傾き（濡れの強さ。大きいほど壁を高く登る）
+const WALL_SLOPE: f64 = 2.0;
+/// 平衡形状の反復：過緩和の係数、止める変化（mm）、回数の上限、圧力の二分法の回数
+const SOLVER_OVERRELAXATION: f64 = 1.85;
+const SOLVER_TOLERANCE: f64 = 1e-6;
+const SOLVER_MAX_ITERATIONS: usize = 3000;
+const SOLVER_BISECTIONS: usize = 24;
+/// 本体に覆われたところの高さを、周りから続ける回数
+const COVERED_FILL: usize = 6;
 /// 部品ごとのフィレットのキャッシュ：保存の監視中に、パッドもモデルも動いていない部品を計算し直さない。
 /// キーは footprint_key。組み立てのたびに、使わなかった部品の分は捨てる
 #[derive(Default)]
@@ -253,28 +248,6 @@ fn remove_specks(mark: &[bool], g: &Lattice) -> Vec<bool> {
         .collect()
 }
 
-/// v を、印のある点どうしの 3 × 3 の平均で passes 回ならす（印の無い点は変えず、混ぜない）
-fn smooth(g: &Lattice, v: &mut [f64], mark: impl Fn(usize) -> bool, passes: usize) {
-    let (nx, ny) = (g.nx as i64, g.ny as i64);
-    for _ in 0..passes {
-        let prev = v.to_vec();
-        for k in (0..g.len()).filter(|&k| mark(k)) {
-            let (i, j) = ((k % g.nx) as i64, (k / g.nx) as i64);
-            let (mut sum, mut count) = (0.0, 0.0);
-            for b in (j - 1).max(0)..=(j + 1).min(ny - 1) {
-                for a in (i - 1).max(0)..=(i + 1).min(nx - 1) {
-                    let q = (b * nx + a) as usize;
-                    if mark(q) {
-                        sum += prev[q];
-                        count += 1.0;
-                    }
-                }
-            }
-            v[k] = sum / count;
-        }
-    }
-}
-
 /// 点から多角形の輪郭（線分）までの距離
 fn distance_to_rings(rings: &[Vec<DVec2>], p: DVec2) -> f64 {
     let mut best = f64::INFINITY;
@@ -287,6 +260,141 @@ fn distance_to_rings(rings: &[Vec<DVec2>], p: DVec2) -> f64 {
         }
     }
     best
+}
+
+/// 表面実装のはんだの平衡形状を解くための準備（pad_fillet の Kind::Smd）。未知数は「はんだを置ける点」
+/// （パッドの中で、接地部でも本体に覆われたところでもない点）の高さ
+struct Equilibrium {
+    cell: f64,
+    /// 未知数の点の格子の番号
+    nodes: Vec<usize>,
+    /// 点ごとの、隣の未知数の点の番号（nodes の添字）と、パッドの外（h = 0）に面した数・金属に面した数
+    neighbors: Vec<Vec<usize>>,
+    zeros: Vec<u32>,
+    walls: Vec<u32>,
+    /// 高さの上限
+    ceiling: Vec<f64>,
+    len: usize,
+}
+
+impl Equilibrium {
+    /// 圧力 p での形（h は前の形から始める）
+    fn relax(&self, p: f64, h: &mut [f64]) {
+        let pull = WALL_SLOPE * self.cell;
+        let press = p * self.cell * self.cell;
+        for _ in 0..SOLVER_MAX_ITERATIONS {
+            let mut change = 0.0f64;
+            for i in 0..self.nodes.len() {
+                let count = self.neighbors[i].len() as f64 + self.zeros[i] as f64;
+                let target = if count == 0.0 {
+                    if self.walls[i] > 0 { self.ceiling[i] } else { 0.0 }
+                } else {
+                    (self.neighbors[i].iter().map(|&q| h[q]).sum::<f64>() + pull * self.walls[i] as f64 - press) / count
+                };
+                let v = (h[i] + SOLVER_OVERRELAXATION * (target - h[i])).clamp(0.0, self.ceiling[i]);
+                change = change.max((v - h[i]).abs());
+                h[i] = v;
+            }
+            if change < SOLVER_TOLERANCE {
+                break;
+            }
+        }
+    }
+
+    fn volume(&self, h: &[f64]) -> f64 {
+        h.iter().sum::<f64>() * self.cell * self.cell
+    }
+
+    /// 体積が target になる圧力で解き、格子の点ごとの高さ（未知数でない点は 0）を返す
+    fn fit_volume(&self, target: f64) -> Vec<f64> {
+        let mut h = vec![0.0; self.nodes.len()];
+        if !self.nodes.is_empty() {
+            // 体積は圧力に対して減っていく。まず挟む範囲を探し、二分法で
+            let step = WALL_SLOPE / self.cell;
+            self.relax(0.0, &mut h);
+            let v0 = self.volume(&h);
+            let (mut lo, mut hi) = (0.0, 0.0);
+            if v0 > target {
+                hi = step;
+                for _ in 0..40 {
+                    self.relax(hi, &mut h);
+                    if self.volume(&h) <= target {
+                        break;
+                    }
+                    lo = hi;
+                    hi *= 2.0;
+                }
+            } else {
+                lo = -step;
+                for _ in 0..40 {
+                    self.relax(lo, &mut h);
+                    if self.volume(&h) >= target {
+                        break;
+                    }
+                    hi = lo;
+                    lo *= 2.0;
+                }
+            }
+            for _ in 0..SOLVER_BISECTIONS {
+                let m = 0.5 * (lo + hi);
+                self.relax(m, &mut h);
+                if self.volume(&h) > target {
+                    lo = m;
+                } else {
+                    hi = m;
+                }
+            }
+            self.relax(0.5 * (lo + hi), &mut h);
+        }
+        let mut out = vec![0.0; self.len];
+        for (i, &k) in self.nodes.iter().enumerate() {
+            out[k] = h[i];
+        }
+        out
+    }
+}
+
+/// 平衡形状の準備：inside はパッドの中、seeds は金属の接地部、covered は本体に覆われたところ、column は接地部の金属の柱の高さ、
+/// ceiling は点ごとの高さの上限
+fn solve_equilibrium(g: &Lattice, inside: &[bool], seeds: &[bool], covered: &[bool], column: &[f64], ceiling: impl Fn(usize) -> f64) -> Equilibrium {
+    let n = g.len();
+    let free = |k: usize| inside[k] && !seeds[k] && !covered[k];
+    let nodes: Vec<usize> = (0..n).filter(|&k| free(k)).collect();
+    let mut index = vec![usize::MAX; n];
+    for (i, &k) in nodes.iter().enumerate() {
+        index[k] = i;
+    }
+    let (mut neighbors, mut zeros, mut walls, mut ceilings) = (Vec::with_capacity(nodes.len()), Vec::with_capacity(nodes.len()), Vec::with_capacity(nodes.len()), Vec::with_capacity(nodes.len()));
+    for &k in &nodes {
+        let (i, j) = ((k % g.nx) as i64, (k / g.nx) as i64);
+        let (mut nb, mut z, mut w, mut wall_top) = (Vec::with_capacity(4), 0u32, 0u32, 0.0f64);
+        for (di, dj) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            let (a, b) = (i + di, j + dj);
+            if a < 0 || b < 0 || a >= g.nx as i64 || b >= g.ny as i64 {
+                z += 1;
+                continue;
+            }
+            let q = (b * g.nx as i64 + a) as usize;
+            if free(q) {
+                nb.push(index[q]);
+            } else if !inside[q] {
+                z += 1; // パッドの外：はんだはそこで止まる
+            } else if seeds[q] {
+                w += 1; // 金属：引かれ、その柱の高さまで登れる
+                wall_top = wall_top.max(column[q]);
+            }
+            // 本体に覆われたところ：濡れないので何もしない
+        }
+        let mut c = ceiling(k);
+        if w > 0 {
+            c = c.min(wall_top.max(0.0));
+        }
+        neighbors.push(nb);
+        zeros.push(z);
+        walls.push(w);
+        ceilings.push(c);
+    }
+    Equilibrium { cell: g.cell, nodes, neighbors, zeros, walls, ceiling: ceilings, len: n }
 }
 
 /// 三角形（パッドの座標系）を高さ u0 で切った断面の中にある格子の点（偶奇の規則）
@@ -459,22 +567,17 @@ fn pad_fillet(pad: &Pad, side: Side, kind: Kind, tris: &[[DVec3; 3]], metal: &[b
     walls.sort_by(f64::total_cmp);
     let lead = walls.get(((walls.len() as f64 * 0.95) as usize).min(walls.len().saturating_sub(1))).copied().unwrap_or(DEFAULT_WALL);
     // 一番近い接地部までの距離（格子の点から測るので、半分の間隔を引いて境目からの距離にする）
-    let mut d: Vec<f64> = (0..n).map(|k| near_contact[k].map_or(f64::INFINITY, |q| ((g.at(k) - g.at(q)).length() - 0.5 * cell).max(0.0))).collect();
-    let free = |k: usize| inside[k] && !seeds[k] && near_contact[k].is_some();
-    // 形にはならした距離、幅の上限にはならす前の距離（ならすと接地部の際で距離が大きくなり、狭い帯の上限が緩む）
-    let d_raw = d.clone();
-    smooth(&g, &mut d, free, DIST_SMOOTHING);
-    // 点ごとの登れる高さ：一番近い接地部のリードの高さ（隙間を残す）
-    let reach = |k: usize| near_contact[k].map_or(0.0, |q| (wall(q).min(lead) - CLEARANCE).max(0.0));
+    let d_raw: Vec<f64> = (0..n).map(|k| near_contact[k].map_or(f64::INFINITY, |q| ((g.at(k) - g.at(q)).length() - 0.5 * cell).max(0.0))).collect();
 
     let h: Vec<f64> = match kind {
         Kind::Smd => {
-            // 表面実装：はんだは金属に引き上げられ、離れるほど下がる凹んだ形 (1 − d / L)²。金属の断面を CLIMB_LEVELS 段の高さ u_j で取り、
-            // 点 k のはんだがその段まで登れるのは、その高さの金属が近いときだけ（樹脂の壁の横は登らない。チップ抵抗の側面など）：
-            //   h = max_j min(u_j, H' · (1 − d_j / L)²)   d_j は段 j の金属の断面までの距離、H' は際の高さ（一番上の段は H' まで）
-            // 際の高さ H' はリードの上面まで、ただし際の傾きが MAX_CONTACT_SLOPE を超えない高さまで。広がる距離 L を、はんだの体積が
-            // パッドの面積 × メタルマスクの厚み × 溶けた後に残る割合 に合うように決める（樹脂の本体に覆われた分は数えない）。
-            // 段の境目の段差は、まわりの点でならす。パッドの縁では丸く下がり、部品の腹・曲がったリードの下は突き抜けない
+            // 表面実装：溶けたはんだが落ち着いた形（平衡形状）。高さの場 h について、表面の広さ ½Σ(隣との差)²、
+            // 金属の壁に引かれる力（濡れ。壁際の傾きが WALL_SLOPE になる強さ）、圧力 p × 体積 の和を最小にする。
+            // - パッドの縁の外は h = 0（レジストは濡れないので、そこで止まる）
+            // - 金属の接地部（段ごとに金属の断面を取った柱）に隣り合う点は上へ引かれ、その柱の高さまで登れる
+            // - 樹脂の壁・本体に覆われたところは、引きも止めもしない（濡れない）
+            // - 部品の腹・曲がったリードの下は突き抜けず、リードの上面より上には行かない
+            // 体積（パッドの面積 × メタルマスクの厚み × 溶けた後に残る割合）は p で合わせる。上下の制限付きの反復（射影 SOR）で解く
             let top = (lead - CLEARANCE).max(u0);
             let climb: Vec<[DVec3; 3]> = tris
                 .iter()
@@ -486,69 +589,49 @@ fn pad_fillet(pad: &Pad, side: Side, kind: Kind, tris: &[[DVec3; 3]], metal: &[b
                     (qhi.y >= g.origin.y && qlo.y <= g_hi.y && qhi.z >= u0 && qlo.z <= top).then_some(q)
                 })
                 .collect();
-            // 段ごとの、金属の断面（樹脂に覆われたところを除く）までの距離。段 0 は接地部
-            let levels: Vec<f64> = (0..=CLIMB_LEVELS).map(|j| u0 + (top - u0) * j as f64 / CLIMB_LEVELS as f64).collect();
-            let dists: Vec<Vec<f64>> = levels
-                .iter()
-                .enumerate()
-                .map(|(j, &u)| {
-                    let mask: Vec<bool> = if j == 0 { seeds.clone() } else { slice_inside(&climb, u, &g).iter().enumerate().map(|(k, &m)| m && !covered[k]).collect() };
-                    let near = nearest_seed(&mask, &g);
-                    let mut dj: Vec<f64> = (0..n).map(|k| near[k].map_or(f64::INFINITY, |q| ((g.at(k) - g.at(q)).length() - 0.5 * cell).max(0.0))).collect();
-                    let finite: Vec<bool> = dj.iter().map(|d| d.is_finite()).collect();
-                    smooth(&g, &mut dj, |k| free(k) && finite[k], DIST_SMOOTHING);
-                    dj
-                })
-                .collect();
-            let cap = |k: usize| (SMD_SLOPE * (d_raw[k] + edge[k])).min(SMD_EDGE_SLOPE * edge[k]).min(above[k] - CLEARANCE).max(0.0);
-            let heights = |l: f64| -> Vec<f64> {
-                let h_edge = top.min(0.5 * MAX_CONTACT_SLOPE * l);
-                let mut h: Vec<f64> = (0..n)
-                    .map(|k| {
-                        if !inside[k] {
-                            return 0.0;
-                        }
-                        if seeds[k] {
-                            return reach(k).min(h_edge);
-                        }
-                        let mut best = 0.0f64;
-                        for (j, dj) in dists.iter().enumerate() {
-                            if levels[j] > h_edge || dj[k] >= l {
-                                continue;
-                            }
-                            let r = 1.0 - dj[k] / l;
-                            // 金属があると確かめた段の高さまで（一番上の段はリードの上面）
-                            let ceiling = if j + 1 < levels.len() { levels[j].min(h_edge) } else { h_edge };
-                            best = best.max((h_edge * r * r).min(ceiling));
-                        }
-                        best.min(cap(k))
-                    })
-                    .collect();
-                smooth(&g, &mut h, free, LEVEL_SMOOTHING);
-                for k in (0..n).filter(|&k| free(k)) {
-                    h[k] = h[k].min(cap(k));
-                }
-                h
-            };
-            let cell_area = cell * cell;
-            let target = inside.iter().filter(|&&b| b).count() as f64 * cell_area * STENCIL_MM * PASTE_METAL;
-            let volume = |l: f64| heights(l).iter().enumerate().filter(|&(k, _)| free(k) && !covered[k]).map(|(_, h)| h).sum::<f64>() * cell_area;
-            let l_max = 2.0 * size.length() + cell;
-            let l = if volume(l_max) <= target {
-                l_max
-            } else {
-                let (mut a, mut b) = (0.0, l_max);
-                for _ in 0..30 {
-                    let m = 0.5 * (a + b);
-                    if volume(m) < target {
-                        a = m;
-                    } else {
-                        b = m;
+            // 接地部の点ごとの、金属の柱の高さ：その点に金属の断面がある一番上の段（樹脂に覆われたところは除く）
+            let mut column = vec![0.0f64; n];
+            for k in (0..n).filter(|&k| seeds[k]) {
+                column[k] = u0.min(top);
+            }
+            for j in 1..=CLIMB_LEVELS {
+                let u = u0 + (top - u0) * j as f64 / CLIMB_LEVELS as f64;
+                for (k, &m) in slice_inside(&climb, u, &g).iter().enumerate() {
+                    if m && seeds[k] {
+                        column[k] = column[k].max(u);
                     }
                 }
-                0.5 * (a + b)
-            };
-            heights(l)
+            }
+            let sol = solve_equilibrium(&g, &inside, &seeds, &covered, &column, |k| (above[k] - CLEARANCE).min(top).max(0.0));
+            let cell_area = cell * cell;
+            let target = inside.iter().filter(|&&b| b).count() as f64 * cell_area * STENCIL_MM * PASTE_METAL;
+            let mut h = sol.fit_volume(target);
+            // 接地部は金属の柱の高さ（金属の中に隠れる）、本体に覆われたところは周りから続ける（本体の中に隠れる。縁で崖にしない）
+            for k in (0..n).filter(|&k| seeds[k]) {
+                h[k] = column[k];
+            }
+            let hidden = |k: usize| inside[k] && covered[k] && !seeds[k];
+            for _ in 0..COVERED_FILL {
+                let prev = h.clone();
+                for k in (0..n).filter(|&k| hidden(k)) {
+                    let (i, j) = ((k % g.nx) as i64, (k / g.nx) as i64);
+                    let (mut sum, mut count) = (0.0, 0.0);
+                    for (di, dj) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                        let (a, b) = (i + di, j + dj);
+                        if a >= 0 && b >= 0 && a < g.nx as i64 && b < g.ny as i64 {
+                            let q = (b * g.nx as i64 + a) as usize;
+                            if inside[q] {
+                                sum += prev[q];
+                                count += 1.0;
+                            }
+                        }
+                    }
+                    if count > 0.0 {
+                        h[k] = (sum / count).min((above[k] - CLEARANCE).max(0.0));
+                    }
+                }
+            }
+            h
         }
         Kind::Tht { solder_side } => {
             // スルーホール：ランドの幅に傾きを掛けた高さ（ピンの高さまで）から、ランドの縁へ下がる
@@ -747,7 +830,8 @@ mod tests {
         let (board, tris) = chip_board(true);
         let m = footprint_fillets(&board, 0, &tris, &[], PAD_TOP, DVec2::ZERO, 0);
         let side = m.positions.iter().filter(|p| p.x.abs() > 0.55 && p.x.abs() < 0.75 && p.z.abs() > 0.4).map(|p| p.y - PAD_TOP as f32).fold(0.0f32, f32::max);
-        assert!(side <= (SMD_SLOPE * 0.075) as f32 + 0.01, "beside the terminal {side}");
+        // 壁際の傾き WALL_SLOPE × 帯の幅くらい。電極の高さ（0.45 mm）まで立つ壁にはしない
+        assert!(side <= 0.2, "beside the terminal {side}");
         // つま先（0.4 mm 残る）は高く盛る
         let toe = m.positions.iter().filter(|p| p.x.abs() > 0.8 && p.z.abs() < 0.3).map(|p| p.y - PAD_TOP as f32).fold(0.0f32, f32::max);
         assert!(toe > 0.2, "toe {toe}");
