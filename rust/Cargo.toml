@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/krbr-core", "crates/krbr-pbr", "crates/krbr-kicad", "crates/krbr-model", "crates/krbr-geom", "crates/krbr-scene", "crates/krbr-render", "crates/krbr-capi", "crates/krbr-app", "krbr"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "MIT"
 

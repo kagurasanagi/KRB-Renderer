@@ -1,6 +1,6 @@
 {
   "name": "krbr-step",
-  "version-string": "0.2.1",
+  "version-string": "0.2.2",
   "builtin-baseline": "9e53836916341b64a14162a78ba9802488034a5f",
   "dependencies": [
     "glm",

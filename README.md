@@ -17,6 +17,7 @@ KiCad の 3D ビューアは編集の邪魔をしない簡素な表示なので�
 
 - KiCad で保存すると、すぐ描き直す
 - レジスト・金メッキ・シルクの質感、はんだの盛り、LED の発光まで写実的に描く
+- はんだの形を、パッドと部品の 3D モデルから自動で作る（表面張力の物理シミュレーションで作る高精度モードもある）
 - 部品をクリックして材質を変える
 - 画像（PNG / EXR。背景を透明にもできる）と、回転する動画（MP4）を書き出す
 - KiCad のツールバーのボタンから開く
@@ -99,6 +100,20 @@ KiCad を使わずに開くときは、`.kicad_pcb` を `KRB-Renderer.exe` か�
 
 解像度は 4K で十分です。8K は GPU のメモリを多く使います。
 
+### はんだの形
+
+はんだの盛り（フィレット）は、パッドとペーストの量、部品の 3D モデルの電極・リードから自動で作ります。作り方は 2 通りで、設定パネルの「はんだを高精度で作る」で切り替えます（基板ごとに覚えます）。
+
+- **標準**（既定）：電極・リードの際で高く、パッドの縁で 0 になる決め打ちの形。基板全体で 0.1 秒ほど
+- **高精度**：溶けたはんだが落ち着く形を、表面張力の物理シミュレーション（GPU）で求めます。銅と電極・リードには濡れ広がり、樹脂やレジストには付きません。初めての部品の種類は数十秒〜数分かかりますが、結果はキャッシュに残り、同じ部品はほかの基板でも使い回します
+
+| 標準 | 高精度 |
+|---|---|
+| <img src="docs/images/solder_standard_1.webp" alt="標準のはんだ：チップ部品と SOIC"> | <img src="docs/images/solder_precise_1.webp" alt="高精度のはんだ：同じ場所"> |
+| <img src="docs/images/solder_standard_2.webp" alt="標準のはんだ：水晶とチップ部品"> | <img src="docs/images/solder_precise_2.webp" alt="高精度のはんだ：同じ場所"> |
+
+詳しくは [使い方の詳細](docs/usage.md) の「はんだフィレット」と、[はんだのシミュレーション](docs/solder_simulation.md) を見てください。
+
 ## 困ったとき
 
 - **部品が箱のまま**：3D モデル（STEP / VRML）が見つかりません。KiCad の 3D モデルのライブラリを入れてください（開いた直後は、読み込みが終わるまで箱で出ます）。
@@ -113,6 +128,7 @@ KiCad を使わずに開くときは、`.kicad_pcb` を `KRB-Renderer.exe` か�
 - [使い方の詳細](docs/usage.md)：すべての操作、コマンドライン、設定ファイル、材質
 - [開発者向け](docs/development.md)：ビルド、テスト、配布の作り方
 - [内部の仕組み](docs/internals.md)：処理の流れ、描画のアルゴリズム
+- [はんだのシミュレーション](docs/solder_simulation.md)：高精度のはんだの方式、物性値、検証
 
 ## ライセンス
 
@@ -120,6 +136,6 @@ MIT。同梱のライブラリのライセンスは、zip の `licenses` フォ�
 
 ## English
 
-A real-time, GPU ray-traced viewer for KiCad 9 / 10 boards on Windows 10 / 11. It re-renders every time you save in KiCad, and can add a button to the PCB Editor toolbar.
+A real-time, GPU ray-traced viewer for KiCad 9 / 10 boards on Windows 10 / 11. It re-renders every time you save in KiCad, and can add a button to the PCB Editor toolbar. Solder fillets are shaped from the pads and 3D models; an optional precise mode solves the surface-tension equilibrium of the molten solder on the GPU.
 Download the zip from [Releases](https://github.com/kagurasanagi/KRB-Renderer/releases/latest), unzip it, and run `KRB-Renderer.exe`. Needs a GPU with Vulkan ray tracing (GeForce RTX recommended).
 The UI is available in English (Settings → Language). License: MIT.
