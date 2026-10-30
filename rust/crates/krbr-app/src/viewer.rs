@@ -1054,6 +1054,8 @@ struct App {
     outline: Option<Outline>,
     /// 材質の割り当てを書き換えた（材質の設定を読み直して組み直す）
     materials_dirty_files: bool,
+    /// シーンを作り直す設定（はんだの精度）を変えた。保存を待たずに、読み直さずに作り直す
+    options_dirty: bool,
     /// 材質の設定のファイルを、ほかから書き換えたか（手で直した設定ファイル、別に実行した krbr material set）
     material_files: MaterialFilesWatch,
     /// 選んだ部品の材質を書き込む先
@@ -1429,6 +1431,10 @@ impl App {
             self.prep.cfg.scene.substrate = c.scene.substrate.clone();
             update_substrate_material(&mut self.prep.scene, &self.prep.cfg.scene, &self.library);
         }
+        if self.prep.cfg.scene.solder_precise != c.scene.solder_precise {
+            self.prep.cfg.scene.solder_precise = c.scene.solder_precise;
+            self.options_dirty = true;
+        }
         // 視点（自動の構図）は描画サイズの縦横比で決まるので、戻したサイズで表示の矩形を決め直した後
         // （apply_view_requests）に合わせる。覚える値の基準もそこで取り直す
         self.st.req.reset_view = true;
@@ -1666,7 +1672,8 @@ impl App {
         }
         let text = self.text_dirty;
         let materials = self.materials_dirty_files;
-        if !saved && !text && !materials && models_done == self.models_seen {
+        let options = std::mem::take(&mut self.options_dirty);
+        if !saved && !text && !materials && !options && models_done == self.models_seen {
             return;
         }
         self.models_seen = models_done;
@@ -1674,7 +1681,7 @@ impl App {
         self.materials_dirty_files = false;
         let mut source = self.prep.source.take().unwrap();
         let old = self.prep.board.clone();
-        let options = self.prep.cfg.scene.clone();
+        let scene_options = self.prep.cfg.scene.clone();
         let saved_at = if saved { self.watcher.as_ref().and_then(|w| w.saved_at()) } else { None };
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -1685,7 +1692,7 @@ impl App {
             if materials {
                 source.materials = load_material_setup(&old.file); // 材質の割り当て（<名前>.krbr / model_map.toml）を書き換えた
             }
-            let result = if saved { source.reload(&old, &options).map(|(b, s, st)| (Some(b), s, st)) } else { Ok((None, source.build(&old, &options, true), ReloadStats::default())) };
+            let result = if saved { source.reload(&old, &scene_options).map(|(b, s, st)| (Some(b), s, st)) } else { Ok((None, source.build(&old, &scene_options, true), ReloadStats::default())) };
             let _ = tx.send(ReloadDone { source, saved, result, saved_at, text, materials });
         });
         self.reload_job = Some(rx);
@@ -2330,6 +2337,9 @@ impl App {
         if self.reload_job.is_some() {
             notes.push((fl!("status-reloading"), true));
         }
+        if let Some((done, total)) = krbr_scene::solder::progress() {
+            notes.push((fl!("status-solder", done = done.to_string(), total = total.to_string()), true));
+        }
         if self.text_job.busy() {
             notes.push((fl!("status-silk"), true));
         }
@@ -2527,7 +2537,7 @@ impl App {
     /// 描画ロック中に、解除したら反映するもの（保存された基板・変えた設定）があるか
     fn lock_pending(&self) -> bool {
         let c = &self.st.changed;
-        c.frame || c.materials || c.mask || c.integrator || c.visibility || self.st.req.reload || self.text_dirty || self.materials_dirty_files || !self.editor_actions.is_empty() || self.env_job.is_some() || self.board_dialog.is_some() || self.st.req.open_path.is_some() || self.reload_job.is_some()
+        c.frame || c.materials || c.mask || c.integrator || c.visibility || self.st.req.reload || self.text_dirty || self.materials_dirty_files || self.options_dirty || !self.editor_actions.is_empty() || self.env_job.is_some() || self.board_dialog.is_some() || self.st.req.open_path.is_some() || self.reload_job.is_some()
     }
 
     /// 描画ロック中に基板が保存された：読み直しは解除してから（そのときに読み直すよう覚えておく）
@@ -3992,6 +4002,7 @@ fn new_app(mut vo: ViewOptions, prep: PreparedScene) -> App {
         selected: None,
         outline: None,
         materials_dirty_files: false,
+        options_dirty: false,
         material_files,
         assign_scope: AssignScope::Part,
         library,

@@ -85,6 +85,7 @@ cargo test --release -p krbr-app --test material -- --ignored --nocapture    # �
 cargo test --release -p krbr-app --test denoise -- --ignored --nocapture     # ノイズ除去（GPU と OIDN の DLL が要る）
 cargo test -p krbr-app --lib kicad_cli -- --ignored --nocapture             # 線フォントの文字の書き出し（kicad-cli が要る）
 cargo test --release -p krbr-app --lib preview -- --ignored --nocapture      # 材質の見本を out/material_swatches.png に描く（目で確かめる）
+cargo test --release -p krbr-app --lib solder_gpu -- --ignored --nocapture   # はんだのシミュレーションの GPU 版が CPU 版と同じ形になるか（GPU が要る）
 cargo test --release -p krbr-model --test vrml_vs_step -- --ignored --nocapture # VRML と同名の STEP の比べ合わせ（下記）
 cargo run --release -- material bake-swatches                                # 組み込みの材質の見本を焼き直す（下記）
 ```
@@ -108,7 +109,7 @@ GPU を使わないもの（各 crate のユニットテスト）：
 - 距離場：半平面と 1 点からの距離、8bit への詰め方と範囲の上限
 - 分光の土台：等色関数と白色点、RGB → スペクトルの往復（誤差 0.008 以下、値が 0..1 に収まること）
 - VRML の読み込み（`vrml.rs`）：単位、DEF / USE、入れ子の Transform（center を含む）、凹んだ多角形の分割、creaseAngle の法線、ccw と鏡に映す配置での向き、ファイルの法線、PROTO などの読み飛ばし、VRML 1.0・壊れたファイルのエラー、.wrz。ライブラリのキャッシュ、resolver の候補の順
-- はんだフィレット（`solder.rs`）：チップ部品の盛りの形と体積、部品を突き抜けないこと、モデル・ペースト・接地が無いときは作らないこと、裏面、スルーホールの円すい
+- はんだフィレット（`solder.rs`、`solder_sim.rs`。[solder_simulation.md](solder_simulation.md)）：液滴の接触角（40°・110°）、金属の壁は引き上げ樹脂の壁は弾くこと、パッドの外へ出ないこと、チップ部品のつま先の盛り、樹脂の本体を登らないこと、浮いた部品、裏面、モデル・ペーストが無いときは作らないこと、回して動かした同じ部品は 1 回だけ解いて同じ形を動かすこと、スルーホールの円すい
 
 GPU の検証（`rust/crates/krbr-render/tests/`。基準の値は以前の C++ 版から引き継いだもの）：
 

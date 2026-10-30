@@ -265,6 +265,9 @@ struct RenderArgs {
     /// do not shape solder fillets (same as [solder] fillet = false)
     #[arg(long)]
     no_fillet: bool,
+    /// shape surface-mount solder with the surface-tension simulation (slow; same as [solder] precise = true)
+    #[arg(long, conflicts_with = "no_fillet")]
+    solder_precise: bool,
     /// camera lens: pinhole (default), thin, realistic
     #[arg(long, value_parser = parse_lens)]
     lens: Option<LensModel>,
@@ -405,6 +408,7 @@ impl RenderArgs {
             spectral: if self.spectral { Some(true) } else if self.rgb { Some(false) } else { None },
             transparent_background: if self.transparent { Some(true) } else if self.opaque { Some(false) } else { None },
             solder_fillet: self.no_fillet.then_some(false),
+            solder_precise: self.solder_precise.then_some(true),
             lens: self.lens,
             f_number: self.f_number,
             focal_length: self.focal_length,
@@ -678,6 +682,10 @@ fn main() {
         if p < 100 {
             info!("GPU usage limited to about {p} % ({}; --gpu-limit 100 to lift it)", if cli.gpu_limit.is_some() { "--gpu-limit" } else { "set in the viewer" });
         }
+    }
+    // 表面実装のはんだのシミュレーションは GPU で（デバイスは初めて解くときに作る。作れなければ CPU）
+    if matches!(cli.command, Command::Render(_) | Command::Watch(_) | Command::View(_) | Command::Bench { .. }) {
+        krbr_app::solder_gpu::install();
     }
     let result = match &cli.command {
         Command::Info { pcb, models } => cmd_info(pcb, *models),

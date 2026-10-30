@@ -1,0 +1,25 @@
+#version 460
+// はんだの GPU 版の小さな処理。mode 0：dst = 中身が p の点で 1（p = 255 なら固体の点で 1）、mode 1：dst += a · src
+#include "solder_common.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Push {
+    uvec2 src;
+    uvec2 dst;
+    uint n, mode, p;
+    float a;
+} pc;
+
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= pc.n) return;
+    if (pc.mode == 0u) {
+        uint ph = Uints(pc.src).v[k] & PHASE_MASK;
+        bool hit = pc.p == 255u ? ph != 0u : ph == pc.p;
+        Floats(pc.dst).v[k] = hit ? 1.0 : 0.0;
+    } else {
+        Floats d = Floats(pc.dst);
+        d.v[k] += pc.a * Floats(pc.src).v[k];
+    }
+}

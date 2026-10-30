@@ -259,6 +259,8 @@ pub struct ViewSettings<'a> {
     pub mask: String,
     /// 基材の材質の名前（空なら FR4）
     pub substrate: String,
+    /// 表面実装のはんだを高精度で作る
+    pub solder_precise: bool,
     pub fov_deg: f64,
     /// 視点の仰角・方位（注視点と距離は camera_of / set_camera で別に扱う）
     pub elevation_deg: f64,
@@ -283,6 +285,7 @@ impl<'a> ViewSettings<'a> {
             bump_intensity: cfg.scene.bump_intensity,
             mask: mask_spec(&cfg.scene),
             substrate: cfg.scene.substrate.clone(),
+            solder_precise: cfg.scene.solder_precise,
             fov_deg: cfg.fov_deg,
             elevation_deg: cfg.elevation_deg,
             azimuth_deg: cfg.azimuth_deg,
@@ -327,6 +330,7 @@ impl<'a> ViewSettings<'a> {
         t.insert("transparent_background".into(), Value::Boolean(self.transparent_background));
         t.insert("mask".into(), Value::String(self.mask.clone()));
         t.insert("substrate".into(), Value::String(self.substrate.clone()));
+        t.insert("solder_precise".into(), Value::Boolean(self.solder_precise));
         t.insert("lens_model".into(), Value::String(l.model.as_str().into()));
         t.insert("lens_blades".into(), Value::Integer(l.blades as i64));
         t.insert("lens_natural_vignetting".into(), Value::Boolean(l.natural_vignetting));
@@ -408,6 +412,9 @@ pub fn apply_view_values(cfg: &mut ProjectConfig, v: &ViewValues) {
     }
     if let Some(s) = v.get("substrate").and_then(|x| x.as_str()) {
         cfg.scene.substrate = s.to_string();
+    }
+    if let Some(b) = v.get("solder_precise").and_then(|x| x.as_bool()) {
+        cfg.scene.solder_precise = b;
     }
     // 設定ファイルと同じ色なら当て直さない（プリセットを当て直すと、設定ファイルに書いた粗さ・散乱がプリセットの値に戻る）
     if let Some(m) = v.get("mask").and_then(|x| x.as_str()).filter(|m| !m.is_empty() && *m != mask_spec(&cfg.scene)) {

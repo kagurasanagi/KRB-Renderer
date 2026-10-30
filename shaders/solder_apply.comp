@@ -1,0 +1,56 @@
+#version 460
+// しきい値 λ を当てて新しいはんだの割合 next = clamp((φ − λ) / width + ½, 0, 1)（はんだのままにする点は 1、候補でない点は 0）。
+// 変化 Σ|next − fill|、2 回前との差 Σ|next − before|（256 倍の整数）と、界面の点（0.02〜0.98）の数を sums に足す
+#include "solder_common.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Push {
+    uvec2 fill;
+    uvec2 before;
+    uvec2 next;
+    uvec2 phi;
+    uvec2 phase;
+    uvec2 sums;
+    uint n;
+    float lam, width;
+    uint pad0;
+} pc;
+
+shared float s_d1[256];
+shared float s_d2[256];
+shared uint s_itf[256];
+
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    uint t = gl_LocalInvocationID.x;
+    float d1 = 0.0, d2 = 0.0;
+    uint itf = 0u;
+    if (k < pc.n) {
+        float p = Floats(pc.phi).v[k];
+        bool sticky = (Uints(pc.phase).v[k] & STICKY) != 0u;
+        float v = sticky ? 1.0 : (p > 0.5 * NOT_CANDIDATE ? clamp((p - pc.lam) / pc.width + 0.5, 0.0, 1.0) : 0.0);
+        Floats(pc.next).v[k] = v;
+        d1 = abs(v - Floats(pc.fill).v[k]);
+        d2 = abs(v - Floats(pc.before).v[k]);
+        itf = (v > 0.02 && v < 0.98) ? 1u : 0u;
+    }
+    s_d1[t] = d1;
+    s_d2[t] = d2;
+    s_itf[t] = itf;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1) {
+        if (t < s) {
+            s_d1[t] += s_d1[t + s];
+            s_d2[t] += s_d2[t + s];
+            s_itf[t] += s_itf[t + s];
+        }
+        barrier();
+    }
+    if (t == 0u) {
+        Uints u = Uints(pc.sums);
+        atomicAdd(u.v[0], uint(s_d1[0] * 256.0 + 0.5));
+        atomicAdd(u.v[1], uint(s_d2[0] * 256.0 + 0.5));
+        atomicAdd(u.v[2], s_itf[0]);
+    }
+}

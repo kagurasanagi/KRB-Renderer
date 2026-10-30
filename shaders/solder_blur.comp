@@ -1,0 +1,41 @@
+#version 460
+// ガウス関数での畳み込みの 1 つの軸（solder_sim::blur と同じ：重みは窓の中で正規化。replicate なら範囲の外は端の値、そうでなければ 0）
+#include "solder_common.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Push {
+    uvec2 src;
+    uvec2 dst;
+    uint nx, ny, nz, axis;
+    float sigma;
+    uint replicate;
+} pc;
+
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    uint plane = pc.nx * pc.ny;
+    if (k >= plane * pc.nz) return;
+    uint i = k % pc.nx, j = (k / pc.nx) % pc.ny, l = k / plane;
+    int pos, len;
+    uint stride;
+    if (pc.axis == 0u) { pos = int(i); len = int(pc.nx); stride = 1u; }
+    else if (pc.axis == 1u) { pos = int(j); len = int(pc.ny); stride = pc.nx; }
+    else { pos = int(l); len = int(pc.nz); stride = plane; }
+    uint base = k - uint(pos) * stride;
+    int r = max(1, int(ceil(3.0 * pc.sigma)));
+    float inv = 1.0 / (2.0 * pc.sigma * pc.sigma);
+    Floats s = Floats(pc.src);
+    float acc = 0.0, wsum = 0.0;
+    for (int t = -r; t <= r; ++t) {
+        float w = exp(-float(t * t) * inv);
+        wsum += w;
+        int q = pos + t;
+        if (q < 0 || q >= len) {
+            if (pc.replicate == 0u) continue;
+            q = clamp(q, 0, len - 1);
+        }
+        acc += w * s.v[base + uint(q) * stride];
+    }
+    Floats(pc.dst).v[k] = acc / wsum;
+}

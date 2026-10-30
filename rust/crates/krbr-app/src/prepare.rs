@@ -56,6 +56,8 @@ pub struct RenderOptions {
     pub transparent_background: Option<bool>,
     /// はんだフィレットを作るか。None なら設定ファイルのまま
     pub solder_fillet: Option<bool>,
+    /// 表面実装のはんだを高精度で作るか。None なら設定ファイル（または覚えたもの）のまま
+    pub solder_precise: Option<bool>,
     /// None なら設定ファイル（または覚えたもの）のまま
     pub lens: Option<LensModel>,
     pub f_number: Option<f32>,
@@ -244,6 +246,9 @@ fn apply_command_line(cfg: &mut ProjectConfig, o: &RenderOptions) {
     }
     if let Some(v) = o.solder_fillet {
         cfg.scene.solder_fillet = v;
+    }
+    if let Some(v) = o.solder_precise {
+        cfg.scene.solder_precise = v;
     }
     if !o.substrate.is_empty() {
         cfg.scene.substrate = if o.substrate == "fr4" { String::new() } else { o.substrate.clone() };

@@ -18,3 +18,7 @@ clap = { version = "4", features = ["derive"] }
 
 [profile.release]
 debug = 1
+
+# はんだのシミュレーション（krbr-scene の solder_sim）は最適化しないと桁違いに遅い（cargo test でも数秒で終わるように）
+[profile.dev.package.krbr-scene]
+opt-level = 3

@@ -29,6 +29,8 @@ menu-show-smd = 表面実装の部品を表示
 menu-show-tht = スルーホールの部品を表示
 menu-show-solder = はんだフィレットを表示
 menu-show-solder-tip = パッドと 3D モデルから、はんだの盛りの形を作ります（パッドごとのペーストの量）。作らないようにするには <名前>.krbr の [solder] fillet = false。
+solder-precise = はんだを高精度で作る
+solder-precise-tip = オンにすると、表面実装のはんだを表面張力の物理シミュレーションで作ります（電極・パッドに濡れ、樹脂には付かない形。GPU で、初めての部品の種類は数十秒〜数分。結果はキャッシュに残り、同じ部品は使い回す）。オフは速い決め打ちの形。<名前>.krbr の [solder] precise、render の --solder-precise でも指定できます。
 menu-render-size = 描画のサイズ
 menu-render-ratio = レンダリングの比率
 menu-reset-view = 視点を戻す
@@ -131,6 +133,7 @@ status-camera-tip = 注視点からカメラまでの距離。位置は設定パ
 status-size-fixed-tip = 決まったサイズ（メニューの「表示」→「描画のサイズ」）
 status-size-fit-tip = ウィンドウに合わせる（3D 表示の領域 × レンダリングの比率）
 status-reloading = 基板を読み直し中...
+status-solder = はんだを計算中 { $done } / { $total } パッド
 status-silk = 線フォントの文字を書き出し中（kicad-cli）...
 status-meshing = 3D モデルを分割中: { $count }（それまでは箱で表示）
 duration-seconds = { $seconds } 秒

@@ -10,6 +10,7 @@ pub mod preview;
 pub mod prepare;
 pub mod remember;
 pub mod selection;
+pub mod solder_gpu;
 pub mod swapchain;
 pub mod swatch_cache;
 pub mod viewer;

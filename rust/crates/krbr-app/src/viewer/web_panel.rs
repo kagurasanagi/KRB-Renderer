@@ -286,6 +286,7 @@ impl App {
         board.push(slider("surface.bump", fl!("bump-intensity"), st.bump_intensity as f64, 0.0, 2.0, false, 2, ""));
         if cfg.scene.solder_fillet {
             board.push(tip(check("surface.solder", fl!("menu-show-solder"), st.show_solder), fl!("menu-show-solder-tip")));
+            board.push(tip(check("surface.solder_precise", fl!("solder-precise"), cfg.scene.solder_precise), fl!("solder-precise-tip")));
         }
         sections.push(self.group_section("board", fl!("panel-board"), None, board));
 
@@ -559,6 +560,12 @@ impl App {
             "surface.solder" => {
                 st.show_solder = b;
                 st.changed.visibility = true;
+            }
+            "surface.solder_precise" => {
+                if b != self.prep.cfg.scene.solder_precise {
+                    self.prep.cfg.scene.solder_precise = b;
+                    self.options_dirty = true;
+                }
             }
             "surface.bump" => {
                 st.bump_intensity = f as f32;

@@ -13,6 +13,7 @@ pub mod material_library;
 pub mod model_map;
 pub mod scene;
 pub mod solder;
+pub mod solder_sim;
 
 pub use camera::{frame_camera, orbit_camera, Camera, CameraParams};
 pub use config::{load_project_config, IntegratorKind, ProjectConfig};

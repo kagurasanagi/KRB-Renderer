@@ -29,6 +29,8 @@ menu-show-smd = Show surface-mount parts
 menu-show-tht = Show through-hole parts
 menu-show-solder = Show solder fillets
 menu-show-solder-tip = Solder fillets are shaped from the pads and the 3D models (the paste volume of each pad). Turn them off in <name>.krbr with [solder] fillet = false.
+solder-precise = Precise solder
+solder-precise-tip = Shapes surface-mount solder with a surface-tension simulation (wets terminals and pads, not plastic). Runs on the GPU; new part types take tens of seconds to minutes, and the results are cached and reused. Off: the fast shaped profile. Also [solder] precise in <name>.krbr and --solder-precise for render.
 menu-render-size = Rendering size
 menu-render-ratio = Rendering ratio
 menu-reset-view = Reset view
@@ -131,6 +133,7 @@ status-camera-tip = Distance from the orbit center to the camera. The position i
 status-size-fixed-tip = A fixed size (View → Rendering size in the menu)
 status-size-fit-tip = Fit to the window (3D view area × rendering ratio)
 status-reloading = Reloading the board...
+status-solder = Solving solder { $done } / { $total } pads
 status-silk = Exporting the stroke-font text (kicad-cli)...
 status-meshing = Meshing 3D models: { $count } (shown as boxes until then)
 duration-seconds = { $seconds } s

@@ -1,0 +1,49 @@
+#version 460
+// φ = 2 G * χ + 固体の項 − 重力（solder_sim::relax_cpu と同じ）。候補（空気で、はんだのままにする点でなく、はんだか、はんだに
+// 隣り合う点）だけ φ を書き、しきい値を求めるためのヒストグラムに数える。候補でない点は NOT_CANDIDATE
+#include "solder_common.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Push {
+    uvec2 fill;
+    uvec2 conv;
+    uvec2 ws;
+    uvec2 phase;
+    uvec2 phi;
+    uvec2 hist;
+    uint nx, ny, nz, nbins;
+    float grav, z0, cell, hist_lo;
+    float hist_scale;
+} pc;
+
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    uint plane = pc.nx * pc.ny;
+    if (k >= plane * pc.nz) return;
+    uint ph = Uints(pc.phase).v[k];
+    Floats phi = Floats(pc.phi);
+    if ((ph & PHASE_MASK) != 0u || (ph & STICKY) != 0u) {
+        phi.v[k] = NOT_CANDIDATE;
+        return;
+    }
+    uint i = k % pc.nx, j = (k / pc.nx) % pc.ny, l = k / plane;
+    Floats f = Floats(pc.fill);
+    const float SOME = 0.01;
+    bool near = f.v[k] > SOME
+        || (i > 0u && f.v[k - 1u] > SOME)
+        || (i + 1u < pc.nx && f.v[k + 1u] > SOME)
+        || (j > 0u && f.v[k - pc.nx] > SOME)
+        || (j + 1u < pc.ny && f.v[k + pc.nx] > SOME)
+        || (l > 0u && f.v[k - plane] > SOME)
+        || (l + 1u < pc.nz && f.v[k + plane] > SOME);
+    if (!near) {
+        phi.v[k] = NOT_CANDIDATE;
+        return;
+    }
+    float u = pc.z0 + float(l) * pc.cell;
+    float p = 2.0 * Floats(pc.conv).v[k] + Floats(pc.ws).v[k] - pc.grav * u;
+    phi.v[k] = p;
+    int bin = clamp(int((p - pc.hist_lo) * pc.hist_scale), 0, int(pc.nbins) - 1);
+    atomicAdd(Uints(pc.hist).v[bin], 1u);
+}

@@ -434,6 +434,7 @@ fn read_into(c: &mut ProjectConfig, r: &mut Reader, base: &Path) {
     }
     r.num(&["surface", "bump_intensity"], R::NON_NEGATIVE, &mut o.bump_intensity);
     r.boolean(&["solder", "fillet"], &mut o.solder_fillet);
+    r.boolean(&["solder", "precise"], &mut o.solder_precise);
     if let Some(v) = r.string(&["solder", "material"]) {
         o.solder_material = v.trim().to_string();
     }
